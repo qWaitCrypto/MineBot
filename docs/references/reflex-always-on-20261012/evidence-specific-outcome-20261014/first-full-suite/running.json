@@ -1,0 +1,8 @@
+{
+  "commit": "c0ed3ee9b6774d7377d8aac450e1e212cc7d0197",
+  "pid": 2290846,
+  "owner_pid": 2290610,
+  "started_at": 1791954815.3454843,
+  "command": "pytest tests/unit -q",
+  "concurrent_game_run": "specific-outcome"
+}

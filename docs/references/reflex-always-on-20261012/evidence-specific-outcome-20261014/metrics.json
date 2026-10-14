@@ -1,0 +1,409 @@
+{
+  "source": "/home/qwait/MineBot-always-on/logs/reflex-always-on-20261014-specific-outcome-rerun/trace.jsonl",
+  "seq_end": 1167,
+  "elapsed_s": 71.64936375617981,
+  "requests_by_purpose": {
+    "idle_frame": 20,
+    "running_frame": 25,
+    "plan_result_frame": 5
+  },
+  "requests_by_loop_state": {
+    "idle": 26,
+    "work": 24
+  },
+  "requests_by_state_and_purpose": {
+    "idle / idle_frame": 20,
+    "idle / running_frame": 1,
+    "work / running_frame": 24,
+    "idle / plan_result_frame": 5
+  },
+  "requests_per_session_minute_by_loop_state": {
+    "idle": 21.772698572852978,
+    "work": 20.097875605710442
+  },
+  "requests_per_minute_buckets": [
+    {
+      "minute_from_trace_start": 0,
+      "observed_seconds": 60,
+      "counts_by_state_and_purpose": {
+        "idle / idle_frame": 14,
+        "idle / running_frame": 1,
+        "work / running_frame": 24,
+        "idle / plan_result_frame": 5
+      }
+    },
+    {
+      "minute_from_trace_start": 1,
+      "observed_seconds": 11.64936375617981,
+      "counts_by_state_and_purpose": {
+        "idle / idle_frame": 6
+      }
+    }
+  ],
+  "loop_state_seconds": {
+    "idle": 49.87667632102966,
+    "work": 21.772687435150146
+  },
+  "requests_per_session_minute_by_purpose": {
+    "idle_frame": 16.748229671425367,
+    "running_frame": 20.935287089281708,
+    "plan_result_frame": 4.187057417856342
+  },
+  "requests_per_observed_body_work_minute_by_purpose": {
+    "idle_frame": 56.9773518536606,
+    "running_frame": 71.22168981707574,
+    "plan_result_frame": 14.24433796341515
+  },
+  "requests_during_observed_body_work_by_purpose": {
+    "running_frame": 21
+  },
+  "requests_during_observed_body_work_per_minute_by_purpose": {
+    "running_frame": 59.82621944634363
+  },
+  "rate_accounting": "Session-normalized rates include all requests. Total requests divided by observed work time measures overhead, not work cadence. The during-work rate restricts the numerator to requests inside observed native work intervals.",
+  "native_action_count": 5,
+  "observed_native_work_s": 21.060999870300293,
+  "idle_remainder_estimate_s": 50.58836388587952,
+  "supervised_body_call_s": 22.207000255584717,
+  "outside_supervised_body_calls_s": 49.44236350059509,
+  "supervised_call_timing_method": "Union of completed supervised-call intervals; includes tool execution and its settlement, not proof of physical movement. Native terminals missing elapsed_ms are excluded from native work time, never treated as proof that the Body was idle.",
+  "timing_method": "Union of native terminal elapsed_ms intervals, deduplicated by action_id; IPC receipt is the end timestamp. Idle remainder and no-question gap are estimates; missing native terminals are not counted as work.",
+  "longest_estimated_idle_without_any_question_s": 15.12351107597351,
+  "longest_idle_state_without_any_question_s": 15.12351107597351,
+  "idle_state_gap_method": "idle is the loop state, and may contain life movement. This measurement excludes dead/work intervals but includes session startup.",
+  "largest_request_gaps": [
+    {
+      "before_seq": 133,
+      "after_seq": 140,
+      "seconds": 15.12351107597351
+    },
+    {
+      "before_seq": 162,
+      "after_seq": 330,
+      "seconds": 3.0990383625030518
+    },
+    {
+      "before_seq": 986,
+      "after_seq": 1151,
+      "seconds": 3.048917055130005
+    },
+    {
+      "before_seq": 980,
+      "after_seq": 986,
+      "seconds": 3.0420520305633545
+    },
+    {
+      "before_seq": 877,
+      "after_seq": 971,
+      "seconds": 2.4585700035095215
+    },
+    {
+      "before_seq": 401,
+      "after_seq": 497,
+      "seconds": 1.746260404586792
+    },
+    {
+      "before_seq": 44,
+      "after_seq": 133,
+      "seconds": 1.6046459674835205
+    },
+    {
+      "before_seq": 497,
+      "after_seq": 515,
+      "seconds": 1.555558204650879
+    },
+    {
+      "before_seq": 669,
+      "after_seq": 763,
+      "seconds": 1.3222622871398926
+    },
+    {
+      "before_seq": 140,
+      "after_seq": 144,
+      "seconds": 1.2621607780456543
+    }
+  ],
+  "default_actions_requested": {
+    "look_player": 1
+  },
+  "default_actions_finished": {
+    "look_player": 1
+  },
+  "action_accounting": "Answers are semantic selections, default_requested is an attempted action dispatch, and native_action_count is observed execution. They are not interchangeable.",
+  "answers": {
+    "unknown": 2,
+    "stay": 17,
+    "look_player": 1,
+    "keep_going": 20,
+    "next_step": 3,
+    "repeat": 2
+  },
+  "unknown_ratio": 0.044444444444444446,
+  "decision_ms_median": 136.655,
+  "agent_delivery_counts": {
+    "reflex_fact_wake": 1
+  },
+  "agent_deliveries": [
+    {
+      "seq": 887,
+      "event": "reflex_fact_wake",
+      "reason": null,
+      "status": "completed",
+      "kind": null,
+      "activity_id": "activity-7a80b2f70d1847b0a825bb47b437302a",
+      "body_event": null
+    }
+  ],
+  "runtime_intent_wakes": [],
+  "wake_accounting": "reflex_death is a death observation, not a wake. agent_start counts launches/turn entries, not delivery events. Distinct deliveries can be coalesced into a model turn.",
+  "agent_start_count": 2,
+  "delegate_work": 1,
+  "read_reflex": 1,
+  "state_switches": 10,
+  "reaction_chains": [],
+  "deaths": [],
+  "last_body": {
+    "seq": 1155,
+    "pos": [
+      219.37,
+      121.0,
+      220.5
+    ],
+    "health": 20.0,
+    "food": 20,
+    "oxygen": 300
+  },
+  "agent_tool_calls": {
+    "delegate_work": 1,
+    "checkpoint_task": 1,
+    "write_memory": 1,
+    "read_task": 1,
+    "read_reflex": 1
+  },
+  "native_client_timing": {
+    "terminal_count": 5,
+    "observed_work_s": 21.060999870300293,
+    "remainder_s": 50.58836388587952,
+    "requests_during_work": {
+      "running_frame": 21
+    },
+    "requests_per_work_minute": {
+      "running_frame": 59.82621944634363
+    },
+    "limitation": "Native terminal interval union only; remainder includes Agent inference and settlement, not measured idle."
+  },
+  "move_terminals": [
+    {
+      "seq": 371,
+      "arguments": {
+        "pos": [
+          250,
+          121,
+          220
+        ],
+        "radius": 1
+      },
+      "success": true,
+      "reason": "arrived",
+      "position": [
+        249.30292228287635,
+        121.0,
+        220.5
+      ]
+    },
+    {
+      "seq": 627,
+      "arguments": {
+        "pos": [
+          190,
+          121,
+          220
+        ],
+        "radius": 1
+      },
+      "success": true,
+      "reason": "arrived",
+      "position": [
+        191.69220223030803,
+        121.0,
+        220.5001448375776
+      ]
+    },
+    {
+      "seq": 641,
+      "arguments": {
+        "pos": [
+          190,
+          121,
+          220
+        ],
+        "radius": 1
+      },
+      "success": true,
+      "reason": "arrived",
+      "position": [
+        191.59647547338471,
+        121.0,
+        220.50013502526903
+      ]
+    },
+    {
+      "seq": 654,
+      "arguments": {
+        "pos": [
+          190,
+          121,
+          220
+        ],
+        "radius": 1
+      },
+      "success": true,
+      "reason": "arrived",
+      "position": [
+        191.59647547338471,
+        121.0,
+        220.50013502526903
+      ]
+    },
+    {
+      "seq": 870,
+      "arguments": {
+        "pos": [
+          220,
+          121,
+          220
+        ],
+        "radius": 1
+      },
+      "success": true,
+      "reason": "arrived",
+      "position": [
+        219.27693052977457,
+        121.0,
+        220.50013502526903
+      ]
+    }
+  ],
+  "interrupt_frames": [
+    {
+      "seq": 330,
+      "body": "Health is 20 of 20. Hunger is 20 of 20. Air supply is full. The main hand holds wooden_sword.",
+      "inventory": "stone_sword 1, wooden_sword 1"
+    },
+    {
+      "seq": 339,
+      "body": "Health is 20 of 20. Hunger is 20 of 20. Air supply is full. The main hand holds nothing.",
+      "inventory": "stone_sword 1, wooden_sword 1"
+    },
+    {
+      "seq": 347,
+      "body": "Health is 20 of 20. Hunger is 20 of 20. Air supply is full. The main hand holds nothing.",
+      "inventory": "stone_sword 1"
+    },
+    {
+      "seq": 355,
+      "body": "Health is 20 of 20. Hunger is 20 of 20. Air supply is full. The main hand holds nothing.",
+      "inventory": "stone_sword 1"
+    },
+    {
+      "seq": 363,
+      "body": "Health is 20 of 20. Hunger is 20 of 20. Air supply is full. The main hand holds nothing.",
+      "inventory": "stone_sword 1"
+    },
+    {
+      "seq": 369,
+      "body": "Health is 20 of 20. Hunger is 20 of 20. Air supply is full. The main hand holds nothing.",
+      "inventory": "stone_sword 1"
+    },
+    {
+      "seq": 384,
+      "body": "Health is 20 of 20. Hunger is 20 of 20. Air supply is full. The main hand holds nothing.",
+      "inventory": "stone_sword 1"
+    },
+    {
+      "seq": 393,
+      "body": "Health is 20 of 20. Hunger is 20 of 20. Air supply is full. The main hand holds nothing.",
+      "inventory": "stone_sword 1"
+    },
+    {
+      "seq": 401,
+      "body": "Health is 20 of 20. Hunger is 20 of 20. Air supply is full. The main hand holds nothing.",
+      "inventory": "stone_sword 1"
+    },
+    {
+      "seq": 497,
+      "body": "Health is 20 of 20. Hunger is 20 of 20. Air supply is full. The main hand holds nothing.",
+      "inventory": "stone_sword 1"
+    },
+    {
+      "seq": 515,
+      "body": "Health is 20 of 20. Hunger is 20 of 20. Air supply is full. The main hand holds nothing.",
+      "inventory": "stone_sword 1"
+    },
+    {
+      "seq": 594,
+      "body": "Health is 20 of 20. Hunger is 20 of 20. Air supply is full. The main hand holds nothing.",
+      "inventory": "stone_sword 1"
+    },
+    {
+      "seq": 603,
+      "body": "Health is 20 of 20. Hunger is 20 of 20. Air supply is full. The main hand holds nothing.",
+      "inventory": "stone_sword 1"
+    },
+    {
+      "seq": 611,
+      "body": "Health is 20 of 20. Hunger is 20 of 20. Air supply is full. The main hand holds nothing.",
+      "inventory": "stone_sword 1"
+    },
+    {
+      "seq": 620,
+      "body": "Health is 20 of 20. Hunger is 20 of 20. Air supply is full. The main hand holds nothing.",
+      "inventory": "stone_sword 1"
+    },
+    {
+      "seq": 628,
+      "body": "Health is 20 of 20. Hunger is 20 of 20. Air supply is full. The main hand holds nothing.",
+      "inventory": "stone_sword 1"
+    },
+    {
+      "seq": 643,
+      "body": "Health is 20 of 20. Hunger is 20 of 20. Air supply is full. The main hand holds nothing.",
+      "inventory": "stone_sword 1"
+    },
+    {
+      "seq": 656,
+      "body": "Health is 20 of 20. Hunger is 20 of 20. Air supply is full. The main hand holds nothing.",
+      "inventory": "stone_sword 1"
+    },
+    {
+      "seq": 669,
+      "body": "Health is 20 of 20. Hunger is 20 of 20. Air supply is full. The main hand holds nothing.",
+      "inventory": "stone_sword 1"
+    },
+    {
+      "seq": 763,
+      "body": "Health is 20 of 20. Hunger is 20 of 20. Air supply is full. The main hand holds nothing.",
+      "inventory": "stone_sword 1"
+    },
+    {
+      "seq": 846,
+      "body": "Health is 20 of 20. Hunger is 20 of 20. Air supply is full. The main hand holds nothing.",
+      "inventory": "stone_sword 1"
+    },
+    {
+      "seq": 855,
+      "body": "Health is 20 of 20. Hunger is 20 of 20. Air supply is full. The main hand holds nothing.",
+      "inventory": "stone_sword 1"
+    },
+    {
+      "seq": 863,
+      "body": "Health is 20 of 20. Hunger is 20 of 20. Air supply is full. The main hand holds nothing.",
+      "inventory": "stone_sword 1"
+    },
+    {
+      "seq": 868,
+      "body": "Health is 20 of 20. Hunger is 20 of 20. Air supply is full. The main hand holds nothing.",
+      "inventory": "stone_sword 1"
+    }
+  ]
+}

@@ -1,0 +1,441 @@
+[
+  {
+    "case": "player-handler-fixed:333",
+    "expected": "keep_going",
+    "recorded": "keep_going",
+    "baseline": "keep_going",
+    "changed": false,
+    "distribution": {
+      "keep_going": 12
+    },
+    "unique_orders": 12,
+    "hits": 12
+  },
+  {
+    "case": "player-handler-fixed:862",
+    "expected": "keep_going",
+    "recorded": "next_step",
+    "baseline": "next_step",
+    "changed": true,
+    "distribution": {
+      "keep_going": 12
+    },
+    "unique_orders": 12,
+    "hits": 12
+  },
+  {
+    "case": "life-30-final-v2:4863",
+    "expected": "next_step",
+    "recorded": "next_step",
+    "baseline": "next_step",
+    "changed": true,
+    "distribution": {
+      "next_step": 12
+    },
+    "unique_orders": 6,
+    "hits": 12
+  },
+  {
+    "case": "running:471",
+    "expected": "keep_going",
+    "recorded": null,
+    "baseline": "keep_going",
+    "changed": false,
+    "distribution": {
+      "keep_going": 12
+    },
+    "unique_orders": 2,
+    "hits": 12
+  },
+  {
+    "case": "running:957",
+    "expected": "keep_going",
+    "recorded": null,
+    "baseline": "keep_going",
+    "changed": true,
+    "distribution": {
+      "keep_going": 12
+    },
+    "unique_orders": 6,
+    "hits": 12
+  },
+  {
+    "case": "running:1479",
+    "expected": "keep_going",
+    "recorded": null,
+    "baseline": "keep_going",
+    "changed": false,
+    "distribution": {
+      "keep_going": 12
+    },
+    "unique_orders": 2,
+    "hits": 12
+  },
+  {
+    "case": "running:2881",
+    "expected": "keep_going",
+    "recorded": null,
+    "baseline": "keep_going",
+    "changed": true,
+    "distribution": {
+      "keep_going": 12
+    },
+    "unique_orders": 6,
+    "hits": 12
+  },
+  {
+    "case": "running:3237",
+    "expected": "keep_going",
+    "recorded": null,
+    "baseline": "keep_going",
+    "changed": false,
+    "distribution": {
+      "keep_going": 12
+    },
+    "unique_orders": 6,
+    "hits": 12
+  },
+  {
+    "case": "running:3241",
+    "expected": "keep_going",
+    "recorded": null,
+    "baseline": "keep_going",
+    "changed": false,
+    "distribution": {
+      "keep_going": 12
+    },
+    "unique_orders": 6,
+    "hits": 12
+  },
+  {
+    "case": "running:3245",
+    "expected": "keep_going",
+    "recorded": null,
+    "baseline": "keep_going",
+    "changed": false,
+    "distribution": {
+      "keep_going": 12
+    },
+    "unique_orders": 6,
+    "hits": 12
+  },
+  {
+    "case": "running:3249",
+    "expected": "keep_going",
+    "recorded": null,
+    "baseline": "keep_going",
+    "changed": false,
+    "distribution": {
+      "keep_going": 12
+    },
+    "unique_orders": 6,
+    "hits": 12
+  },
+  {
+    "case": "running:3253",
+    "expected": "keep_going",
+    "recorded": null,
+    "baseline": "keep_going",
+    "changed": false,
+    "distribution": {
+      "keep_going": 12
+    },
+    "unique_orders": 6,
+    "hits": 12
+  },
+  {
+    "case": "running:3257",
+    "expected": "keep_going",
+    "recorded": null,
+    "baseline": "keep_going",
+    "changed": false,
+    "distribution": {
+      "keep_going": 12
+    },
+    "unique_orders": 6,
+    "hits": 12
+  },
+  {
+    "case": "running:3268",
+    "expected": null,
+    "recorded": null,
+    "baseline": "keep_going",
+    "changed": false,
+    "distribution": {
+      "keep_going": 12
+    },
+    "unique_orders": 6,
+    "hits": null
+  },
+  {
+    "case": "running:3375",
+    "expected": "keep_going",
+    "recorded": null,
+    "baseline": "keep_going",
+    "changed": false,
+    "distribution": {
+      "keep_going": 12
+    },
+    "unique_orders": 6,
+    "hits": 12
+  },
+  {
+    "case": "running:3380",
+    "expected": "keep_going",
+    "recorded": null,
+    "baseline": "keep_going",
+    "changed": false,
+    "distribution": {
+      "keep_going": 12
+    },
+    "unique_orders": 6,
+    "hits": 12
+  },
+  {
+    "case": "running:3482",
+    "expected": null,
+    "recorded": null,
+    "baseline": "next_step",
+    "changed": false,
+    "distribution": {
+      "next_step": 4,
+      "call_agent": 4,
+      "keep_going": 4
+    },
+    "unique_orders": 12,
+    "hits": null
+  },
+  {
+    "case": "running:4965",
+    "expected": "keep_going",
+    "recorded": null,
+    "baseline": "keep_going",
+    "changed": true,
+    "distribution": {
+      "keep_going": 12
+    },
+    "unique_orders": 6,
+    "hits": 12
+  },
+  {
+    "case": "plan_result:596",
+    "expected": null,
+    "recorded": null,
+    "baseline": "call_agent",
+    "changed": false,
+    "distribution": {
+      "call_agent": 12
+    },
+    "unique_orders": 1,
+    "hits": null
+  },
+  {
+    "case": "plan_result:1511",
+    "expected": null,
+    "recorded": null,
+    "baseline": "next_step",
+    "changed": false,
+    "distribution": {
+      "next_step": 12
+    },
+    "unique_orders": 6,
+    "hits": null
+  },
+  {
+    "case": "plan_result:1523",
+    "expected": null,
+    "recorded": null,
+    "baseline": "repeat",
+    "changed": false,
+    "distribution": {
+      "repeat": 12
+    },
+    "unique_orders": 2,
+    "hits": null
+  },
+  {
+    "case": "plan_result:1538",
+    "expected": null,
+    "recorded": null,
+    "baseline": "next_step",
+    "changed": false,
+    "distribution": {
+      "next_step": 12
+    },
+    "unique_orders": 6,
+    "hits": null
+  },
+  {
+    "case": "plan_result:1552",
+    "expected": null,
+    "recorded": null,
+    "baseline": "next_step",
+    "changed": false,
+    "distribution": {
+      "next_step": 12
+    },
+    "unique_orders": 6,
+    "hits": null
+  },
+  {
+    "case": "plan_result:2450",
+    "expected": null,
+    "recorded": null,
+    "baseline": "next_step",
+    "changed": false,
+    "distribution": {
+      "next_step": 12
+    },
+    "unique_orders": 6,
+    "hits": null
+  },
+  {
+    "case": "plan_result:2562",
+    "expected": null,
+    "recorded": null,
+    "baseline": "next_step",
+    "changed": false,
+    "distribution": {
+      "next_step": 12
+    },
+    "unique_orders": 6,
+    "hits": null
+  },
+  {
+    "case": "plan_result:2712",
+    "expected": null,
+    "recorded": null,
+    "baseline": "repeat",
+    "changed": false,
+    "distribution": {
+      "repeat": 12
+    },
+    "unique_orders": 2,
+    "hits": null
+  },
+  {
+    "case": "plan_result:2720",
+    "expected": null,
+    "recorded": null,
+    "baseline": "call_agent",
+    "changed": false,
+    "distribution": {
+      "call_agent": 6,
+      "repeat": 6
+    },
+    "unique_orders": 2,
+    "hits": null
+  },
+  {
+    "case": "plan_result:3009",
+    "expected": null,
+    "recorded": null,
+    "baseline": "next_step",
+    "changed": false,
+    "distribution": {
+      "next_step": 12
+    },
+    "unique_orders": 6,
+    "hits": null
+  },
+  {
+    "case": "plan_result:3024",
+    "expected": null,
+    "recorded": null,
+    "baseline": "next_step",
+    "changed": false,
+    "distribution": {
+      "next_step": 12
+    },
+    "unique_orders": 6,
+    "hits": null
+  },
+  {
+    "case": "plan_result:3112",
+    "expected": null,
+    "recorded": null,
+    "baseline": "next_step",
+    "changed": false,
+    "distribution": {
+      "next_step": 12
+    },
+    "unique_orders": 6,
+    "hits": null
+  },
+  {
+    "case": "plan_result:3785",
+    "expected": null,
+    "recorded": null,
+    "baseline": "repeat",
+    "changed": false,
+    "distribution": {
+      "repeat": 6,
+      "equip:wooden_pickaxe": 6
+    },
+    "unique_orders": 6,
+    "hits": null
+  },
+  {
+    "case": "plan_result:3805",
+    "expected": null,
+    "recorded": null,
+    "baseline": "repeat",
+    "changed": false,
+    "distribution": {
+      "repeat": 6,
+      "equip:wooden_pickaxe": 6
+    },
+    "unique_orders": 6,
+    "hits": null
+  },
+  {
+    "case": "plan_result:3825",
+    "expected": null,
+    "recorded": null,
+    "baseline": "equip:wooden_pickaxe",
+    "changed": false,
+    "distribution": {
+      "equip:wooden_pickaxe": 8,
+      "repeat": 4
+    },
+    "unique_orders": 6,
+    "hits": null
+  },
+  {
+    "case": "plan_result:3845",
+    "expected": null,
+    "recorded": null,
+    "baseline": "call_agent",
+    "changed": false,
+    "distribution": {
+      "call_agent": 4,
+      "equip:wooden_pickaxe": 8
+    },
+    "unique_orders": 6,
+    "hits": null
+  },
+  {
+    "case": "broken-tool-frame-v3",
+    "expected": "equip:stone_sword",
+    "recorded": "equip:stone_sword",
+    "baseline": "equip:stone_sword",
+    "changed": false,
+    "distribution": {
+      "equip:stone_sword": 12
+    },
+    "unique_orders": 2,
+    "hits": 12
+  },
+  {
+    "case": "unrelated-frame",
+    "expected": "call_agent",
+    "recorded": "equip:stone_sword",
+    "baseline": "equip:stone_sword",
+    "changed": true,
+    "distribution": {
+      "call_agent": 12
+    },
+    "unique_orders": 6,
+    "hits": 12
+  }
+]
