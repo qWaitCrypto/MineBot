@@ -57,6 +57,9 @@ def test_recorded_raw_running_frame_recompiles_the_sent_request_in_the_same_orde
             supervision_context=inputs["supervision_context"])
     request.pop("_request_chars", None)
     request.pop("_request_chars_before", None)
+    # The running frame's own "is the intent shown?" request is recorded
+    # beside the main one and recompiles the same way.
+    assert encoded(request.pop("_done")) == encoded(record["done_request"])
     assert encoded(request) == encoded(client.sent[0])
     assert encoded(record["request"]) == encoded(client.sent[0])
 

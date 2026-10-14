@@ -363,8 +363,11 @@ def tool_is_enabled(
 
 
 INTENT_DESCRIPTION = (
-    "The result this call should achieve, not what you are thinking. "
-    "Good: 'have 4 logs in the inventory'. Bad: 'I will try the trees first'."
+    "The result this call should achieve, not what you are thinking, "
+    "written in English as facts the Body reports: inventory item ids and counts, the item held in "
+    "the main hand, or a position or height. Use the item ids the inventory shows. "
+    "Good: 'at least 4 oak_log in the inventory', 'stone_pickaxe held in the main hand', "
+    "'standing at y 70 or higher'. Bad: 'I will try the trees first', 'back on open ground'."
 )
 
 

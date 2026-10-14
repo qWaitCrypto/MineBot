@@ -28,7 +28,7 @@ def test_real_running_inputs_compile_to_the_exact_offline_verified_requests():
         request=compiler._question(case['call_id'],tool,case['params'],execution,
             idle_s=case['idle_s'],purpose=case['purpose'],options=options,
             supervision_context=case['supervision_context'])
-        request.pop('_request_chars',None);request.pop('_request_chars_before',None)
+        request.pop('_request_chars',None);request.pop('_request_chars_before',None);done=request.pop('_done',None)
         # Keep the historical fixture intact. The only new fact is the
         # recorded main hand, omitted by the original sentence compiler.
         expected=main_hand_beside_inventory(case['expected_request'],execution.get('facts',{}))
@@ -36,7 +36,10 @@ def test_real_running_inputs_compile_to_the_exact_offline_verified_requests():
         # protective calls are not asked it. All facts stay as recorded.
         context=case['supervision_context']
         if context.get('intent') and not context.get('is_reflex_action'):
-            expected=intent_question_while_running(expected,context['intent'])
+            expected,expected_done=intent_question_while_running(expected,context['intent'])
+            assert done==expected_done,case['seq']
+        else:
+            assert done is None,case['seq']
         assert request==expected,case['seq']
         assert json.dumps(request,ensure_ascii=False,separators=(',',':')) == json.dumps(
             expected,ensure_ascii=False,separators=(',',':')),case['seq']

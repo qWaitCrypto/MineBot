@@ -245,7 +245,7 @@ class CallSupervisor:
             )
         request: dict[str, Any] = {"state": state, "questions": rq.frame_questions(
             options, protecting=bool((supervision_context or {}).get("is_reflex_action")),
-            acting_for_intent=running and bool(intent), intent=intent,
+            acting_for_intent=running and bool(intent),
             interrupt=(supervision_context or {}).get("interrupt_when") if running else None)}
         if (supervision_context or {}).get("is_life_action"):
             request = rq.idle_question(facts, options)
@@ -255,6 +255,10 @@ class CallSupervisor:
         # Private values, removed before the request reaches Decision.
         request["_request_chars_before"] = size
         request["_request_chars"] = size
+        if (running and intent and not (supervision_context or {}).get("is_life_action")
+                and not (supervision_context or {}).get("is_reflex_action")):
+            # Whether the intent is reached: its own request, asked by judge.
+            request["_done"] = rq.done_question(state, intent)
         return request
 
     async def judge(
@@ -280,13 +284,14 @@ class CallSupervisor:
         )) if question is not None else 0
         request_chars_before = int(request.pop("_request_chars_before", compiled_chars))
         request_chars = int(request.pop("_request_chars", request_chars_before))
+        done_request = request.pop("_done", None)
         fact_revision = execution.get("fact_revision")
         self.runtime.trace.emit(
             "call_supervision_request", tool_call_id=call_id, tool=tool_name,
             purpose=purpose, idle_s=round(idle_s, 3), fact_revision=fact_revision,
             loop_state=getattr(self, "loop_state", None),
             request_chars_before=request_chars_before, request_chars=request_chars,
-            request=request,
+            request=request, done_request=done_request,
             frame_input=execution.get("_frame_input", {"execution": dict(execution)}),
             compiler_input={"params": dict(params), "supervision_context": dict(supervision_context or {}),
                             "decision_context": copy.deepcopy(dict(decision_context or {})),
@@ -297,18 +302,26 @@ class CallSupervisor:
         )
         started = time.monotonic()
         raw: dict[str, Any] | None = None
+        done_raw: dict[str, Any] | None = None
         try:
             choice = rq.only_option(request["questions"])
             if choice is None:
                 answer = await self._client.ask(request, priority=DecisionPriority.SUPERVISION)
                 raw = answer.raw
                 choice = rq.frame_choice(raw, request["questions"])
+            # Danger is read first; otherwise the separate intent question
+            # decides whether this work moves on to its next step.
+            if done_request is not None and choice != "unknown" and not rq.in_danger(raw, request["questions"]):
+                done = await self._client.ask(done_request, priority=DecisionPriority.SUPERVISION)
+                done_raw = done.raw
+                shown = rq.done_choice(done_raw)
+                choice = "unknown" if shown is None else "next_step" if shown == "shown" else choice
         except Exception:
             choice = "unknown"
         elapsed = time.monotonic() - started
         self.runtime.trace.emit(
             "call_supervision_result", tool_call_id=call_id, tool=tool_name,
-            purpose=purpose, response=raw, choice=choice,
+            purpose=purpose, response=raw, done_response=done_raw, choice=choice,
             unknown=choice == "unknown", elapsed_s=elapsed,
             decision_ms=round(elapsed * 1000.0, 3), fact_revision=fact_revision,
         )

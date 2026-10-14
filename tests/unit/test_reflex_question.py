@@ -185,36 +185,42 @@ def test_result_report_is_a_concrete_thing_to_do_not_a_verdict():
 
 
 @pytest.mark.parametrize("next_call", ["", "equip_item(item=stone_sword)"])
-def test_running_work_asks_separately_whether_the_facts_show_the_intent(next_call):
+def test_running_work_does_not_offer_next_step_beside_keep_going(next_call):
     # Live seq499/1978/3913: asked beside "keep going", the next step was
     # chosen at 3 of 5 logs, 3 of 12 coal and an unheld pickaxe.
-    intent = "背包里有 1 把 wooden_pickaxe 并已装备到主手"
-    options = rq.frame_options(facts={}, intent=intent, running=True, next_call=next_call, **CALL)
+    options = rq.frame_options(facts={}, intent="x", running=True, next_call=next_call, **CALL)
     assert "next_step" not in options
-    questions = rq.frame_questions(options, acting_for_intent=True, intent=intent)
-    assert list(questions) == ["q", "a"]
-    assert set(questions["a"]["criteria"]) == {"shown", "not_shown"}
-    assert intent in questions["a"]["criteria"]["shown"]
-    assert rq.only_option(questions) is None
-    # A protective call and a call without an intent are not asked this.
-    assert "a" not in rq.frame_questions(options, acting_for_intent=True, intent=intent, protecting=True)
-    assert "a" not in rq.frame_questions(options, acting_for_intent=False, intent=intent)
+    assert list(rq.frame_questions(options, acting_for_intent=True)) == ["q"]
 
 
-def test_shown_intent_means_next_step_and_danger_comes_first():
-    questions = rq.frame_questions(
-        {"keep_going": "k", "call_agent": "c", "surface": "s"}, acting_for_intent=True, intent="x")
-    assert list(questions) == ["q", "a", "d", "p"]
+def test_intent_question_carries_only_the_facts_it_can_be_checked_against():
+    # Probes on live frames: the progress line ("inventory changed: oak_log
+    # +3"), the task and the call text made the 4B scorer answer "shown" at
+    # 3 of 4 logs; with only these facts it compared the counts correctly.
+    state = {"task": "t", "agent_intent": "i", "inventory": "oak_log 3", "main_hand": "oak_log",
+             "body": "b", "threats": "x", "current_work": "collect_resource(count=4) is running.",
+             "progress": "inventory changed: oak_log +3.", "position": "now at [1.0, 2.0, 3.0]."}
+    intent = "at least 4 oak_log in the inventory"
+    asked = rq.done_question(state, intent)
+    assert asked["state"] == {
+        "agent_intent": f"The Agent wants the following result: “{intent}”.",
+        "inventory": "oak_log 3", "main_hand": "oak_log", "position": "now at [1.0, 2.0, 3.0].",
+    }
+    assert list(asked["questions"]) == ["a"]
+    assert set(asked["questions"]["a"]["criteria"]) == {"shown", "not_shown"}
+    assert rq.done_question({"inventory": "empty"}, intent)["state"] == {
+        "agent_intent": f"The Agent wants the following result: “{intent}”.", "inventory": "empty"}
 
-    def choice(**answers):
-        return rq.frame_choice({"answers": {k: {"choice": v} for k, v in answers.items()}}, questions)
 
-    assert choice(q="keep_going", a="shown", d="safe") == "next_step"
-    assert choice(q="keep_going", a="not_shown", d="safe") == "keep_going"
-    assert choice(q="call_agent", a="not_shown", d="safe") == "call_agent"
-    assert choice(q="keep_going", a="maybe", d="safe") == "unknown"
-    assert choice(q="keep_going", d="safe") == "unknown"
-    assert choice(q="keep_going", a="shown", d="in_danger", p="surface") == "surface"
+def test_intent_answer_and_danger_branch_are_read_strictly():
+    assert rq.done_choice({"answers": {"a": {"choice": "shown"}}}) == "shown"
+    assert rq.done_choice({"answers": {"a": {"choice": "not_shown"}}}) == "not_shown"
+    assert rq.done_choice({"answers": {"a": {"choice": "maybe"}}}) is None
+    assert rq.done_choice({"answers": {}}) is None and rq.done_choice(None) is None
+    questions = rq.frame_questions({"keep_going": "k", "call_agent": "c", "surface": "s"})
+    assert rq.in_danger({"answers": {"d": {"choice": "in_danger"}}}, questions)
+    assert not rq.in_danger({"answers": {"d": {"choice": "safe"}}}, questions)
+    assert not rq.in_danger({"answers": {"d": {"choice": "in_danger"}}}, {"q": {}})
 
 
 def test_failure_observations_survive_the_agent_projector_without_new_result_fields():

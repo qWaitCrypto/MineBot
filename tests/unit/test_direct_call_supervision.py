@@ -292,15 +292,19 @@ class StubDecision:
 
     async def ask(self, payload, *, priority):
         self.requests.append((payload, priority))
+        if set(payload.get("questions", {})) == {"a"}:
+            # The running frame's own "is the intent shown?" request answers
+            # the scripted next_step; it does not consume a scripted answer.
+            shown = getattr(self, "_last", None) == "next_step"
+            return DecisionAnswer("a", {"answers": {"a": {"choice": "shown" if shown else "not_shown"}}},
+                                  0.01, len(self.requests))
         choice = next(self.answers)
         # Tests written before the options were renamed still say step_done/continue.
         choice = {"step_done": "next_step", "continue": "keep_going"}.get(choice, choice)
-        answers = {"q": {"choice": choice}}
-        if "a" in payload.get("questions", {}):
-            # A running frame asks separately whether the intent is shown;
-            # "next step" is answered there.
-            answers["a"] = {"choice": "shown" if choice == "next_step" else "not_shown"}
-        return DecisionAnswer(choice, {"answers": answers}, 0.01, len(self.requests))
+        self._last = choice
+        criteria = (payload.get("questions", {}).get("q") or {}).get("criteria") or {}
+        q_choice = "keep_going" if choice == "next_step" and "next_step" not in criteria else choice
+        return DecisionAnswer(choice, {"answers": {"q": {"choice": q_choice}}}, 0.01, len(self.requests))
 
     async def close(self):
         return None
@@ -370,7 +374,8 @@ def test_shared_supervisor_yield_stops_generic_call_and_delivers_one_fact():
             assert ipc.cancelled.is_set()
             raw = [e for e in runtime.trace.events if e["event"] == "tool_raw_result"]
             assert len(raw) == 1 and raw[0]["tool_call_id"] == "original-generic"
-            assert len(decision.requests) == 1
+            # One frame: the work request and its own "is the intent shown?" request.
+            assert [set(payload["questions"]) for payload, _ in decision.requests] == [{"q"}, {"a"}]
         finally:
             await runtime.aclose()
     asyncio.run(run())

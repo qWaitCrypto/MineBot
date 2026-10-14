@@ -5,6 +5,8 @@ and compare everything else byte for byte.
 """
 import copy
 
+from minebot.app import reflex_question as rq
+
 
 def main_hand_beside_inventory(request, facts):
     """The recorded main hand, said beside the inventory (not in the body sentence)."""
@@ -24,17 +26,8 @@ def main_hand_beside_inventory(request, facts):
 
 
 def intent_question_while_running(request, intent):
-    """While work runs for an intent, the next step is decided by question a."""
+    """While work runs for an intent, next_step is no longer beside keep_going;
+    whether the intent is shown is its own request (returned second)."""
     request = copy.deepcopy(request)
-    questions = request["questions"]
-    questions["q"]["criteria"].pop("next_step", None)
-    ordered = {"q": questions["q"], "a": {"type": "choice", "instructions": (
-        "Compare each part of the result the Agent wants with the inventory and Body facts above. "
-        "Do the facts already show every part of it?"
-    ), "criteria": {
-        "shown": f"Yes: the facts above already show “{intent}”.",
-        "not_shown": f"No: the facts above do not show all of “{intent}” yet.",
-    }}}
-    ordered.update({key: value for key, value in questions.items() if key != "q"})
-    request["questions"] = ordered
-    return request
+    request["questions"]["q"]["criteria"].pop("next_step", None)
+    return request, rq.done_question(request["state"], intent)

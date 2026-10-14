@@ -513,12 +513,11 @@ def after_default_options(
 
 def frame_questions(
     options: Mapping[str, str], *, protecting: bool = False, acting_for_intent: bool = False,
-    interrupt: Mapping[str, Any] | None = None, intent: str = "",
+    interrupt: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """One request.  The danger question is asked only when a protective
-    action is on offer in this frame.  While work runs for an intent, a
-    second question asks whether the facts already show that intent; asked
-    among the work options it was answered from the progress, not the facts."""
+    action is on offer in this frame.  Whether running work has reached its
+    intent is asked in its own request (done_question)."""
     protective = {key: text for key, text in options.items() if key in PROTECTIVE and not protecting}
     normal = dict(options) if protecting else {key: text for key, text in options.items() if key not in PROTECTIVE}
     questions: dict[str, Any] = {
@@ -533,14 +532,6 @@ def frame_questions(
             questions["q"]["instructions"] += (
                 f" The Agent also says: when “{condition.get('text', '')}”, "
                 f"interrupt the current work and do “{handler.get('intent', '')}”.")
-    if acting_for_intent and intent and not protecting:
-        questions["a"] = {"type": "choice", "instructions": (
-            "Compare each part of the result the Agent wants with the inventory and Body facts above. "
-            "Do the facts already show every part of it?"
-        ), "criteria": {
-            "shown": f"Yes: the facts above already show “{intent}”.",
-            "not_shown": f"No: the facts above do not show all of “{intent}” yet.",
-        }}
     if protective:
         questions["d"] = {"type": "choice", "instructions": "Is the Body in danger?", "criteria": dict(_DANGER)}
         questions["p"] = {
@@ -669,8 +660,7 @@ def only_option(questions: Mapping[str, Any]) -> str | None:
 
 
 def frame_choice(raw: Mapping[str, Any] | None, questions: Mapping[str, Any]) -> str:
-    """Read Decision's answer: protective action if in danger; otherwise the
-    next step when the facts already show the intent, else the work choice."""
+    """Read Decision's answer: protective action if in danger, else normal work."""
     answers = raw.get("answers") if isinstance(raw, Mapping) else None
     if not isinstance(answers, Mapping):
         return "unknown"
@@ -688,18 +678,49 @@ def frame_choice(raw: Mapping[str, Any] | None, questions: Mapping[str, Any]) ->
             return "unknown"
         if danger == "in_danger":
             name = "p"
-    if name == "q" and "a" in questions:
-        shown = chosen("a")
-        if shown not in {"shown", "not_shown"}:
-            return "unknown"
-        if shown == "shown":
-            return "next_step"
     return chosen(name) or "unknown"
+
+
+def in_danger(raw: Mapping[str, Any] | None, questions: Mapping[str, Any]) -> bool:
+    """Whether this answer took the protective branch."""
+    answers = raw.get("answers") if isinstance(raw, Mapping) else None
+    answer = answers.get("d") if isinstance(answers, Mapping) else None
+    return "d" in questions and isinstance(answer, Mapping) and answer.get("choice") == "in_danger"
+
+
+# Facts that can show an intent.  The 4B single-pass Decision compares an
+# intent with them correctly only when nothing else is in view: the progress
+# line ("inventory changed: oak_log +3") reads as "done" to it, and so do the
+# task and the call text (docs/references/reflex-always-on-20261012/
+# decision-capability-20261014.md).
+_DONE_FACTS = ("inventory", "main_hand", "position")
+
+
+def done_question(state: Mapping[str, Any], intent: str) -> dict[str, Any]:
+    """Whether running work has reached its intent, asked in its own request
+    with only the facts the intent can be checked against."""
+    small: dict[str, Any] = {"agent_intent": f"The Agent wants the following result: “{intent}”."}
+    small.update({key: state[key] for key in _DONE_FACTS if state.get(key)})
+    return {"state": small, "questions": {"a": {"type": "choice", "instructions": (
+        "Compare each part of the result the Agent wants with the inventory and Body facts above. "
+        "Do the facts already show every part of it?"
+    ), "criteria": {
+        "shown": f"Yes: the facts above already show “{intent}”.",
+        "not_shown": f"No: the facts above do not show all of “{intent}” yet.",
+    }}}}
+
+
+def done_choice(raw: Mapping[str, Any] | None) -> str | None:
+    """"shown" / "not_shown", or None when there is no valid answer."""
+    answers = raw.get("answers") if isinstance(raw, Mapping) else None
+    answer = answers.get("a") if isinstance(answers, Mapping) else None
+    choice = answer.get("choice") if isinstance(answer, Mapping) else None
+    return choice if choice in {"shown", "not_shown"} else None
 
 
 __all__ = [
     "PROTECTIVE", "VitalWindow", "after_default_options", "attempt_lines", "call_text", "frame_choice",
     "frame_options", "frame_questions", "frame_state", "hostiles", "just_hurt",
-    "idle_options", "idle_question",
+    "idle_options", "idle_question", "done_question", "done_choice", "in_danger",
     "only_option", "result_sentence",
 ]

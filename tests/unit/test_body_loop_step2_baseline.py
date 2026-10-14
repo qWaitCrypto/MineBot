@@ -43,6 +43,7 @@ def test_step2_new_old_protocol_on_118_inputs_except_verified_question_changes()
                     request = compiler._question(str(case['seq']), tool, case['params'], case['execution'],
                                                  idle_s=0, purpose='running_frame',
                                                  supervision_context=case['context'], options=options)
+                    done = request.pop('_done', None)
                     request = {k: v for k, v in request.items() if not k.startswith('_request_chars')}
                     requests.append(request)
                 assert requests[0] == case['old_request'], case['seq']
@@ -55,7 +56,10 @@ def test_step2_new_old_protocol_on_118_inputs_except_verified_question_changes()
                     )
                 expected = main_hand_beside_inventory(expected, case['execution']['facts'])
                 if intent and not case['context'].get('is_reflex_action'):
-                    expected = intent_question_while_running(expected, intent)
+                    expected, expected_done = intent_question_while_running(expected, intent)
+                    assert done == expected_done, case['seq']
+                else:
+                    assert done is None, case['seq']
                 # Permit only the two verified intent clarifications, the
                 # observed main hand beside the inventory, and the separate
                 # "is the intent shown" question that replaced next_step.

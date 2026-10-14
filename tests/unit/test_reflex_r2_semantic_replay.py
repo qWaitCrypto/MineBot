@@ -68,12 +68,12 @@ def test_replay_frames_go_through_the_real_question_builder():
         assert "<bounded>" not in encoded
         # "Done" while running is answered by the separate intent question.
         expected_key = {"continue": "keep_going", "step_done": "shown", "go_to_surface": "surface"}.get(row["expected"], row["expected"])
+        asked = [*request["questions"].values(), *request.get("_done", {}).get("questions", {}).values()]
+        keys = {k for q in asked for k in q["criteria"]}
         if expected_key == "surface":
-            assert {"keep_going", "shown", "call_agent"} <= {
-                k for q in request["questions"].values() for k in q["criteria"]
-            }
+            assert {"keep_going", "shown", "call_agent"} <= keys
         else:
-            assert expected_key in {k for q in request["questions"].values() for k in q["criteria"]}
+            assert expected_key in keys
     assert len(json.dumps(request, ensure_ascii=False)) < 3000
 
 
