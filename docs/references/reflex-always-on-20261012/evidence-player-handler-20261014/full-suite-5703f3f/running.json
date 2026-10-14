@@ -1,0 +1,8 @@
+{
+  "commit": "5703f3f895c9dc84067193b75d66bf78e9a67136",
+  "pid": 2250311,
+  "owner_pid": 2249632,
+  "started_at": 1791952628.2536623,
+  "command": "pytest tests/unit -q",
+  "concurrent_game_run": "player-handler-fixed"
+}

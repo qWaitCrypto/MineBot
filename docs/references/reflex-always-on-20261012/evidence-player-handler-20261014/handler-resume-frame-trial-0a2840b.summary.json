@@ -1,0 +1,8 @@
+{
+  "source_body_seq": 718,
+  "prospective_frame_not_observed_online": true,
+  "distribution": {
+    "resume": 12
+  },
+  "expected": "resume"
+}

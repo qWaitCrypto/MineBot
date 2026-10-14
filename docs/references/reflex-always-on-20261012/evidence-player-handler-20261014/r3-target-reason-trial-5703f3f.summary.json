@@ -1,0 +1,10 @@
+{
+  "candidate_only": true,
+  "source": "native-only capture, not Agent evidence",
+  "recorded": "equip:stone_sword",
+  "baseline": "equip:stone_sword",
+  "distribution": {
+    "call_agent": 10,
+    "equip:stone_sword": 2
+  }
+}

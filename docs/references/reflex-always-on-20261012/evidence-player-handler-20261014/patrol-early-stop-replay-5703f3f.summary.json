@@ -1,0 +1,14 @@
+[
+  {
+    "seq": 862,
+    "recorded": "next_step",
+    "baseline": "next_step",
+    "expected": "keep_going",
+    "compiled_from_raw_frame": true,
+    "request_equal": true,
+    "distribution": {
+      "next_step": 2,
+      "keep_going": 10
+    }
+  }
+]
