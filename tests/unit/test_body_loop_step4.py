@@ -18,6 +18,7 @@ from minebot.contract import Event
 from minebot.game.real_client_body import RealClientBody
 from minebot.game.real_client_ipc import RealClientIpc
 from tests.unit.test_agent_session import build_parts
+from tests.unit.test_real_client_body import FakeClientIpc
 
 
 def death(seq=1):
@@ -26,6 +27,34 @@ def death(seq=1):
         "head_in_liquid": True, "native_epoch": "client", "native_seq": seq,
         "last_living_state": {"health": 2, "oxygen": 0, "position": [4, 60, 8]},
     })
+
+
+def test_disconnected_native_sample_does_not_cancel_work_or_notify_death():
+    async def run():
+        class DisconnectedIpc(FakeClientIpc):
+            def state(self):
+                return {"ready": False}
+        events, stops = [], []
+        owner = SimpleNamespace(decision_client=SimpleNamespace(),
+            trace=SimpleNamespace(emit=lambda *args, **kwargs: None),
+            notify_body_lifecycle_event=events.append)
+        async def stop(reason):
+            stops.append(reason)
+            return {"settled": True}
+        owner.cancel_active_execution_with_facts = stop
+        loop = BodyLoop(owner)
+        loop._set_state("work", "agent_call")
+        loop.current = {"cancel_requested": False}
+        facts = RealClientBody("Bot", DisconnectedIpc()).get_reflex_facts()
+        assert not await loop._process_lifecycle_events(facts)
+        assert loop.loop_state == "work"
+        assert not stops and not events
+        assert loop.current["cancel_requested"] is False
+        # Actual native death remains authoritative after a read gap.
+        loop._queue_lifecycle_event(death())
+        assert await loop._process_lifecycle_events()
+        assert stops == ["death"] and [e.name for e in events] == ["death"]
+    asyncio.run(run())
 
 
 def test_native_lifecycle_frames_do_not_steal_correlated_action_replies():

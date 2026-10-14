@@ -205,7 +205,16 @@ class RealClientBody:
             active = self._active is not None
         # Preserve the established pos/inventory_counts vocabulary for plan
         # bindings while exposing ground/eye facts from the SAME sample.
-        return {**asdict(_body_state(self.bot_name, raw, pending=active)), **raw}
+        projected = asdict(_body_state(self.bot_name, raw, pending=active))
+        # BodyState uses legacy sentinel values for missing observations.
+        # Reflex facts must not turn those sentinels into observed death,
+        # hunger, midnight or an origin position after leaving the world.
+        for key in ("health", "food", "oxygen", "time", "dimension"):
+            if key not in raw:
+                projected.pop(key, None)
+        if projected.get("missing"):
+            projected.pop("pos", None)
+        return {**projected, **raw}
 
     def _state_payload(self) -> dict[str, Any]:
         self._ensure_connected()
