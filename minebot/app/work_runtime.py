@@ -547,6 +547,7 @@ class WorkPlanExecutor:
                         "tool_result": copy.deepcopy(public_result),
                         "tool_arguments": copy.deepcopy(arguments),
                         "body_state": _state_payload(decision_state),
+                        "body_before": _state_payload(call_state),
                         "execution": {key: copy.deepcopy(value) for key, value in execution.items()
                                        if key in {"tool", "phase", "delivered", "reason", "normal_work"}}
                                        if isinstance(execution, dict) else {},
@@ -726,6 +727,7 @@ class WorkPlanExecutor:
         self, node: dict[str, Any], *, include_inspect: bool = False,
         plan: dict[str, Any] | None = None, normal_work: str = "",
         result: Mapping[str, Any] | None = None, facts: Mapping[str, Any] | None = None,
+        unchanged: bool = False,
     ) -> dict[str, str]:
         plan = plan or {}
         repeat = node.get("repeat")
@@ -740,7 +742,7 @@ class WorkPlanExecutor:
             intent=str(plan.get("intent") or node.get("intent") or ""),
             facts=facts or {}, running=False, result=result,
             next_call=str(plan.get("next_call") or node.get("next_call") or ""),
-            repeat_note=repeat_note,
+            repeat_note=repeat_note, unchanged=unchanged,
         )
         # Between two plan calls nothing is running to interrupt; the next
         # running frame offers the protective actions again.
@@ -926,7 +928,8 @@ class WorkPlanExecutor:
             facts=body, running=False, result=facts.get("tool_result"),
             earlier_attempts=rq.attempt_lines(history, int(facts.get("history_earlier", 0) or 0)),
         )
-        options = self._call_options(node, result=facts.get("tool_result"), plan=plan, facts=body)
+        options = self._call_options(node, result=facts.get("tool_result"), plan=plan, facts=body,
+                                     unchanged=rq.body_unchanged_by_call(body, facts.get("body_before")))
         payload = {"state": state, "questions": rq.frame_questions(options)}
         payload["state"]["request_chars"] = len(json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str))
         return payload
@@ -991,6 +994,8 @@ class WorkPlanExecutor:
             include_inspect=True,
             plan=self._call_plan(node, intents),
             normal_work=str(facts.get("execution", {}).get("normal_work") or ""),
+            unchanged=isinstance(facts, dict) and rq.body_unchanged_by_call(
+                facts.get("body_state"), facts.get("body_before")),
         )
         while True:
             payload = self._call_question(node, node_key, intents, record)

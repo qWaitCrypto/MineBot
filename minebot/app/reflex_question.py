@@ -386,17 +386,68 @@ def frame_state(
     return {key: value for key, value in state.items() if value not in (None, "")}
 
 
+# A result ended from outside (the user, Decision, protection, a preempting
+# owner) says nothing about whether the same call can work: it was cut short.
+_STOPPED_FROM_OUTSIDE = {"cancel_requested", "cancelled", "preempted", "stopped_by_decision", "turn_cancelled"}
+
+
+def _block(value: Any) -> tuple[int, int, int] | None:
+    if isinstance(value, (list, tuple)) and len(value) == 3:
+        try:
+            return tuple(int(float(v) // 1) for v in value)  # type: ignore[return-value]
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def body_unchanged_by_call(after: Mapping[str, Any] | None, before: Mapping[str, Any] | None = None) -> bool:
+    """True only when the facts show the call left the Body as it found it.
+
+    Same block position, same inventory, same item in hand. With no ``before``
+    the call's own execution facts are used (start position and inventory
+    change). Missing evidence is never read as "unchanged".
+    """
+    after = after if isinstance(after, Mapping) else {}
+    now = _block(after.get("position", after.get("pos")))
+    if now is None:
+        return False
+    if isinstance(before, Mapping):
+        if _block(before.get("position", before.get("pos"))) != now:
+            return False
+        inventories = [_inventory(state) for state in (before, after)]
+        if inventories[0] is None or inventories[1] is None or dict(inventories[0]) != dict(inventories[1]):
+            return False
+        hands = [state.get("selected_item") for state in (before, after)]
+        return hands[0] == hands[1]
+    delta = after.get("inventory_delta")
+    return _block(after.get("start_position")) == now and isinstance(delta, Mapping) and not delta
+
+
+def _same_attempt_again(result: Mapping[str, Any], unchanged: bool) -> bool:
+    """The call failed by itself and nothing about the Body moved: running it
+    again is the same attempt. 4294 such repeats in the 2026-10-14/15 runs,
+    44 then succeeded; up to 873 in a row (go_to_surface, life-stage b2)."""
+    if not unchanged or result.get("success") is True:
+        return False
+    metrics = result.get("metrics") if isinstance(result.get("metrics"), Mapping) else {}
+    if str(result.get("reason") or "") in _STOPPED_FROM_OUTSIDE or "direct_call_handoff" in metrics:
+        return False
+    return True
+
+
 def frame_options(
     *, tool: str, params: Mapping[str, Any] | None, intent: str,
     facts: Mapping[str, Any], running: bool, result: Mapping[str, Any] | None = None,
     next_call: str = "", tree: Mapping[str, str] | None = None, repeat_note: str = "",
     intent_of_plan: bool = False,
     interrupt: Mapping[str, Any] | None = None,
+    unchanged: bool = False,
 ) -> dict[str, str]:
     """The concrete things the Body may do next in this frame.
 
     ``intent_of_plan`` says the step wrote no intent of its own and ``intent``
-    is the one of the plan around it.
+    is the one of the plan around it. ``unchanged`` says the finished call left
+    the Body as it found it (``body_unchanged_by_call``).
     """
     if dead(facts):
         return {}
@@ -414,7 +465,7 @@ def frame_options(
             options["keep_going"] = f"Keep doing the current work, {call}, for: “{intent}”"
         else:
             options["keep_going"] = f"Keep doing the current work, {call}."
-    elif not (failed and result.get("canRetry") is False):
+    elif not (failed and result.get("canRetry") is False) and not _same_attempt_again(result, unchanged):
         options["repeat"] = f"Run the same call again: {call}." + (f" {repeat_note}" if repeat_note else "")
     # After a failed step the plan cannot simply move on: later steps depend on it.
     # While a call runs for an intent, whether the facts already show it is

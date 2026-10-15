@@ -442,6 +442,7 @@ class CallSupervisor:
             # The protective choice again, the running action one option of it.
             return rq.protecting_options(cls._facts_for_options(current), reflex_choice)
         options = rq.frame_options(
+            unchanged=terminal and rq.body_unchanged_by_call(cls._facts_for_options(current)),
             tool=str(record.get("tool") or getattr(tool, "name", "unknown")),
             params=record.get("params") if isinstance(record.get("params"), Mapping) else {},
             intent=str(context.get("intent") or context.get("node_description") or ""),

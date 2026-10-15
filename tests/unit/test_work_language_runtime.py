@@ -150,6 +150,33 @@ def test_repeating_a_call_stops_when_the_plan_time_is_up():
     assert 2 <= len(calls) < 50
 
 
+def test_a_failed_call_that_changed_nothing_is_not_offered_again():
+    # 873 identical go_to_surface failures in life-stage b2: the Body was in
+    # the same block with the same inventory before and after every attempt.
+    plan = {"language": "minebot-work/0.2", "goal": "get out", "timeout_s": 5,
+            "work": {"kind": "call", "id": "up", "tool": "go_to_surface", "arguments": {},
+                     "intent": "standing at y 70 or higher"}}
+    calls = []
+
+    class AlwaysRepeat(Decision):
+        async def ask(self, payload, *, priority=None):
+            self.payloads.append(payload)
+            return type("Answer", (), {"choice": "repeat", "raw": {"choice": "repeat"}})()
+
+    async def call(tool, arguments, *, call_id, timeout_s):
+        calls.append(call_id)
+        return {"success": False, "reason": "surface_not_found", "canRetry": True, "metrics": {}}
+
+    async def same_state():
+        return {"position": [171.3, 64.0, 165.4], "inventory": {"cobblestone": 20}, "selected_item": "stone_pickaxe"}
+
+    decision = AlwaysRepeat()
+    result = asyncio.run(WorkPlanExecutor(plan, call=call, state=same_state, decision=decision).run())
+    # Without "run it again" the only thing left is handing back to the Agent.
+    assert calls == ["up"]
+    assert result.status == "blocked"
+
+
 async def _cancelled_call(calls, call_id):
     calls.append(call_id)
     return {"success": False, "reason": "cancelled", "metrics": {}}
@@ -433,6 +460,9 @@ def test_node_history_uses_native_state_fields_from_recorded_crafting_attempts()
     cases = {case["seq"]: case for case in json.loads(source.read_text())['cases']}
     attempts = [cases[1523]["raw_decision_facts"], cases[1538]["raw_decision_facts"]]
     state = copy.deepcopy(attempts[0]["body_state"])
+    # The first attempt moved items, as a craft does; a repeat is offered only
+    # after the Body changed (an identical failed attempt is not run again).
+    state["inventory_counts"] = {**state["inventory_counts"], "oak_planks": state["inventory_counts"].get("oak_planks", 0) + 4}
     decision = Decision("repeat", "step_done")
     calls = []
 
