@@ -375,3 +375,43 @@ def test_rising_air_is_said_as_breathing_again_not_as_under_water():
     falling = rq.frame_state(goal="g", intent="i", tool="t", params={}, running=True,
                              facts={"health": 20, "food": 20, "oxygen": 150, "oxygen_before": 237, "vital_age_s": 5})
     assert "The head is under water and the Body cannot breathe" in falling["body"]
+
+
+BEFORE = {"position": [171.3, 64.0, 165.4], "inventory": {"cobblestone": 20}, "selected_item": "stone_pickaxe"}
+
+
+def _repeat_offered(result, *, unchanged):
+    return "repeat" in rq.frame_options(tool="go_to_surface", params={}, intent="standing at y 70 or higher",
+                                        facts={}, running=False, result=result, unchanged=unchanged)
+
+
+def test_a_failure_that_left_the_body_as_it_was_is_not_offered_again():
+    # life-stage b2: go_to_surface failed 873 times from the same spot.
+    failed = {"success": False, "reason": "surface_not_found", "canRetry": True}
+    assert not _repeat_offered(failed, unchanged=True)
+    assert _repeat_offered(failed, unchanged=False)
+
+
+def test_a_call_stopped_from_outside_may_still_be_run_again():
+    for reason in ("cancel_requested", "preempted", "stopped_by_decision"):
+        assert _repeat_offered({"success": False, "reason": reason, "canRetry": True}, unchanged=True)
+    handed = {"success": False, "reason": "no_path", "metrics": {"direct_call_handoff": {"facts": {}}}}
+    assert _repeat_offered(handed, unchanged=True)
+
+
+def test_unchanged_needs_the_same_block_inventory_and_hand():
+    same = dict(BEFORE, position=[171.8, 64.2, 165.9])
+    assert rq.body_unchanged_by_call(same, BEFORE)
+    assert not rq.body_unchanged_by_call(dict(BEFORE, position=[172.1, 64.0, 165.4]), BEFORE)
+    assert not rq.body_unchanged_by_call(dict(BEFORE, inventory={"cobblestone": 21}), BEFORE)
+    assert not rq.body_unchanged_by_call(dict(BEFORE, selected_item="oak_planks"), BEFORE)
+    # Missing evidence is never read as "unchanged".
+    assert not rq.body_unchanged_by_call({"position": [1, 64, 1]}, {"position": [1, 64, 1]})
+    assert not rq.body_unchanged_by_call({})
+
+
+def test_unchanged_from_the_calls_own_execution_facts():
+    facts = {"position": [10.4, 64, 3.2], "start_position": [10.1, 64, 3.9], "inventory_delta": {}}
+    assert rq.body_unchanged_by_call(facts)
+    assert not rq.body_unchanged_by_call(dict(facts, inventory_delta={"dirt": 1}))
+    assert not rq.body_unchanged_by_call({"position": [10, 64, 3], "start_position": [10, 64, 3]})

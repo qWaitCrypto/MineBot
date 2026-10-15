@@ -1297,6 +1297,7 @@ class BodyLoop(CallSupervisor):
                 intent=str(plan_context.get("intent") or ""), facts=facts,
                 running=False, result=result, next_call=next_call,
                 repeat_note=repeat_note,
+                unchanged=rq.body_unchanged_by_call(facts, decision_context.get("body_before")),
             )
             options = {key: value for key, value in options.items()
                        if key not in rq.PROTECTIVE and key != "inspect"}
