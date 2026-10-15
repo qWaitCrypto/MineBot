@@ -113,7 +113,6 @@ from minebot.contract import (
     ProgressAbort,
     ProgressFacts,
     ProgressStopReason,
-    REVIEWABLE_STOP_REASONS,
     ToolResult,
     dominant_progress_abort,
     execution_cancellation_scope,
@@ -478,17 +477,7 @@ def tool_invoker_for(tool: RegisteredTool):
                     post_state=post_state,
                 )
                 if abort is not None and raise_progress_abort:
-                    if abort is not epoch_adapter.reviewable_abort:
-                        raise abort
-                    model_result["executionStop"] = {
-                        "reason": abort.stop_reason.value,
-                        "scope": "work_closed_task_tools_only",
-                        "nextSuggestion": (
-                            "Work is stopped. Use the existing evidence to update the task plan "
-                            "and checkpoint wait_event or yield. No work tool can execute, "
-                            "and a continue checkpoint does not renew execution permission."
-                        ),
-                    }
+                    raise abort
             return model_result
 
         if trace is not None:
@@ -531,38 +520,15 @@ def tool_invoker_for(tool: RegisteredTool):
                     condition=strategy_epoch_condition,
                 )
         if (
-            epoch_adapter is not None and epoch_adapter.work_stop is not None
-            and not (tool.sidecar.source == "agent.task" and not tool.sidecar.can_mutate_body)
-        ):
-            if epoch_member is None:
-                raise ProgressAbort("stopped work has no declared epoch", stop_reason=ProgressStopReason.UNKNOWN)
-            return finalize({
-                "success": False, "reason": "progress_work_closed", "canRetry": False,
-                "nextSuggestion": "Use task tools to record a plan and wait or yield; work remains stopped.",
-                "metrics": {"progress_stop_reason": epoch_adapter.work_stop.stop_reason.value},
-            }, status="progress_denied")
-        if (
             epoch_adapter is not None and epoch_adapter.budget is not None
             and not (tool.sidecar.source == "agent.task" and not tool.sidecar.can_mutate_body)
-            and (epoch_member is None or epoch_member.budget_denied)
+            and epoch_member is None
         ):
-            if epoch_member is None:
-                raise ProgressAbort(
-                    "continuation work has no declared progress epoch",
-                    facts=ctx.context.weld_context.authority.facts(ctx.context.agent_context.goal_text),
-                    stop_reason=ProgressStopReason.UNKNOWN,
-                )
-            return finalize({
-                "success": False,
-                "reason": "continuation_work_budget_closed",
-                "canRetry": False,
-                "nextSuggestion": (
-                    "The incoming continuation is exhausted or no longer current. "
-                    "Use task tools to inspect the task, revise the plan, and close a checkpoint. "
-                    "This run cannot execute more work under that continuation."
-                ),
-                "metrics": {"budget_checkpoint_id": epoch_adapter.budget.checkpoint_id},
-            }, status="budget_denied")
+            raise ProgressAbort(
+                "continuation work has no declared progress epoch",
+                facts=ctx.context.weld_context.authority.facts(ctx.context.agent_context.goal_text),
+                stop_reason=ProgressStopReason.UNKNOWN,
+            )
         if epoch_member is not None and epoch_member.conflict:
             result = epoch_adapter.conflict_result(epoch_member)
             if trace is not None:
@@ -1583,10 +1549,6 @@ class AgentRuntime:
         self._progress_task_initialized = False
         self._progress_task_owner: str | None = None
         self._progress_restore_abort: ProgressAbort | None = None
-        self._progress_work_stop: ProgressAbort | None = None
-        # Set per turn from the admitted continuation: the stop epoch whose
-        # review was bought with one non-renewable task allowance.
-        self._turn_review_grant: str | None = None
         self._run_evidence_cursor = 0
         self.hooks = RuntimeHooks()
         self.weld_context = WeldContext(
@@ -2200,7 +2162,6 @@ class AgentRuntime:
         intent_kind: str | None = None,
         has_durable_goal: bool | None = None,
         continuation_budget: ContinuationEpochBudget | None = None,
-        review_grant_stop_epoch_id: str | None = None,
     ) -> AgentTurnOutcome:
         if hasattr(self, "body_loop") and not self.native_responses:
             await self.body_loop.start()
@@ -2211,7 +2172,6 @@ class AgentRuntime:
                 return await self._run_responses_turn(extra_signals, body_actions_allowed=body_actions_allowed)
         self._turn_intent_kind = intent_kind
         self._turn_has_durable_goal = has_durable_goal
-        self._turn_review_grant = review_grant_stop_epoch_id
         prepared = await self.run_read(self._prepare_turn, extra_signals)
         if isinstance(prepared, AgentTurnOutcome):
             return prepared
@@ -2321,10 +2281,7 @@ class AgentRuntime:
             progress_epochs.finalize_unsettled("body_recovery")
             return self._enter_recovery_from_body_fact(exc.reason, exc.facts)
         except MaxTurnsExceeded as exc:
-            deferred = progress_epochs.finalize_unsettled("max_turns_exceeded")
-            if progress_epochs.work_stop is not None:
-                return self._yield_from_progress_abort(
-                    dominant_progress_abort(deferred, progress_epochs.work_stop) or progress_epochs.work_stop)
+            progress_epochs.finalize_unsettled("max_turns_exceeded")
             return self._yield_from_runaway_ceiling(exc)
         except UserError as exc:
             deferred = progress_epochs.finalize_unsettled("sdk_user_error")
@@ -2357,7 +2314,6 @@ class AgentRuntime:
             lifecycle=self.lifecycle.state,
             profile=profile,
             result=result,
-            progress_stop_reason=None if progress_epochs.work_stop is None else progress_epochs.work_stop.stop_reason,
         )
 
     def _raise_model_transport_error_if_retryable(self, exc: BaseException) -> None:
@@ -2380,7 +2336,6 @@ class AgentRuntime:
             if task_id is None:
                 return self._progress_restore_abort
             if self._progress_task_initialized and task_id == self._progress_task_owner:
-                self._reopen_reviewed_work_lane()
                 return self._progress_restore_abort
             if self.progress_epoch_archive is not None:
                 abort = self.progress_epoch_archive.restore_authority(self.authority, task_id=task_id)
@@ -2393,10 +2348,6 @@ class AgentRuntime:
             return ProgressAbort("progress state could not be restored")
         self._progress_task_owner = task_id
         self._progress_task_initialized = True
-        self._progress_work_stop = (
-            abort if abort is not None and abort.stop_reason in REVIEWABLE_STOP_REASONS
-            else None
-        )
         self._progress_restore_abort = (
             abort if abort is not None and abort.stop_reason in {
                 ProgressStopReason.UNKNOWN, ProgressStopReason.BODY_TRANSPORT,
@@ -2405,33 +2356,7 @@ class AgentRuntime:
         self.trace.emit("progress_restored", task_id=task_id,
             progress_stop_reason=None if abort is None else abort.stop_reason.value,
             **asdict(self.authority.facts(self.agent_context.goal_text)))
-        self._reopen_reviewed_work_lane()
         return self._progress_restore_abort
-
-    def _reopen_reviewed_work_lane(self) -> None:
-        """Open a closed work lane whose stop was reviewed with an allowance.
-
-        The continuation gate already established that this exact approach
-        debited one non-renewable task allowance to review that stop, that the
-        approach is a different one, and that every stop in the window was
-        reviewable. The exhausted approach's progress evidence cannot judge a
-        different approach, so the successor run starts a fresh window.
-
-        Nothing here refills an allowance, and a transport or unclassified stop
-        never qualifies: those stay terminal in ``_progress_restore_abort``.
-        """
-        stop = self._progress_work_stop
-        if self._turn_review_grant is None or stop is None:
-            return
-        if stop.stop_reason not in REVIEWABLE_STOP_REASONS:
-            return
-        self._progress_work_stop = None
-        self.authority.restore_facts(ProgressAuthority().facts(self.agent_context.goal_text))
-        self.trace.emit(
-            "progress_work_lane_reopened",
-            review_grant_stop_epoch_id=self._turn_review_grant,
-            progress_stop_reason=stop.stop_reason.value,
-        )
 
     async def run_sync(
         self,
@@ -2627,10 +2552,6 @@ class AgentRuntime:
 
     def current_run_evidence_cursor(self) -> int:
         return self._run_evidence_cursor
-
-    def current_progress_work_stop(self) -> ProgressAbort | None:
-        """The reviewable stop that closed this run's work lane, if any."""
-        return self._progress_work_stop
 
     async def read_progress_state(self) -> BodyState | None:
         try:

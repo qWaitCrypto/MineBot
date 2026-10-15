@@ -70,12 +70,10 @@ def test_persistent_one_hop_lease_is_idempotent_and_latest_checkpoint_atomic():
         coordinator = AutonomyCoordinator(workspace, queue, archive)
 
         first = coordinator.decide(
-            current_generation=3,
             body_fingerprint={"dimension": "overworld", "missing": False},
             lifecycle=LifecycleState.ACTIVE,
         )
         duplicate = coordinator.decide(
-            current_generation=3,
             body_fingerprint={"dimension": "overworld", "missing": False},
             lifecycle=LifecycleState.ACTIVE,
         )
@@ -89,7 +87,6 @@ def test_persistent_one_hop_lease_is_idempotent_and_latest_checkpoint_atomic():
         assert leased is not None
         queue.complete(leased)
         consumed = coordinator.decide(
-            current_generation=3,
             body_fingerprint={"dimension": "overworld", "missing": False},
             lifecycle=LifecycleState.ACTIVE,
         )
@@ -119,7 +116,8 @@ def test_persistent_one_hop_lease_is_idempotent_and_latest_checkpoint_atomic():
         store.close()
 
 
-def test_generation_change_rejects_contract_without_issuing_work():
+def test_body_movement_since_the_checkpoint_does_not_refuse_the_continuation():
+    # The reflex moves the Body all the time; the Agent stays live (§21).
     with tempfile.TemporaryDirectory() as tmp:
         store = RuntimeStateStore(Path(tmp) / "state.sqlite3")
         scope = RuntimeScope("server", "world", "Bot1")
@@ -137,14 +135,12 @@ def test_generation_change_rejects_contract_without_issuing_work():
         )
 
         decision = AutonomyCoordinator(workspace, queue, archive).decide(
-            current_generation=9,
-            body_fingerprint={"dimension": "overworld", "missing": False},
+            body_fingerprint={"dimension": "the_nether", "missing": False},
             lifecycle=LifecycleState.ACTIVE,
         )
 
-        assert decision.action is AutonomyAction.YIELD
-        assert decision.reason == "continuation_generation_changed"
-        assert queue.pending_count() == 0
+        assert decision.action is AutonomyAction.CONTINUE
+        assert queue.count_for_task(WorkIntentKind.TASK_CONTINUE, task.task_id) == 1
         queue.close()
         store.close()
 
@@ -167,7 +163,6 @@ def test_handoff_settles_a_generation_changed_contract_without_issuing_work():
         )
 
         decision = AutonomyCoordinator(workspace, queue, archive).decide(
-            current_generation=9,
             body_fingerprint={"dimension": "overworld", "missing": False},
             lifecycle=LifecycleState.ACTIVE,
             handoff_only=True,
@@ -200,7 +195,7 @@ def failure_epoch(archive, *, suffix="1", reason="no_path"):
     })
 
 
-def test_new_failure_reconsiders_but_restart_and_approach_rename_cannot_refill():
+def test_every_written_continuation_is_issued_across_restarts_and_renames():
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "state.sqlite3"
         scope = RuntimeScope("server", "world", "Bot1")
@@ -224,31 +219,32 @@ def test_new_failure_reconsiders_but_restart_and_approach_rename_cannot_refill()
                                          approach_key=f"renamed-{iteration}"),
                 )
                 coordinator = AutonomyCoordinator(workspace, queue, archive)
-                decision = coordinator.decide(current_generation=3,
+                decision = coordinator.decide(
                     body_fingerprint={"dimension": "overworld"}, lifecycle=LifecycleState.ACTIVE)
+                # A restart or a renamed approach changes nothing: every
+                # continuation the Agent writes is issued, with the failure as a fact.
+                # After the restart the same failure is no longer new evidence:
+                # the continuation is a plain one, still issued.
+                assert decision.action is AutonomyAction.CONTINUE
+                assert decision.reason == ("reconsideration_lease_queued" if iteration == 0
+                                           else "continuation_lease_queued")
+                assert decision.material_changed is False
+                assert decision.intent.payload["continuation_mode"] == (
+                    "reconsider" if iteration == 0 else "continue")
                 if iteration == 0:
-                    assert decision.action is AutonomyAction.CONTINUE
-                    assert decision.reason == "reconsideration_lease_queued"
-                    assert decision.remaining_epochs == 3
-                    assert decision.material_changed is False
-                    assert decision.intent.payload["continuation_mode"] == "reconsider"
                     assert decision.intent.payload["failed_approaches"][0]["reason"] == "no_path"
-                    duplicate = coordinator.decide(current_generation=3,
-                        body_fingerprint={"dimension": "overworld"}, lifecycle=LifecycleState.ACTIVE)
-                    assert duplicate.intent.intent_id == decision.intent.intent_id
-                    leased = queue.lease_next()
-                    queue.complete(leased)
-                else:
-                    assert decision.action is AutonomyAction.YIELD
-                    assert decision.reason == "continuation_without_qualifying_evidence"
-                    assert queue.pending_count() == 0
+                duplicate = coordinator.decide(
+                    body_fingerprint={"dimension": "overworld"}, lifecycle=LifecycleState.ACTIVE)
+                assert duplicate.intent.intent_id == decision.intent.intent_id
+                leased = queue.lease_next()
+                queue.complete(leased)
             finally:
                 queue.close()
                 store.close()
 
 
-def test_failure_novelty_does_not_override_exhaustion_abort_or_safety_failure():
-    for blocker in ("budget", "abort", "safety", "generation"):
+def test_spent_budget_earlier_stops_and_safety_failures_are_facts_not_refusals():
+    for blocker in ("budget", "abort", "safety"):
         store = RuntimeStateStore(":memory:")
         scope = RuntimeScope("server", "world", "Bot1")
         workspace = TaskWorkspace(store, scope)
@@ -268,16 +264,15 @@ def test_failure_novelty_does_not_override_exhaustion_abort_or_safety_failure():
                 continuation=continuation(bounded_epoch_budget=1 if blocker == "budget" else 4),
             )
             decision = AutonomyCoordinator(workspace, queue, archive).decide(
-                current_generation=4 if blocker == "generation" else 3,
                 body_fingerprint={"dimension": "overworld"}, lifecycle=LifecycleState.ACTIVE)
-            assert decision.action is AutonomyAction.YIELD, blocker
-            assert queue.pending_count() == 0
+            assert decision.action is AutonomyAction.CONTINUE, blocker
+            assert queue.pending_count() == 1
         finally:
             queue.close()
             store.close()
 
 
-def test_exhausted_contract_cannot_issue_a_successor_even_with_material_evidence():
+def test_a_contract_past_its_budget_still_continues_and_reports_the_spend():
     with tempfile.TemporaryDirectory() as tmp:
         store = RuntimeStateStore(Path(tmp) / "state.sqlite3")
         scope = RuntimeScope("server", "world", "Bot1")
@@ -286,7 +281,7 @@ def test_exhausted_contract_cannot_issue_a_successor_even_with_material_evidence
         archive = PersistentProgressEpochArchive(store, scope)
         task = workspace.start("collect logs", source="user")
         store_material_epoch(archive)
-        _, checkpoint = workspace.checkpoint(
+        workspace.checkpoint(
             expected_task_revision=task.revision,
             disposition=CheckpointDisposition.CONTINUE,
             summary="continue",
@@ -295,27 +290,13 @@ def test_exhausted_contract_cannot_issue_a_successor_even_with_material_evidence
         )
 
         decision = AutonomyCoordinator(workspace, queue, archive).decide(
-            current_generation=3,
             body_fingerprint={"dimension": "overworld", "missing": False},
             lifecycle=LifecycleState.ACTIVE,
         )
-        direct = store.issue_checkpoint_continuation(
-            scope,
-            checkpoint_id=checkpoint.checkpoint_id,
-            checkpoint_revision=checkpoint.revision,
-            task_id=task.task_id,
-            generation=3,
-            kind=WorkIntentKind.TASK_CONTINUE.value,
-            source="test",
-            priority=50,
-            payload={},
-            dedupe_key="exhausted-contract-attempt",
-        )
 
-        assert decision.action is AutonomyAction.YIELD
-        assert decision.reason == "continuation_epoch_budget_exhausted"
-        assert decision.remaining_epochs == 0
-        assert direct is None
-        assert queue.pending_count() == 0
+        assert decision.action is AutonomyAction.CONTINUE
+        assert decision.consumed_epochs == 1 and decision.remaining_epochs == 0
+        assert decision.intent.payload["remaining_epochs"] == 0
+        assert queue.pending_count() == 1
         queue.close()
         store.close()

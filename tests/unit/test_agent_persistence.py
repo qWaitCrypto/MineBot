@@ -541,7 +541,8 @@ class TaskWorkspaceTests(unittest.TestCase):
         self.assertTrue(second.success)
         self.assertEqual(first_contract["approach_key"], second_contract["approach_key"])
         self.assertEqual(first_contract["bounded_epoch_budget"], 8)
-        self.assertEqual(second_contract["bounded_epoch_budget"], 6)
+        # The budget is the Agent's own estimate, not shrunk by earlier spend.
+        self.assertEqual(second_contract["bounded_epoch_budget"], 8)
         self.assertEqual(second_contract["evidence_cursor"], 2)
         self.assertEqual(second_contract["generation"], 7)
         store.close()

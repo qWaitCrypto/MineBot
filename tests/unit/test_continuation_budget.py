@@ -38,9 +38,8 @@ def test_reservations_debit_before_effect_and_survive_restart_without_refund(tmp
     with closing(RuntimeStateStore(path)) as store:
         budget = ContinuationEpochBudget(store, scope, checkpoint.checkpoint_id)
         assert budget.reserve("next-batch") is True
+        # The reservation log stops at the budget; the denial is no longer a permit.
         assert budget.reserve("overspend") is False
-        assert store.continuation_approach_remaining(scope, task_id=checkpoint.task_id,
-            approach_key=checkpoint.continuation.approach_key, requested_budget=32) == 0
 
 
 def test_stale_checkpoint_and_cross_scope_cannot_reserve(tmp_path):
@@ -322,14 +321,12 @@ def test_initial_settlement_distinguishes_explicit_task_only_epochs_after_restar
         try:
             decision = AutonomyCoordinator(TaskWorkspace(store, scope), queue,
                 PersistentProgressEpochArchive(store, scope)).decide(
-                    current_generation=3, body_fingerprint={"dimension": "overworld"},
+                    body_fingerprint={"dimension": "overworld"},
                     lifecycle=LifecycleState.ACTIVE)
             assert decision.consumed_epochs == (1 if task_only is True else 4)
-            assert decision.action is (
-                AutonomyAction.CONTINUE if task_only is True and material_changed else AutonomyAction.YIELD
-            )
-            if task_only is True and not material_changed:
-                assert decision.reason == "continuation_without_qualifying_evidence"
+            assert decision.material_changed is material_changed
+            # Spent epochs and the kind of evidence are facts, never a refusal.
+            assert decision.action is AutonomyAction.CONTINUE
         finally:
             queue.close()
 
@@ -464,7 +461,7 @@ def test_automatic_recovery_pins_the_incoming_owner_before_model_changes_checkpo
             session.close()
 
 
-def test_charged_history_pagination_cannot_hide_a_later_hard_stop(tmp_path):
+def test_charged_history_pagination_reads_every_page_of_evidence(tmp_path):
     from minebot.app.autonomy import AutonomyAction, AutonomyCoordinator
     from minebot.app.work_queue import PersistentWorkIntentQueue
     from minebot.brain.lifecycle import LifecycleState
@@ -477,24 +474,24 @@ def test_charged_history_pagination_cannot_hide_a_later_hard_stop(tmp_path):
             archive.store({
                 "epoch_id": f"epoch-{index}", "run_id": f"run-{index}", "model_turn": 1,
                 "members": [], "budget_checkpoint_id": checkpoint.checkpoint_id,
-                "material_changed": index == 0, "progress_aborted": index == 100,
+                "material_changed": index == 100, "progress_aborted": index == 50,
             })
         queue = PersistentWorkIntentQueue(store, scope)
         try:
             decision = AutonomyCoordinator(workspace, queue, archive).decide(
-                current_generation=3, body_fingerprint={"dimension": "overworld"}, lifecycle=LifecycleState.ACTIVE)
-            assert decision.action is AutonomyAction.YIELD
-            assert decision.reason == "continuation_progress_aborted"
-            assert queue.pending_count() == 0
+                body_fingerprint={"dimension": "overworld"}, lifecycle=LifecycleState.ACTIVE)
+            # The material change sits on the second page; an earlier stop does not refuse.
+            assert decision.material_changed is True
+            assert decision.action is AutonomyAction.CONTINUE
+            assert queue.pending_count() == 1
         finally:
             queue.close()
 
 
-@pytest.mark.parametrize("boundary", ["none", "omitted", "model_error"])
-@pytest.mark.parametrize("near_failure_limit", [False, True])
-def test_exhausted_approach_can_close_then_run_a_model_selected_alternative(tmp_path, boundary, near_failure_limit):
+def test_work_keeps_running_after_the_continuation_budget_is_spent(tmp_path):
+    """The budget the Agent wrote is a fact; it never closes the work tools."""
     from minebot.app.autonomy import AutonomyCoordinator
-    from minebot.app.runner import ModelTurnTransportError, sdk_tool_for
+    from minebot.app.runner import sdk_tool_for
     from minebot.app.session import AgentSession, SessionCommand
     from minebot.app.tasks import register_task_tools
     from minebot.contract import ToolResult
@@ -505,7 +502,7 @@ def test_exhausted_approach_can_close_then_run_a_model_selected_alternative(tmp_
     scope = RuntimeScope("server", "world", "Bot1")
     workspace = TaskWorkspace(store, scope)
     archive = PersistentProgressEpochArchive(store, scope)
-    effects, checkpoints, inputs = [], [], []
+    effects, inputs, results = [], [], []
 
     def factory(goal):
         parts = build_parts(goal, [], [])
@@ -524,7 +521,7 @@ def test_exhausted_approach_can_close_then_run_a_model_selected_alternative(tmp_
                 return ToolResult(True, "arrived", False)
             return execute
 
-        for name in ("prepare", "blocked", "alternative"):
+        for name in ("prepare", "blocked"):
             parts.registry.register(make_tool(name, work(name), mutating=True))
 
         async def runner(_agent, input_text, *, context, **_kwargs):
@@ -546,35 +543,17 @@ def test_exhausted_approach_can_close_then_run_a_model_selected_alternative(tmp_
                     params["continuation"] = {
                         "objective": f"try {target}", "operation_class": "material",
                         "target_descriptor": {"kind": "state", "identifier": target, "traits": []},
-                        "expected_evidence": ["movement"], "bounded_epoch_budget": 2 if target == "travel" else 3,
+                        "expected_evidence": ["movement"], "bounded_epoch_budget": 1,
                     }
                 result = await call("checkpoint_task", params)
                 assert result["success"] is True, result
-                checkpoints.append(store.get_latest_checkpoint(workspace.current_task.task_id))
 
-            phase = len(inputs)
-            if phase == 1:
+            if len(inputs) == 1:
                 assert (await call("prepare"))["success"] is True
                 await checkpoint("travel")
-                rows = archive.list_after(0)
-                assert rows[0]["members"][0]["task_closure"] is False
-                assert rows[1]["members"][0]["task_closure"] is True
-            elif phase == 2:
-                if near_failure_limit:
-                    from minebot.brain.progress import FAILURE_STORM_LIMIT
-                    parts.authority.failure_steps = FAILURE_STORM_LIMIT - 1
-                assert (await call("blocked"))["reason"] == "no_path"
-                assert (await call("blocked"))["reason"] == "continuation_work_budget_closed"
-                if boundary == "model_error":
-                    raise ModelTurnTransportError("test")
-                if boundary == "none":
-                    await checkpoint("exploration")
-            elif boundary != "none" and phase == 3:
-                assert ("TASK_BOUNDARY" if boundary == "omitted" else "RECOVERY_RECONCILE") in input_text
-                assert (await call("blocked"))["reason"] == "continuation_work_budget_closed"
-                await checkpoint("exploration")
             else:
-                assert (await call("alternative"))["success"] is True
+                for _ in range(4):
+                    results.append((await call("blocked"))["reason"])
                 await checkpoint()
             return {"ok": True}
 
@@ -585,26 +564,12 @@ def test_exhausted_approach_can_close_then_run_a_model_selected_alternative(tmp_
     session.autonomy_coordinator = AutonomyCoordinator(workspace, session.work_queue, archive)
     try:
         session.submit(SessionCommand.start("prepare tools"))
-        for index in range(4 if boundary != "none" else 3):
+        for _ in range(2):
             step = asyncio.run(session.step())
-            assert step.status == ("retrying" if boundary == "model_error" and index == 1 else "completed_turn"), step
-        assert effects == ["prepare", "blocked", "alternative"]
+            assert step.status == "completed_turn", step
+        assert effects == ["prepare", "blocked", "blocked", "blocked", "blocked"]
+        assert results == ["no_path"] * 4
         assert session.work_queue.pending_count() == 0
-        assert workspace.current_task.status.value == "waiting_event"
-        for checkpoint, expected in zip(checkpoints[:2], (0, 2)):
-            assert store.continuation_approach_remaining(scope, task_id=checkpoint.task_id,
-                approach_key=checkpoint.continuation.approach_key, requested_budget=32) == expected
-        rejected = session.parts.registry.get("checkpoint_task").callable({
-            "expected_task_revision": workspace.current_task.revision,
-            "disposition": "continue", "summary": "renamed original approach",
-            "continuation": {
-                "objective": "try the original idea with new wording", "operation_class": "material",
-                "target_descriptor": checkpoints[0].continuation.target_descriptor,
-                "expected_evidence": ["movement"], "bounded_epoch_budget": 32,
-            },
-        })
-        assert rejected.success is False
-        assert rejected.reason == "task_checkpoint_rejected"
         assert workspace.current_task.status.value == "waiting_event"
     finally:
         session.close()

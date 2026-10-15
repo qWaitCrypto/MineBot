@@ -5,7 +5,9 @@ from __future__ import annotations
 import math
 
 from minebot.brain.progress import ProgressAuthority, ProgressStep
-from minebot.contract import ProgressAbort, ProgressFacts, ProgressStopReason, dominant_progress_abort
+from minebot.contract import (
+    REVIEWABLE_STOP_REASONS, ProgressAbort, ProgressFacts, ProgressStopReason, dominant_progress_abort,
+)
 
 
 def _action_key(value: object) -> tuple:
@@ -77,21 +79,19 @@ def replay_progress_epoch(record: dict[str, object]) -> tuple[ProgressFacts, Pro
     novel = _text_list(record.get("novel_epistemic_keys"))
     if type(record.get("material_changed")) is not bool or type(record.get("progress_aborted")) is not bool:
         raise ValueError("progress epoch outcome is missing")
-    pending = [ProgressAbort("restored progress stop", stop_reason=ProgressStopReason(reason))
-        for reason in _text_list(commit.get("pending_stop_reasons"))]
+    reasons = _text_list(commit.get("pending_stop_reasons"))
     if record["progress_aborted"]:
-        pending.append(ProgressAbort("restored progress stop",
-            stop_reason=ProgressStopReason(record.get("progress_stop_reason"))))
+        reasons.append(str(record.get("progress_stop_reason")))
+    # A "not working" stop from an older run is history, not a closed lane:
+    # the counters no longer stop work, so restoring one must not either.
+    pending = [ProgressAbort("restored progress stop", stop_reason=ProgressStopReason(reason))
+        for reason in reasons if ProgressStopReason(reason) not in REVIEWABLE_STOP_REASONS]
     authority = ProgressAuthority()
     authority.restore_facts(facts)
-    abort = None
     if commit["apply"]:
-        try:
-            authority.commit_steps(steps, facts.goal,
-                novel_epistemic_keys=novel, material_changed=record["material_changed"])
-        except ProgressAbort as exc:
-            abort = exc
-    restored = dominant_progress_abort(abort, *pending)
+        authority.commit_steps(steps, facts.goal,
+            novel_epistemic_keys=novel, material_changed=record["material_changed"])
+    restored = dominant_progress_abort(*pending)
     if restored is not None:
         # Keep the stop bound to its epoch across restart, so a reconsideration
         # grant cannot be re-bought for a stop that already paid for one.

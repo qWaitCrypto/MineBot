@@ -174,7 +174,6 @@ def build_phase1_agent_runtime(
             body_fingerprint=lambda: _task_body_fingerprint(body, authority),
             evidence_cursor=parts.runtime.current_run_evidence_cursor,
             generation=authority.current_generation,
-            review_stop=parts.runtime.current_progress_work_stop,
         )
     if (
         config.conversation_session is not None

@@ -438,7 +438,7 @@ class AgentSessionTests(unittest.TestCase):
         session.close()
         store.close()
 
-    def test_checkpoint_continue_without_world_progress_yields_instead_of_looping(self):
+    def test_checkpoint_continue_without_world_progress_still_continues(self):
         store = RuntimeStateStore(":memory:")
         scope = RuntimeScope("server", "world", "Bot1")
         workspace = TaskWorkspace(store, scope)
@@ -495,23 +495,22 @@ class AgentSessionTests(unittest.TestCase):
 
         result = asyncio.run(session.step())
 
+        # No world change is a fact for the Agent, not a reason to stop it (§21).
         self.assertEqual(result.status, "completed_turn")
-        self.assertEqual(result.lifecycle, LifecycleState.YIELDED)
-        self.assertEqual(workspace.current_task.status, TaskStatus.YIELDED)
-        self.assertEqual(session.work_queue.pending_count(), 0)
+        self.assertEqual(workspace.current_task.status, TaskStatus.RUNNING)
+        self.assertEqual(session.work_queue.pending_count(), 1)
         latest = store.get_latest_checkpoint(workspace.current_task.task_id)
-        self.assertEqual(latest.disposition, CheckpointDisposition.YIELD)
-        self.assertEqual(latest.summary, "continuation_without_qualifying_evidence")
+        self.assertEqual(latest.disposition, CheckpointDisposition.CONTINUE)
         session.close()
         store.close()
 
     def test_new_body_failure_reaches_next_model_run_for_a_different_action(self):
         self._exercise_failure_reconsideration(repeat_failure=False)
 
-    def test_repeating_the_same_body_failure_does_not_queue_another_reconsideration(self):
+    def test_repeating_the_same_body_failure_still_queues_the_agents_continuation(self):
         self._exercise_failure_reconsideration(repeat_failure=True)
 
-    def test_target_loss_reaches_model_but_repeated_loss_stops(self):
+    def test_target_loss_reaches_model_and_repeated_loss_does_not_stop_it(self):
         for repeat in (False, True):
             with self.subTest(repeat=repeat):
                 self._exercise_failure_reconsideration(repeat_failure=repeat, failure_reason="target_lost")
@@ -590,9 +589,11 @@ class AgentSessionTests(unittest.TestCase):
             self.assertEqual(second.status, "completed_turn", second)
             self.assertEqual(actions, ["blocked_route", "blocked_route" if repeat_failure else "alternative_route"])
             self.assertEqual(len(calls), 2)
+            # Repeating a failure does not stop the Agent; it keeps its own
+            # continuation and decides itself when to change course (§21).
             self.assertEqual(workspace.current_task.status,
-                             TaskStatus.YIELDED if repeat_failure else TaskStatus.WAITING_EVENT)
-            self.assertEqual(session.work_queue.pending_count(), 0)
+                             TaskStatus.RUNNING if repeat_failure else TaskStatus.WAITING_EVENT)
+            self.assertEqual(session.work_queue.pending_count(), 1 if repeat_failure else 0)
         finally:
             session.close()
             store.close()
@@ -874,7 +875,9 @@ class AgentSessionTests(unittest.TestCase):
             any(event["event"] == "body_event_wake" for event in session.parts.runtime.trace.snapshot())
         )
 
-    def test_body_event_from_superseded_generation_is_completed_without_model_turn(self):
+    def test_body_event_from_an_earlier_generation_still_reaches_the_agent(self):
+        # The reflex moves the Body all the time; an event queued before the
+        # last move is still the Agent's to hear (§21).
         calls: list[str] = []
         bodies: list[FakeBody] = []
         session = AgentSession(lambda goal: build_parts(goal, calls, bodies))
@@ -897,14 +900,12 @@ class AgentSessionTests(unittest.TestCase):
         )
         session.parts.authority.invalidate_generation("replacement")
 
-        dropped = asyncio.run(session.step())
+        delivered = asyncio.run(session.step())
 
-        self.assertEqual(dropped.status, "idle")
-        self.assertEqual(len(calls), 1)
-        self.assertTrue(
+        self.assertNotEqual(delivered.status, "idle")
+        self.assertFalse(
             any(
                 event["event"] == "body_event_intent_dropped"
-                and event["reason"] == "runtime_generation_changed"
                 for event in session.parts.runtime.trace.snapshot()
             )
         )

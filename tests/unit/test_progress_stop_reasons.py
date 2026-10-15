@@ -5,7 +5,7 @@ from contextlib import closing
 import pytest
 
 from minebot.brain.progress import ProgressAuthority, ProgressStep
-from minebot.contract import ProgressAbort, STALL_LIMIT
+from minebot.contract import ProgressAbort
 from minebot.app.progress_epochs import PersistentProgressEpochArchive
 from minebot.app.runtime_state import RuntimeScope, RuntimeStateStore
 
@@ -14,14 +14,15 @@ def test_stop_causes_are_explicit_not_guessed_from_exception_text():
     from minebot.contract import ProgressStopReason
 
     assert ProgressAbort("body transport unstable").stop_reason is ProgressStopReason.UNKNOWN
-    authority = ProgressAuthority(failure_steps=5)
-    with pytest.raises(ProgressAbort) as stopped:
-        authority.require_can_continue("find another route")
-    assert stopped.value.stop_reason is ProgressStopReason.NO_PROGRESS
-    authority = ProgressAuthority(epistemic_steps=STALL_LIMIT)
-    with pytest.raises(ProgressAbort) as stopped:
-        authority.require_can_continue("inspect terrain")
-    assert stopped.value.stop_reason is ProgressStopReason.EPISTEMIC_BUDGET
+
+
+def test_high_counters_never_stop_work():
+    # The Agent stays live (frame-question doc §21): the counters are facts.
+    authority = ProgressAuthority(failure_steps=50, stagnant_steps=50, stalled_steps=50, epistemic_steps=50)
+    authority.commit_steps((ProgressStep("note", ("work",), "same", success=False),), "find another route",
+                           novel_epistemic_keys=("region:1",))
+    assert authority.failure_steps == 51
+    assert authority.epistemic_steps == 51
 
 
 @pytest.mark.parametrize("source,pending,expected", [
@@ -30,13 +31,12 @@ def test_stop_causes_are_explicit_not_guessed_from_exception_text():
     ("agent.task", "unknown", "unknown"),
     ("agent.task", "no_progress", "no_progress"),
     ("agent.task", "epistemic_budget", "epistemic_budget"),
-    ("body.action", None, "no_progress"),
+    ("body.action", None, None),
 ])
 def test_empty_task_closure_preserves_counters_and_pending_stops(source, pending, expected):
-    from minebot.brain.progress import FAILURE_STORM_LIMIT
     from tests.unit.test_progress_epochs import EpochBody, make_tool, response, runtime_with
 
-    authority = ProgressAuthority(failure_steps=FAILURE_STORM_LIMIT)
+    authority = ProgressAuthority(failure_steps=5)
     tool = make_tool("close", lambda _: None, mutating=False, source=source)
     runtime, adapter, _ = runtime_with(EpochBody(), [tool], authority=authority)
 
@@ -50,9 +50,7 @@ def test_empty_task_closure_preserves_counters_and_pending_stops(source, pending
     try:
         abort = asyncio.run(scenario())
         assert (None if abort is None else abort.stop_reason.value) == expected
-        assert authority.failure_steps == FAILURE_STORM_LIMIT
-        with pytest.raises(ProgressAbort):
-            authority.require_can_continue("actual work remains stopped")
+        assert authority.failure_steps == 5
     finally:
         runtime.close()
 

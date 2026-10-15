@@ -1,6 +1,9 @@
 import unittest
 
-from minebot.brain.progress import FAILURE_STORM_LIMIT, STAGNATION_LIMIT, STALL_LIMIT, ProgressAbort, ProgressAuthority
+from minebot.brain.progress import ProgressAuthority
+
+# Enough repeats to have tripped every old stop threshold (3 / 5 / 8).
+MANY = 12
 from minebot.contract import BodyState
 from minebot.contract.progress import LocalProgressController
 from minebot.brain.progress import combat_progress_evidence
@@ -80,9 +83,9 @@ class ProgressTests(unittest.TestCase):
 
     def test_time_passing_does_not_reset_observation_stagnation(self):
         progress = ProgressAuthority()
-        for index in range(STAGNATION_LIMIT + 1):
+        for index in range(4):
             progress.observe_step(("read_state",), progress.fingerprint(state(time=index * 1000)))
-        self.assertTrue(progress.should_yield())
+        self.assertEqual(progress.stagnant_steps, 3)
 
     def test_body_local_guard_uses_the_same_clock_independent_fingerprint(self):
         local = LocalProgressController()
@@ -94,65 +97,64 @@ class ProgressTests(unittest.TestCase):
         progress = ProgressAuthority()
         fp = progress.fingerprint(state())
 
-        for _ in range(STAGNATION_LIMIT + 1):
+        for _ in range(MANY):
             progress.note_step(("move_to", 1, 2, 3), success=True, fingerprint=fp)
 
         self.assertEqual(progress.stagnant_steps, 0)
         self.assertEqual(progress.stalled_steps, 0)
         self.assertEqual(progress.failure_steps, 0)
-        self.assertFalse(progress.should_yield())
 
 
     def test_successful_varied_tool_results_reset_stall_even_with_same_fingerprint(self):
         progress = ProgressAuthority()
         fp = progress.fingerprint(state())
 
-        for i in range(STALL_LIMIT + 1):
+        for i in range(MANY):
             progress.note_step(("action", i), success=True, fingerprint=fp)
 
         self.assertEqual(progress.stalled_steps, 0)
         self.assertEqual(progress.stagnant_steps, 0)
         self.assertEqual(progress.failure_steps, 0)
-        self.assertFalse(progress.should_yield())
 
 
-    def test_failure_storm_trips_at_limit(self):
+    def test_repeated_failures_are_counted_but_never_stop_work(self):
+        # The Agent stays live: the counters are facts for it, not a stop.
         progress = ProgressAuthority()
         fp = progress.fingerprint(state())
 
-        for i in range(FAILURE_STORM_LIMIT):
-            progress.note_step(("action", i), success=False, fingerprint=fp)
+        with progress.capture_steps() as captured:
+            for i in range(MANY):
+                progress.note_step(("action", i), success=False, fingerprint=fp)
+                progress.observe_step(("read_state",), fp)
+        progress.commit_steps(captured, "test goal")
 
-        self.assertEqual(progress.failure_steps, FAILURE_STORM_LIMIT)
-        with self.assertRaises(ProgressAbort) as cm:
-            progress.require_can_continue("test goal")
-        self.assertIsNotNone(cm.exception.facts)
-        self.assertEqual(cm.exception.facts.goal, "test goal")
-        self.assertEqual(cm.exception.facts.failure_steps, FAILURE_STORM_LIMIT)
+        facts = progress.facts("test goal")
+        self.assertEqual(facts.goal, "test goal")
+        self.assertEqual(facts.failure_steps, MANY)
+        self.assertGreaterEqual(facts.stalled_steps, MANY)
+        self.assertFalse(hasattr(progress, "require_can_continue"))
 
 
     def test_neutral_preempted_does_not_increment_progress_sensors(self):
         progress = ProgressAuthority()
         fp = progress.fingerprint(state())
 
-        for index in range(max(FAILURE_STORM_LIMIT, STAGNATION_LIMIT, STALL_LIMIT) + 1):
+        for index in range(MANY):
             progress.note_step(("move_to", index), success=False, fingerprint=fp, neutral=True)
 
         self.assertEqual(progress.failure_steps, 0)
         self.assertEqual(progress.stagnant_steps, 0)
         self.assertEqual(progress.stalled_steps, 0)
-        self.assertFalse(progress.should_yield())
 
     def test_observation_step_counts_stagnation_without_failure_storm(self):
         progress = ProgressAuthority()
         fp = progress.fingerprint(state())
 
-        for _ in range(STAGNATION_LIMIT + 1):
+        for _ in range(4):
             progress.observe_step(("read_inventory", "{}"), fp)
 
-        self.assertEqual(progress.stagnant_steps, STAGNATION_LIMIT)
+        self.assertEqual(progress.stagnant_steps, 3)
         self.assertEqual(progress.failure_steps, 0)
-        self.assertTrue(progress.should_yield())
 
 
     def test_generation_invalidation_makes_old_generation_stale(self):
@@ -178,17 +180,15 @@ class ProgressTests(unittest.TestCase):
         fp = progress.fingerprint(state())
 
         with progress.capture_steps() as captured:
-            for index in range(FAILURE_STORM_LIMIT):
+            for index in range(5):
                 progress.note_step(("action", index), success=False, fingerprint=fp)
-                progress.require_can_continue("test goal")
 
         self.assertEqual(progress.failure_steps, 0)
-        self.assertEqual(len(captured), FAILURE_STORM_LIMIT)
+        self.assertEqual(len(captured), 5)
 
-        with self.assertRaises(ProgressAbort):
-            progress.commit_steps(captured, "test goal")
+        progress.commit_steps(captured, "test goal")
 
-        self.assertEqual(progress.failure_steps, FAILURE_STORM_LIMIT)
+        self.assertEqual(progress.failure_steps, 5)
 
     def test_nested_capture_contributes_steps_to_outer_epoch(self):
         progress = ProgressAuthority()
@@ -207,10 +207,10 @@ class ProgressTests(unittest.TestCase):
 
         self.assertEqual(progress.last_action, ("move_to", 1))
 
-    def test_novel_epistemic_evidence_defers_an_existing_failure_abort(self):
+    def test_novel_epistemic_evidence_is_recorded_beside_failures(self):
         progress = ProgressAuthority()
         fp = progress.fingerprint(state())
-        for index in range(FAILURE_STORM_LIMIT - 1):
+        for index in range(4):
             progress.note_step(("action", index), success=False, fingerprint=fp)
 
         with progress.capture_steps() as captured:
@@ -222,14 +222,14 @@ class ProgressTests(unittest.TestCase):
             novel_epistemic_keys=("region:overworld:1,0",),
         )
 
-        self.assertEqual(progress.failure_steps, FAILURE_STORM_LIMIT)
+        self.assertEqual(progress.failure_steps, 5)
         self.assertEqual(progress.epistemic_steps, 1)
         self.assertEqual(progress.last_epistemic_keys, ("region:overworld:1,0",))
 
     def test_repeated_epistemic_evidence_does_not_reset_progress(self):
         progress = ProgressAuthority()
         fp = progress.fingerprint(state())
-        for index in range(FAILURE_STORM_LIMIT - 1):
+        for index in range(4):
             progress.note_step(("action", index), success=False, fingerprint=fp)
 
         with progress.capture_steps() as captured:
@@ -240,33 +240,23 @@ class ProgressTests(unittest.TestCase):
             "test goal",
             novel_epistemic_keys=("region:overworld:1,0",),
         )
-        with self.assertRaises(ProgressAbort):
-            progress.commit_steps((), "test goal", novel_epistemic_keys=())
+        progress.commit_steps((), "test goal", novel_epistemic_keys=())
 
         self.assertEqual(progress.epistemic_steps, 1)
 
-    def test_epistemic_only_progress_has_a_bounded_window(self):
+    def test_epistemic_only_progress_is_counted_without_a_window(self):
         progress = ProgressAuthority()
 
-        for index in range(STALL_LIMIT - 1):
+        for index in range(MANY):
             progress.commit_steps(
                 (),
                 "test goal",
                 novel_epistemic_keys=(f"region:{index}",),
             )
 
-        with self.assertRaises(ProgressAbort) as cm:
-            progress.commit_steps(
-                (),
-                "test goal",
-                novel_epistemic_keys=(f"region:{STALL_LIMIT - 1}",),
-            )
-
-        self.assertEqual(cm.exception.facts.epistemic_steps, STALL_LIMIT)
-        self.assertEqual(
-            cm.exception.facts.last_epistemic_keys,
-            (f"region:{STALL_LIMIT - 1}",),
-        )
+        facts = progress.facts("test goal")
+        self.assertEqual(facts.epistemic_steps, MANY)
+        self.assertEqual(facts.last_epistemic_keys, (f"region:{MANY - 1}",))
 
     def test_material_progress_resets_epistemic_window(self):
         progress = ProgressAuthority()

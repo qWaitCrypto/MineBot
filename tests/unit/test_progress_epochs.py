@@ -460,7 +460,8 @@ def test_partial_progress_settles_as_partial_not_failure():
     assert archive.records[0]["members"][0]["status"] == "partial"
 
 
-def test_epoch_defers_progress_abort_until_read_only_sibling_settles():
+def test_repeated_failures_in_one_epoch_never_abort_the_sibling_read():
+    # The failure counter is a fact for the Agent; it never stops work (§21).
     body = EpochBody()
     authority = ProgressAuthority()
     fingerprint = authority.fingerprint(body.get_state())
@@ -489,17 +490,17 @@ def test_epoch_defers_progress_abort_until_read_only_sibling_settles():
     async def scenario():
         await adapter.open(response(("call-move", "move_to"), ("call-read", "read_state")))
         first_result = await invoke(failing, context, "call-move")
-        with pytest.raises(ProgressAbort):
-            await invoke(reader, context, "call-read")
-        return first_result
+        read_result = await invoke(reader, context, "call-read")
+        return first_result, read_result
 
-    first_result = asyncio.run(scenario())
+    first_result, read_result = asyncio.run(scenario())
     runtime.close()
 
     assert first_result["reason"] == "blocked"
+    assert read_result["reason"] == "state_read"
     assert observed == ["read"]
     assert authority.failure_steps == 5
-    assert archive.records[0]["progress_aborted"] is True
+    assert archive.records[0]["progress_aborted"] is False
     assert [member["status"] for member in archive.records[0]["members"]] == [
         "failure",
         "success",
@@ -617,30 +618,6 @@ def test_epoch_archive_failure_stops_even_a_materially_successful_batch():
         assert settled[-1]["material_changed"] is True
         assert settled[-1]["progress_stop_reason"] == "unknown"
         assert body.x == 1
-    finally:
-        runtime.close()
-
-
-def test_failure_to_persist_a_strategy_stop_does_not_allow_reconsideration():
-    class FailingStopArchive(RecordingEpochArchive):
-        def mark_progress_aborted(self, epoch_id, *, stop_reason):
-            raise OSError("unavailable")
-
-    body = EpochBody()
-    authority = ProgressAuthority(failure_steps=4)
-    tool = make_tool("move_to", lambda _: ToolResult(False, "blocked", True), mutating=True)
-    runtime, adapter, context = runtime_with(body, [tool], authority=authority,
-        epoch_archive=FailingStopArchive())
-    async def scenario():
-        await adapter.open(response(("move", "move_to")))
-        with pytest.raises(ProgressAbort) as caught:
-            await invoke(tool, context, "move")
-        assert caught.value.stop_reason is ProgressStopReason.UNKNOWN
-    try:
-        asyncio.run(scenario())
-        settled = [event for event in runtime.trace.snapshot() if event["event"] == "progress_epoch_settled"]
-        assert settled[-1]["progress_stop_reason"] == "unknown"
-        assert settled[-1]["progress_aborted"] is True
     finally:
         runtime.close()
 

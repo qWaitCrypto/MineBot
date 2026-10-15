@@ -15,11 +15,14 @@ from minebot.brain.composition import (
 from minebot.brain.acquisition import RecipeVariant
 from minebot.brain.acquisition import resolve_acquisition
 from minebot.brain.modes import ModeRuntime
-from minebot.brain.progress import FAILURE_STORM_LIMIT, ProgressAbort, ProgressAuthority
+from minebot.brain.progress import ProgressAuthority
 from minebot.brain.registry import RegisteredTool, ToolRegistry, ToolSidecar, WeldContext, execute_tool
 from minebot.brain.lifecycle import LifecycleState
-from minebot.contract import BodyState, PerceptionResult, Result, ToolResult
+from minebot.contract import BodyState, PerceptionResult, ProgressAbort, Result, ToolResult
 from minebot.contract.tool_trace import canonical_args_hash, tool_tactic_signature
+
+# The old failure-storm threshold; the counter is a fact now, never a stop.
+FAILURES = 5
 
 
 def state(inventory_hash="inv"):
@@ -1160,12 +1163,11 @@ class AgentCompositionTests(unittest.TestCase):
         weld = WeldContext(body=body, authority=authority, goal_text="collect 1 dirt")
         miner, _ = mine_tool(body, fail_reason="break_denied:protected_region")
 
-        for _ in range(FAILURE_STORM_LIMIT + 2):
+        for _ in range(FAILURES + 2):
             payload = execute_tool(miner, {"pos": [1, 59, 0]}, weld)
             self.assertFalse(payload["success"])
 
         self.assertEqual(authority.failure_steps, 0)
-        authority.require_can_continue("collect 1 dirt")  # does not raise
 
     def test_weld_treats_governance_confirmation_as_neutral_not_failure(self):
         body = FakeBody()
@@ -1173,12 +1175,11 @@ class AgentCompositionTests(unittest.TestCase):
         weld = WeldContext(body=body, authority=authority, goal_text="collect 1 dirt")
         miner, _ = mine_tool(body, fail_reason="governance_confirmation_required")
 
-        for _ in range(FAILURE_STORM_LIMIT + 2):
+        for _ in range(FAILURES + 2):
             payload = execute_tool(miner, {"pos": [1, 59, 0]}, weld)
             self.assertFalse(payload["success"])
 
         self.assertEqual(authority.failure_steps, 0)
-        authority.require_can_continue("collect 1 dirt")
 
     def test_weld_treats_partial_inventory_progress_as_neutral_not_failure(self):
         body = FakeBody()
@@ -1197,12 +1198,11 @@ class AgentCompositionTests(unittest.TestCase):
             ToolSidecar("collect_block_domain", mutating=True, permission="collect"),
         )
 
-        for _ in range(FAILURE_STORM_LIMIT + 2):
+        for _ in range(FAILURES + 2):
             payload = execute_tool(tool, {}, weld)
             self.assertFalse(payload["success"])
 
         self.assertEqual(authority.failure_steps, 0)
-        authority.require_can_continue("collect 7 raw iron")
 
     def test_weld_does_not_treat_reads_as_physical_stagnation(self):
         body = FakeBody()
@@ -1260,13 +1260,13 @@ class AgentCompositionTests(unittest.TestCase):
         weld = WeldContext(body=body, authority=authority, goal_text="g")
         miner, _ = mine_tool(body, fail_reason="mine_failed:real_error")
 
-        for _ in range(FAILURE_STORM_LIMIT - 1):
+        for _ in range(FAILURES - 1):
             execute_tool(miner, {"pos": [1, 59, 0]}, weld)
-        self.assertEqual(authority.failure_steps, FAILURE_STORM_LIMIT - 1)
+        self.assertEqual(authority.failure_steps, FAILURES - 1)
 
         result = execute_tool(miner, {"pos": [1, 59, 0]}, weld)
         self.assertEqual(result["reason"], "mine_failed:real_error")
-        self.assertEqual(authority.failure_steps, FAILURE_STORM_LIMIT)
+        self.assertEqual(authority.failure_steps, FAILURES)
 
     def test_weld_returns_legacy_inner_yield_receipt_unchanged(self):
         body = FakeBody()

@@ -788,7 +788,6 @@ def test_plan_calls_do_not_feed_the_agents_progress_counters(monkeypatch):
     for _ in range(6):
         reflex_tools._execute_plan_call(None, {}, SimpleNamespace(authority=authority))
     assert (authority.stagnant_steps, authority.stalled_steps, authority.failure_steps) == (0, 0, 0)
-    assert not authority.should_yield()
 
 
 def test_a_finished_plan_is_one_step_for_the_agents_progress_counters():
