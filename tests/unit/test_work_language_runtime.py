@@ -123,6 +123,33 @@ def test_repeat_is_decision_driven_and_each_reentry_gets_a_new_call_id():
     assert "more is needed" in decision.payloads[0]["questions"]["q"]["criteria"]["repeat"]
 
 
+def test_repeating_a_call_stops_when_the_plan_time_is_up():
+    # life-stage b2: a 240 s plan repeated an instant go_to_surface failure for
+    # 16 minutes; re-entering the call never looked at the plan deadline.
+    import time
+
+    plan = {"language": "minebot-work/0.2", "goal": "get out", "timeout_s": 0.2,
+            "work": {"kind": "call", "id": "up", "tool": "go_to_surface", "arguments": {},
+                     "intent": "standing at y 70 or higher"}}
+    calls = []
+
+    class AlwaysRepeat(Decision):
+        async def ask(self, payload, *, priority=None):
+            self.payloads.append(payload)
+            return type("Answer", (), {"choice": "repeat", "raw": {"choice": "repeat"}})()
+
+    async def call(tool, arguments, *, call_id, timeout_s):
+        calls.append(call_id)
+        await asyncio.sleep(0.02)
+        return {"success": False, "reason": "surface_not_found", "canRetry": True, "metrics": {}}
+
+    started = time.monotonic()
+    result = asyncio.run(WorkPlanExecutor(plan, call=call, state=lambda: _state(), decision=AlwaysRepeat()).run())
+    assert result.status == "blocked"
+    assert time.monotonic() - started < 2
+    assert 2 <= len(calls) < 50
+
+
 async def _cancelled_call(calls, call_id):
     calls.append(call_id)
     return {"success": False, "reason": "cancelled", "metrics": {}}

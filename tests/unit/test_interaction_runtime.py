@@ -326,6 +326,22 @@ class InteractionRuntimeTests(unittest.TestCase):
             (2.125, 64.5, 0.5),
         )
 
+    def test_open_door_look_target_lies_on_the_swung_panel(self):
+        # The hinge is on the placer's left or right; the open panel lies
+        # along that edge. Vanilla DoorBlock: facing north + left hinge ->
+        # x 0..3/16 (life-stage c3 aimed at x 0.9 and missed 20 times).
+        pos = (2, 64, 0)
+        expected = {
+            ("east", "left"): (2.5, 64.5, 0.1), ("east", "right"): (2.5, 64.5, 0.9),
+            ("west", "left"): (2.5, 64.5, 0.9), ("west", "right"): (2.5, 64.5, 0.1),
+            ("north", "left"): (2.1, 64.5, 0.5), ("north", "right"): (2.9, 64.5, 0.5),
+            ("south", "left"): (2.9, 64.5, 0.5), ("south", "right"): (2.1, 64.5, 0.5),
+        }
+        for (facing, hinge), target in expected.items():
+            got = _openable_look_target(pos, "oak_door", {"open": "true", "facing": facing, "hinge": hinge})
+            for axis in range(3):
+                self.assertAlmostEqual(got[axis], target[axis], msg=f"{facing}/{hinge}")
+
     def test_search_for_entity_requires_filter(self):
         body = FakeInteractionBody(entities=[], block_states={}, states=[state_at((0, 64, 0))])
         runtime = InteractionTransactions(body)

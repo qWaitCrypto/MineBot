@@ -21,6 +21,11 @@ from minebot.contract.governance import (
 )
 
 
+# Ground cover a player breaks in passing; wheat seeds come only from grass.
+# Missing here, a world covered in grass tufts had no seeds at all and the
+# Agent's wheat field could not start (life-stage b2).
+NATURAL_GRASS_TYPES = frozenset({"short_grass", "tall_grass", "fern", "large_fern"})
+
 NATURAL_FLOWER_TYPES = frozenset(
     {
         "dandelion",
@@ -103,7 +108,7 @@ NATURAL_BREAKABLE = frozenset(
         "deepslate_diamond_ore",
         "deepslate_emerald_ore",
     }
-) | NATURAL_FLOWER_TYPES | NATURAL_LEAF_TYPES
+) | NATURAL_FLOWER_TYPES | NATURAL_LEAF_TYPES | NATURAL_GRASS_TYPES
 
 COLLECT_TARGETS = frozenset(
     {
@@ -136,7 +141,7 @@ COLLECT_TARGETS = frozenset(
         "deepslate_diamond_ore",
         "deepslate_emerald_ore",
     }
-) | NATURAL_FLOWER_TYPES
+) | NATURAL_FLOWER_TYPES | NATURAL_GRASS_TYPES
 
 # Recovery may clear ordinary terrain cover, even when that block can also be
 # collected directly. Preserve route avoidance only for resources a player

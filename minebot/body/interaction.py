@@ -1930,6 +1930,10 @@ def _openable_look_target(pos: Position, block_type: str, properties: dict[str, 
         return (pos[0] + 0.5, pos[1] + y_offset, pos[2] + 0.5)
     if normalized_type.endswith("_door"):
         if props.get("open") == "true":
+            # An open door turns on its hinge, which is on the placer's left or
+            # right: facing north, "left" is west, so the panel lies along the
+            # west edge (x 0..3/16). North and south were mirrored, and a close
+            # aimed at empty air beside the panel 20 times (life-stage c3).
             facing = props.get("facing")
             hinge = props.get("hinge")
             if facing == "east":
@@ -1937,9 +1941,9 @@ def _openable_look_target(pos: Position, block_type: str, properties: dict[str, 
             if facing == "west":
                 return (pos[0] + 0.5, pos[1] + 0.5, pos[2] + (0.9 if hinge == "left" else 0.1))
             if facing == "north":
-                return (pos[0] + (0.9 if hinge == "left" else 0.1), pos[1] + 0.5, pos[2] + 0.5)
-            if facing == "south":
                 return (pos[0] + (0.1 if hinge == "left" else 0.9), pos[1] + 0.5, pos[2] + 0.5)
+            if facing == "south":
+                return (pos[0] + (0.9 if hinge == "left" else 0.1), pos[1] + 0.5, pos[2] + 0.5)
         return (pos[0] + 0.5, pos[1] + 0.5, pos[2] + 0.5)
     return _block_center_target(pos)
 

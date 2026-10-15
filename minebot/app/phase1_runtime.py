@@ -1781,9 +1781,14 @@ def _mine_collect_tool(
     def run(params: JsonObject) -> ToolResult:
         pos = tuple(int(v) for v in params["pos"])
         if java_objective_body is None:
+            # Naming one exact block the bot placed itself is removing its own
+            # work, as a player would; the ledger still checks the type. Search-
+            # driven collection keeps COLLECT and cannot take the bot's builds
+            # (life-stage c3: a misplaced door could not be taken back).
+            own = pos in getattr(work.governance, "bot_placements", {})
             return work.mine_block_collect(
                 pos,
-                context=BreakContext.COLLECT,
+                context=BreakContext.BOT_CLEANUP if own else BreakContext.COLLECT,
                 expected_drops=tuple(str(item) for item in params.get("expected_drops", [])),
                 target_block_types=tuple(str(item) for item in params.get("target_block_types", [])),
                 dry=bool(params.get("dry", False)),

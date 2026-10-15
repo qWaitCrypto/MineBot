@@ -1308,6 +1308,18 @@ class AgentCompositionTests(unittest.TestCase):
         self.assertEqual(raw_gold.expected_drops, ("raw_gold",))
         self.assertEqual(raw_gold.block_types, ("gold_ore", "deepslate_gold_ore"))
 
+    def test_wheat_seeds_are_collected_from_grass_which_may_be_broken(self):
+        # life-stage b2: "wheat_seeds" went to the Body as a block name, and
+        # grass tufts were not breakable, so no seeds could ever be had.
+        from minebot.game.governance import COLLECT_TARGETS, NATURAL_BREAKABLE
+
+        for name in ("wheat_seeds", "seeds"):
+            plan = resource_plan_for(name)
+            self.assertEqual(plan.inventory_item, "wheat_seeds")
+            self.assertEqual(plan.block_types, ("short_grass", "tall_grass"))
+            self.assertEqual(plan.expected_drops, ("wheat_seeds",))
+        self.assertTrue({"short_grass", "tall_grass"} <= NATURAL_BREAKABLE & COLLECT_TARGETS)
+
     def test_resource_plan_keeps_exact_flower_items_as_collectable_domains(self):
         for flower in ("dandelion", "poppy", "blue_orchid"):
             with self.subTest(flower=flower):

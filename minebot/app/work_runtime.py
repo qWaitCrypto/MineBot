@@ -614,6 +614,13 @@ class WorkPlanExecutor:
                 base_key = str(node.get("id") or node_key.split("__repeat_", 1)[0])
                 base_record = self.records.get(base_key, record)
                 base_record.repeat_count += 1
+                if time.monotonic() >= self._deadline:
+                    # The plan's own time is up. Re-entering the call skipped
+                    # this check, and a 240 s plan repeated an instant failure
+                    # for 16 minutes without waking the Agent (life-stage b2).
+                    record.blocked = {"reason": "plan_timeout", "repeats": base_record.repeat_count}
+                    record.status = "blocked"
+                    return "blocked"
                 invocation += 1
                 next_key = f"{base_key}__repeat_{invocation}"
                 self._repeat_history.setdefault(base_key, []).append(next_key)

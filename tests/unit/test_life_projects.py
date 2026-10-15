@@ -10,7 +10,7 @@ from minebot.app.runtime_state import RuntimeScope
 
 PROJECT = {"id": "wheat-field", "intent": "wheat_seeds 0 in the inventory", "status": "active",
            "area": "wheat field",
-           "work": {"kind": "call", "id": "farm", "tool": "farm_area",
+           "work": {"kind": "call", "id": "farm", "tool": "farm_area", "intent": "wheat_seeds 0 in the inventory",
                     "arguments": {"from": [150, 69, 160], "to": [156, 69, 166]}}}
 
 

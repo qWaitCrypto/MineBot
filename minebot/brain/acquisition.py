@@ -126,6 +126,8 @@ COLLECT_ROUTES: dict[str, _CollectRoute] = {
     "raw_gold": _CollectRoute("raw_gold", "raw_gold", ("gold_ore", "deepslate_gold_ore"), ("raw_gold",)),
     "raw_copper": _CollectRoute("raw_copper", "raw_copper", ("copper_ore", "deepslate_copper_ore"), ("raw_copper",)),
     "diamond": _CollectRoute("diamond", "diamond", ("diamond_ore", "deepslate_diamond_ore"), ("diamond",)),
+    # Seeds are an item, not a block: they drop (sometimes) from grass.
+    "wheat_seeds": _CollectRoute("wheat_seeds", "wheat_seeds", ("short_grass", "tall_grass"), ("wheat_seeds",)),
 }
 
 SMELT_ROUTES: dict[str, _SmeltRoute] = {

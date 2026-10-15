@@ -297,6 +297,12 @@ def normalize_project(project: Mapping[str, Any], profile: Mapping[str, Any]) ->
     work = project.get("work")
     if not isinstance(work, Mapping):
         raise LifeProfileError(f"{project_id}.work must be one minebot-work/0.2 work node")
+    if not str(work.get("intent") or "").strip():
+        # As in delegate_work: the node's own intent, written as Body facts, is
+        # what "is it done" checks; the project sentence is not.
+        raise LifeProfileError(
+            f"{project_id}.work.intent is required: the result as facts the Body reports "
+            "(item ids and counts, held item, position)")
     try:
         validate_plan(project_plan(out, work))
     except WorkPlanError as exc:
@@ -308,7 +314,6 @@ def normalize_project(project: Mapping[str, Any], profile: Mapping[str, Any]) ->
 def project_plan(project: Mapping[str, Any], work: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """The project as a delegate_work plan: same language, same executor."""
     node = dict(work if work is not None else project["work"])
-    node.setdefault("intent", project["intent"])
     return {"language": "minebot-work/0.2", "goal": f"my project {project['id']}: {project['intent']}",
             "timeout_s": 1800, "work": node}
 
@@ -463,10 +468,11 @@ def register_life_tools(registry: Any, store: LifeStore) -> None:
     registry.register(RegisteredTool(
         "update_life_project",
         "Add, change or remove one of your own projects (a field, tidying a chest, a small build). "
-        "project: {id, intent, status: active|paused|done, note, area, work}. intent is the result, "
-        "written as facts the Body reports (item ids and counts, held item, position). area names one of "
-        "your mine.areas; every block a project call changes must lie in it. work is one minebot-work/0.2 "
-        "work node, as in delegate_work. When idle, the reflex layer may pick an active project and walk "
+        "project: {id, intent, status: active|paused|done, note, area, work}. intent is one sentence on what "
+        "the project is for; it is shown when the Body chooses what to do next. area names one of your "
+        "mine.areas; every block a project call changes must lie in it. work is one minebot-work/0.2 work "
+        "node, as in delegate_work, and its own intent (and each step's) is written as facts the Body "
+        "reports (item ids and counts, held item, position): that is what is checked to see a step is done. When idle, the reflex layer may pick an active project and walk "
         "its tree; it starts again from the top each time, so use calls that are safe to repeat "
         "(farm_area harvests only ripe crops, build_schematic skips placed blocks). Upsert merges the "
         "given fields into the existing project. " + _LIFE_TEXT_RULE,

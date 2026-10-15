@@ -21,7 +21,9 @@ def terminal_event_to_tool_result(event: Event) -> ToolResult:
     return ToolResult(
         success=success,
         reason=reason,
-        can_retry=not success,
+        # The Body says when the same call from the same place cannot go
+        # differently (e.g. no surface above); "retry" would then be false.
+        can_retry=not success and event.data.get("retryable") is not False,
         metrics=dict(event.data),
     )
 
