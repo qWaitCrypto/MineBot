@@ -155,6 +155,32 @@ def test_the_agents_plan_takes_the_body_from_a_running_project(tmp_path):
     assert [fact.get("kind") for fact in woken] == [None]
 
 
+def test_idle_life_starts_a_project_before_the_agent_has_ever_spoken(tmp_path):
+    # life-stage c2: Decision chose the project 237 times, but the manager had
+    # no loop yet because no Agent turn had run, and nothing ever started.
+    from minebot.app.body_loop import BodyLoop
+
+    async def scenario():
+        async def run_tool(tool, callback, *args, **kwargs):
+            return {"success": True, "reason": "done", "metrics": {}}
+
+        manager, runtime, woken, holders = manager_with(tmp_path, run_tool)
+        runtime.reflex_manager = manager
+        loop = BodyLoop.__new__(BodyLoop)
+        loop.runtime = runtime
+        loop._start_project("wheat-field", {"life_profile": {"projects": [PROJECT]}})
+        for _ in range(50):
+            await asyncio.sleep(0.01)
+            if woken:
+                break
+        await manager.close()
+        return holders, woken
+
+    holders, woken = asyncio.run(scenario())
+    assert holders == [("life", True)]
+    assert woken and woken[0]["status"] == "completed"
+
+
 def test_a_running_project_stops_when_the_agent_starts_thinking(tmp_path):
     async def scenario():
         release = asyncio.Event()

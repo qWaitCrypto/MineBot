@@ -1540,6 +1540,9 @@ class BodyLoop(CallSupervisor):
         manager = getattr(self.runtime, "reflex_manager", None)
         if project is None or manager is None:
             return
+        # The manager learns its loop from the Agent's first turn; idle life may
+        # come first (a session the Agent has not spoken in: life-stage c2).
+        manager.bind_loop(asyncio.get_running_loop())
         if manager.start_project(dict(project)) is None:
             self.runtime.trace.emit("life_project_not_started", project=project_id, reason="activity_running")
 
