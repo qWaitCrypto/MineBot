@@ -113,7 +113,7 @@ def test_life_tools_read_and_write_without_touching_the_body(tmp_path):
 def project(**extra):
     return {"id": "wheat-field", "intent": "wheat_seeds sown on every farmland block in the wheat field",
             "area": "wheat field",
-            "work": {"kind": "call", "tool": "farm_area",
+            "work": {"kind": "call", "tool": "farm_area", "intent": "wheat_seeds 0 in the inventory",
                      "arguments": {"from": [150, 69, 160], "to": [156, 69, 166]}}, **extra}
 
 
@@ -145,6 +145,15 @@ def test_project_writes_must_stay_inside_its_own_area(tmp_path):
     removed = call(registry, "update_life_project", operation="remove", project={"id": "wheat-field"},
                    expected_revision=3, reason="done with it")
     assert removed.success and removed.metrics["projects"] == []
+
+
+def test_a_project_work_node_states_its_own_result(tmp_path):
+    store = LifeStore(tmp_path, SCOPE)
+    store.update({"mine": {"areas": [FIELD]}}, expected_revision=0, reason="mine")
+    bare = project()
+    bare["work"] = {key: value for key, value in bare["work"].items() if key != "intent"}
+    with pytest.raises(LifeProfileError, match="work.intent is required"):
+        store.update_project("upsert", bare, expected_revision=1, reason="start")
 
 
 def test_unregistered_tools_cannot_enter_a_project(tmp_path):

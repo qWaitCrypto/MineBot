@@ -2603,11 +2603,13 @@ public final class MineBotClientBody implements ClientModInitializer {
                 current.kind.equals("digUp") ? current.anchor.getY() + 1 : current.anchor.getY());
             if (current.kind.equals("ascend")) targetY = findSurfaceY(client, current);
             if (targetY == Integer.MIN_VALUE) {
+                current.sameAgainHere = true;
                 requestStop("failed", "surface_not_found");
                 return;
             }
             if (Math.abs(targetY - current.anchor.getY()) > current.verticalDistance
                 || targetY < client.level.getMinY() || targetY + 1 >= client.level.getMaxY()) {
+                current.sameAgainHere = true;
                 requestStop("failed", "vertical_target_out_of_bounds");
                 return;
             }
@@ -2791,10 +2793,21 @@ public final class MineBotClientBody implements ClientModInitializer {
         for (int offset = 1; offset <= limit; offset++) {
             BlockPos feet = new BlockPos(client.player.blockPosition().getX(), y + offset, client.player.blockPosition().getZ());
             if (client.level.hasChunkAt(feet) && client.level.canSeeSky(feet)
-                && client.level.getBlockState(feet).isAir() && client.level.getBlockState(feet.above()).isAir()
+                && passableForStanding(client, feet) && passableForStanding(client, feet.above())
                 && !client.level.getBlockState(feet.below()).getCollisionShape(client.level, feet.below()).isEmpty()) return y + offset;
         }
         return Integer.MIN_VALUE;
+    }
+
+    /**
+     * A player stands in grass, leaf litter or flowers without breaking them.
+     * Requiring air made every surface under such a cover "not found"
+     * (life-stage-20261015 b2: 871 failed ascends below a grassy camp).
+     */
+    private static boolean passableForStanding(Minecraft client, BlockPos pos) {
+        BlockState state = client.level.getBlockState(pos);
+        return state.isAir() || (state.canBeReplaced() && state.getFluidState().isEmpty()
+            && state.getCollisionShape(client.level, pos).isEmpty());
     }
 
     private static boolean isVertical(Run current) {
@@ -2977,6 +2990,7 @@ public final class MineBotClientBody implements ClientModInitializer {
         response.addProperty("status", status);
         response.addProperty("native_stopped", !processActive() && !baritone.getPathingBehavior().isPathing());
         response.addProperty("reason", reason);
+        if (current.sameAgainHere) response.addProperty("retryable", false);
         response.addProperty("objective", current.objective);
         response.addProperty("elapsed_ms", current.elapsed());
         response.addProperty("stop_latency_ms", current.stopAt == 0 ? 0 : (System.nanoTime() - current.stopAt) / 1_000_000);
@@ -3476,6 +3490,8 @@ public final class MineBotClientBody implements ClientModInitializer {
         int verticalDistance;
         int verticalSettledTicks;
         int verticalIdleTicks;
+        /** The same call from this spot would fail the same way: say so in the terminal. */
+        boolean sameAgainHere;
         boolean swimmingUp;
         int swimPreviousAir;
         double swimBestY;

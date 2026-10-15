@@ -1105,6 +1105,10 @@ def _resource_plan(item: str) -> ResourcePlan:
         "cobblestone": ("cobblestone", ("stone", "cobblestone"), ("cobblestone",)),
         "diamond": ("diamond", ("diamond_ore", "deepslate_diamond_ore"), ("diamond",)),
         "dirt": ("dirt", ("dirt", "grass_block", "coarse_dirt", "rooted_dirt"), ("dirt",)),
+        # An item that drops from grass; "wheat_seeds" was sent to the Body as a
+        # block name and refused ("Invalid block name", life-stage b2).
+        "wheat_seeds": ("wheat_seeds", ("short_grass", "tall_grass"), ("wheat_seeds",)),
+        "seeds": ("wheat_seeds", ("short_grass", "tall_grass"), ("wheat_seeds",)),
     }
     mapped = aliases.get(item)
     if mapped is not None:
