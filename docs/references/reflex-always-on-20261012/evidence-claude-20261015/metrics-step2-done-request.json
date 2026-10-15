@@ -1,0 +1,340 @@
+{
+  "source": "logs/reflex-always-on-20261014-step2-done-request/trace.jsonl",
+  "seq_end": 11835,
+  "elapsed_s": 786.2987132072449,
+  "requests_by_purpose": {
+    "idle_frame": 338,
+    "running_frame": 315,
+    "result_frame": 14,
+    "default_result_frame": 17,
+    "plan_result_frame": 3
+  },
+  "requests_by_loop_state": {
+    "idle": 350,
+    "work": 300,
+    "survival": 37
+  },
+  "requests_by_state_and_purpose": {
+    "idle / idle_frame": 338,
+    "work / running_frame": 287,
+    "work / result_frame": 13,
+    "survival / running_frame": 17,
+    "survival / default_result_frame": 17,
+    "idle / running_frame": 11,
+    "idle / result_frame": 1,
+    "survival / plan_result_frame": 3
+  },
+  "requests_per_session_minute_by_loop_state": {
+    "idle": 26.707407308785747,
+    "work": 22.89206340753064,
+    "survival": 2.823354486928779
+  },
+  "requests_per_minute_buckets": [
+    {
+      "minute_from_trace_start": 0,
+      "observed_seconds": 60,
+      "counts_by_state_and_purpose": {
+        "idle / idle_frame": 17,
+        "work / running_frame": 28,
+        "work / result_frame": 2
+      }
+    },
+    {
+      "minute_from_trace_start": 1,
+      "observed_seconds": 60,
+      "counts_by_state_and_purpose": {
+        "idle / idle_frame": 41,
+        "work / running_frame": 3
+      }
+    },
+    {
+      "minute_from_trace_start": 2,
+      "observed_seconds": 60,
+      "counts_by_state_and_purpose": {
+        "idle / idle_frame": 13,
+        "work / running_frame": 42
+      }
+    },
+    {
+      "minute_from_trace_start": 3,
+      "observed_seconds": 60,
+      "counts_by_state_and_purpose": {
+        "work / running_frame": 53,
+        "work / result_frame": 1
+      }
+    },
+    {
+      "minute_from_trace_start": 4,
+      "observed_seconds": 60,
+      "counts_by_state_and_purpose": {
+        "work / running_frame": 55,
+        "work / result_frame": 2
+      }
+    },
+    {
+      "minute_from_trace_start": 5,
+      "observed_seconds": 60,
+      "counts_by_state_and_purpose": {
+        "work / running_frame": 37,
+        "work / result_frame": 1,
+        "idle / idle_frame": 10,
+        "survival / running_frame": 5,
+        "survival / default_result_frame": 5
+      }
+    },
+    {
+      "minute_from_trace_start": 6,
+      "observed_seconds": 60,
+      "counts_by_state_and_purpose": {
+        "work / running_frame": 1,
+        "survival / running_frame": 12,
+        "survival / default_result_frame": 12,
+        "idle / idle_frame": 33,
+        "idle / running_frame": 11,
+        "idle / result_frame": 1,
+        "work / result_frame": 1
+      }
+    },
+    {
+      "minute_from_trace_start": 7,
+      "observed_seconds": 60,
+      "counts_by_state_and_purpose": {
+        "idle / idle_frame": 34,
+        "work / running_frame": 12,
+        "survival / plan_result_frame": 3,
+        "work / result_frame": 4
+      }
+    },
+    {
+      "minute_from_trace_start": 8,
+      "observed_seconds": 60,
+      "counts_by_state_and_purpose": {
+        "idle / idle_frame": 50,
+        "work / running_frame": 1,
+        "work / result_frame": 1
+      }
+    },
+    {
+      "minute_from_trace_start": 9,
+      "observed_seconds": 60,
+      "counts_by_state_and_purpose": {
+        "idle / idle_frame": 31,
+        "work / running_frame": 26,
+        "work / result_frame": 1
+      }
+    },
+    {
+      "minute_from_trace_start": 10,
+      "observed_seconds": 60,
+      "counts_by_state_and_purpose": {
+        "work / running_frame": 29,
+        "idle / idle_frame": 17
+      }
+    },
+    {
+      "minute_from_trace_start": 11,
+      "observed_seconds": 60,
+      "counts_by_state_and_purpose": {
+        "idle / idle_frame": 41
+      }
+    },
+    {
+      "minute_from_trace_start": 12,
+      "observed_seconds": 60,
+      "counts_by_state_and_purpose": {
+        "idle / idle_frame": 46
+      }
+    },
+    {
+      "minute_from_trace_start": 13,
+      "observed_seconds": 6.298713207244873,
+      "counts_by_state_and_purpose": {
+        "idle / idle_frame": 5
+      }
+    }
+  ],
+  "loop_state_seconds": {
+    "idle": 150.0777473449707,
+    "work": 306.2552363872528,
+    "survival": 329.96572947502136
+  },
+  "requests_per_session_minute_by_purpose": {
+    "idle_frame": 25.79172477248452,
+    "running_frame": 24.036666577907173,
+    "result_frame": 1.0682962923514299,
+    "default_result_frame": 1.2972169264267364,
+    "plan_result_frame": 0.2289206340753064
+  },
+  "requests_per_observed_body_work_minute_by_purpose": {
+    "idle_frame": 70.34583233092886,
+    "running_frame": 65.55898575219702,
+    "result_frame": 2.913732700097645,
+    "default_result_frame": 3.538103992975712,
+    "plan_result_frame": 0.6243712928780668
+  },
+  "requests_during_observed_body_work_by_purpose": {
+    "running_frame": 291
+  },
+  "requests_during_observed_body_work_per_minute_by_purpose": {
+    "running_frame": 60.56401540917248
+  },
+  "rate_accounting": "Session-normalized rates include all requests. Total requests divided by observed work time measures overhead, not work cadence. The during-work rate restricts the numerator to requests inside observed native work intervals.",
+  "native_action_count": 51,
+  "observed_native_work_s": 288.289999961853,
+  "idle_remainder_estimate_s": 498.00871324539185,
+  "supervised_body_call_s": 323.62499952316284,
+  "outside_supervised_body_calls_s": 462.67371368408203,
+  "supervised_call_timing_method": "Union of completed supervised-call intervals; includes tool execution and its settlement, not proof of physical movement. Native terminals missing elapsed_ms are excluded from native work time, never treated as proof that the Body was idle.",
+  "timing_method": "Union of native terminal elapsed_ms intervals, deduplicated by action_id; IPC receipt is the end timestamp. Idle remainder and no-question gap are estimates; missing native terminals are not counted as work.",
+  "longest_estimated_idle_without_any_question_s": 9.41622805595398,
+  "longest_idle_state_without_any_question_s": 9.41622805595398,
+  "idle_state_gap_method": "idle is the loop state, and may contain life movement. This measurement excludes dead/work intervals but includes session startup.",
+  "largest_request_gaps": [
+    {
+      "before_seq": 10447,
+      "after_seq": 10613,
+      "seconds": 3.1293082237243652
+    },
+    {
+      "before_seq": 11270,
+      "after_seq": 11276,
+      "seconds": 3.1073973178863525
+    },
+    {
+      "before_seq": 11020,
+      "after_seq": 11026,
+      "seconds": 3.106724739074707
+    },
+    {
+      "before_seq": 10830,
+      "after_seq": 10839,
+      "seconds": 3.1032803058624268
+    },
+    {
+      "before_seq": 10892,
+      "after_seq": 10899,
+      "seconds": 3.102555990219116
+    },
+    {
+      "before_seq": 1610,
+      "after_seq": 1617,
+      "seconds": 3.035534381866455
+    },
+    {
+      "before_seq": 1700,
+      "after_seq": 1707,
+      "seconds": 3.033696174621582
+    },
+    {
+      "before_seq": 1603,
+      "after_seq": 1610,
+      "seconds": 3.032226324081421
+    },
+    {
+      "before_seq": 8902,
+      "after_seq": 8989,
+      "seconds": 2.894561767578125
+    },
+    {
+      "before_seq": 297,
+      "after_seq": 387,
+      "seconds": 2.8829143047332764
+    }
+  ],
+  "default_actions_requested": {
+    "surface": 17
+  },
+  "default_actions_finished": {
+    "surface": 17
+  },
+  "action_accounting": "Answers are semantic selections, default_requested is an attempted action dispatch, and native_action_count is observed execution. They are not interchangeable.",
+  "answers": {
+    "stay": 328,
+    "keep_going": 297,
+    "next_step": 11,
+    "unknown": 11,
+    "repeat": 6,
+    "call_agent": 9,
+    "surface": 17
+  },
+  "unknown_ratio": 0.016200294550810016,
+  "decision_ms_median": 231.855,
+  "agent_delivery_counts": {
+    "reflex_fact_wake": 6
+  },
+  "agent_deliveries": [
+    {
+      "seq": 676,
+      "event": "reflex_fact_wake",
+      "reason": null,
+      "status": "handoff_requested",
+      "kind": null,
+      "activity_id": null,
+      "body_event": null
+    },
+    {
+      "seq": 4236,
+      "event": "reflex_fact_wake",
+      "reason": null,
+      "status": "idle_check",
+      "kind": null,
+      "activity_id": "heartbeat-dc174ea6",
+      "body_event": null
+    },
+    {
+      "seq": 5093,
+      "event": "reflex_fact_wake",
+      "reason": null,
+      "status": "blocked",
+      "kind": null,
+      "activity_id": "call_00_w51trmqj9l6zgd7dt61oq8xy",
+      "body_event": null
+    },
+    {
+      "seq": 5427,
+      "event": "reflex_fact_wake",
+      "reason": null,
+      "status": "default_action_completed",
+      "kind": null,
+      "activity_id": null,
+      "body_event": null
+    },
+    {
+      "seq": 6924,
+      "event": "reflex_fact_wake",
+      "reason": null,
+      "status": "blocked",
+      "kind": null,
+      "activity_id": "activity-42c2510b06bf4802b3d007422e63b4be",
+      "body_event": null
+    },
+    {
+      "seq": 10343,
+      "event": "reflex_fact_wake",
+      "reason": null,
+      "status": "completed",
+      "kind": null,
+      "activity_id": "activity-787cc4a0d47a467f99f5fd88ac722c39",
+      "body_event": null
+    }
+  ],
+  "runtime_intent_wakes": [],
+  "wake_accounting": "reflex_death is a death observation, not a wake. agent_start counts launches/turn entries, not delivery events. Distinct deliveries can be coalesced into a model turn.",
+  "agent_start_count": 8,
+  "delegate_work": 4,
+  "read_reflex": 1,
+  "state_switches": 77,
+  "reaction_chains": [],
+  "deaths": [],
+  "last_body": {
+    "seq": 11824,
+    "pos": [
+      162.3,
+      58.0,
+      158.41
+    ],
+    "health": 20.0,
+    "food": 20,
+    "oxygen": 300
+  }
+}
