@@ -58,6 +58,8 @@ FRONTIER_COLUMN_OFFSETS = (
 )
 FIND_BLOCK_PAGE_SIZE = 32
 FIND_BLOCK_MAX_PAGES = 4
+# Same bound the persistent coverage store enforces per region.
+COVERAGE_OBSERVATION_LIMIT = 128
 
 BLOCK_TARGET_GROUPS: dict[str, tuple[str, ...]] = {
     "#logs": (
@@ -1226,7 +1228,16 @@ class ExplorationTransactions:
         scan: _ScanResult,
         additional_uncertainty: tuple[JsonObject, ...] = (),
     ) -> tuple[CoverageRegion, tuple[str, ...]]:
-        observations = tuple([*scan.blocks, *scan.entities])
+        # The coverage store keeps at most COVERAGE_OBSERVATION_LIMIT items per
+        # region, and a full block scan (4 pages of 32) plus any entity already
+        # passes it; the store then raised and the whole plan died. Keep the
+        # nearest ones and say how many were left out.
+        found = sorted([*scan.blocks, *scan.entities], key=lambda item: float(item.get("dist2") or 0.0))
+        observations = tuple(found[:COVERAGE_OBSERVATION_LIMIT])
+        additional = list(additional_uncertainty)
+        if len(found) > COVERAGE_OBSERVATION_LIMIT:
+            additional.append({"reason": "observations_truncated", "kept": COVERAGE_OBSERVATION_LIMIT, "omitted": len(found) - COVERAGE_OBSERVATION_LIMIT})
+        additional_uncertainty = tuple(additional)
         negative: list[str] = []
         if targets.blocks and not scan.blocks:
             negative.append("no_matching_blocks")

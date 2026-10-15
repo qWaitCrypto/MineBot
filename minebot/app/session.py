@@ -964,6 +964,10 @@ class AgentSession:
                 self.parts.runtime.weld_context.goal_text = ""
                 self._resume_if_waiting()
             self._turn_pending = True
+            # A yielded task still counts as an active goal, so the call above
+            # is skipped; without this the message waits behind the yield
+            # forever (villa run 2026-10-15: "你压根一直在原地没动啊" got no turn).
+            self._resume_if_waiting()
             self._active_turn_request = (command.text, command.sender)
             self._suspended_turn_request = None
             self.parts.context.observe_user_message(command.text, sender=command.sender or None)

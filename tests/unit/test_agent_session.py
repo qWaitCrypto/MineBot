@@ -1486,6 +1486,26 @@ class AgentSessionTests(unittest.TestCase):
         self.assertEqual(bodies[0].interrupt_reasons, ["user_said_wait"])
         self.assertTrue(any(event["event"] == "user_message" and event["command"] == "pause" for event in session.parts.runtime.trace.snapshot()))
 
+    def test_message_after_yield_resumes_and_gets_a_turn(self):
+        # Villa run 2026-10-15: the Agent yielded its task, then the user's
+        # message was logged but never got a turn.
+        calls: list[str] = []
+        bodies: list[FakeBody] = []
+        session = AgentSession(lambda goal: build_parts(goal, calls, bodies))
+        session.submit(SessionCommand.start("collect 64 logs"))
+        asyncio.run(session.step())
+        session.submit(SessionCommand.pause("user_pause"))
+        asyncio.run(session.step())
+        self.assertEqual(session.lifecycle_state, LifecycleState.YIELDED)
+        before = len(calls)
+
+        session.submit(SessionCommand.message("你压根一直在原地没动啊"))
+        answered = asyncio.run(session.step())
+
+        self.assertEqual(answered.status, "completed_turn")
+        self.assertEqual(len(calls), before + 1)
+        self.assertIn("你压根一直在原地没动啊", calls[-1])
+
     def test_continue_after_pause_resumes_existing_runtime(self):
         calls: list[str] = []
         bodies: list[FakeBody] = []

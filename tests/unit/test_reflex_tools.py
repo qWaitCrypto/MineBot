@@ -700,6 +700,40 @@ def test_unknown_body_control_blocks_plan_and_wakes_agent_instead_of_waiting():
     asyncio.run(scenario())
 
 
+def test_plan_that_raises_tells_the_agent_the_error(monkeypatch):
+    # Villa run 2026-10-15: three plans died on a storage ValueError and the
+    # Agent only saw "blocked" with empty facts, so it blamed the terrain.
+    import minebot.app.reflex_tools as reflex_tools
+
+    async def boom(self):
+        raise ValueError("observations exceeds 128 items")
+
+    monkeypatch.setattr(reflex_tools.WorkPlanExecutor, "run", boom)
+
+    async def scenario():
+        facts = []
+        runtime = SimpleNamespace(
+            body=SimpleNamespace(), body_control=BodyControl(), decision_client=Decision(), trace=Trace(),
+            responses_kernel=None, last_known_body_state={}, registry={}, weld_context=None,
+            notify_reflex_fact=facts.append,
+        )
+        manager = ReflexManager(runtime)
+        manager.bind_loop(asyncio.get_running_loop())
+        plan = {"language": "minebot-work/0.2", "goal": "survey", "timeout_s": 2,
+                "work": {"kind": "call", "intent": "perform the planned physical step", "id": "one", "tool": "fake", "arguments": {}}}
+        activity_id = manager.delegate({"plan": plan})["metrics"]["activity_id"]
+        for _ in range(50):
+            await asyncio.sleep(0.01)
+            if facts:
+                break
+        assert facts and facts[-1]["status"] == "blocked"
+        assert "internal error" in facts[-1]["error"] and "observations exceeds 128 items" in facts[-1]["error"]
+        assert "observations exceeds 128 items" in manager.read(activity_id)["metrics"]["error"]
+        await manager.close()
+
+    asyncio.run(scenario())
+
+
 def test_plan_step_context_says_whether_the_intent_is_its_own():
     from types import SimpleNamespace
     plan = {"language": "minebot-work/0.2", "timeout_s": 4, "goal": "stone pickaxe", "work": {"kind": "sequence", "intent": "make a stone pickaxe", "steps": [
