@@ -159,3 +159,26 @@ def test_move_away_always_asks_for_more_distance_than_now():
     tool, args = CallSupervisor._default_action("move_away", {"facts": facts})
     assert tool == "move_away" and args["danger_pos"] == [8.2, 64.0, 0.0]
     assert args["min_distance"] > 8.2 + 7
+
+
+def test_running_protection_is_asked_again_only_after_new_damage():
+    # User 2026-10-15: asked every second, Decision fled whenever the zombie
+    # was not adjacent and never landed a hit (step6-spare-claude2).
+    record = {"supervision_context": {"is_reflex_action": True, "reflex_action_choice": "engage"}}
+    due = BodyLoop._protection_frame_due
+    assert not due(record, {"facts": {"health": 20}})        # just chosen
+    assert not due(record, {"facts": {"health": 20}})        # nothing new
+    assert not due(record, {"facts": {"health": 20.2}})      # regeneration
+    assert due(record, {"facts": {"health": 17.5}})          # hit: choose again
+    assert not due(record, {"facts": {"health": 17.5}})
+    assert due(record, {"facts": {"health": 15}})
+    assert not due(record, {"facts": {}})                    # no health fact: carry on
+    work = {"supervision_context": {"intent": "x"}}
+    assert due(work, {"facts": {"health": 20}}) and due(work, {"facts": {}})
+
+
+def test_running_life_actions_are_still_asked_every_frame():
+    record = {"supervision_context": {"is_reflex_action": True, "is_life_action": True,
+                                      "reflex_action_choice": "look_player"}}
+    assert BodyLoop._protection_frame_due(record, {"facts": {"health": 20}})
+    assert BodyLoop._protection_frame_due(record, {"facts": {"health": 20}})

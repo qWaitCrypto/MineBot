@@ -663,6 +663,10 @@ def test_lifecycle_monitors_work_protection_and_switch_without_nested_consumer(m
         def tick(call_id):
             if state['current'] and state['current']['operation_id'] == call_id:
                 state['current']['fact_revision'] += 1
+                if state['current']['tool'] != 'collect_resource':
+                    # A running protective action is asked again only after
+                    # new damage; the Body keeps being hurt here.
+                    state['current']['facts']['health'] -= 1
 
         runtime.execution_snapshots = SimpleNamespace(current=lambda: state['current'],
             last=lambda: state['last'], tick=tick, running=lambda call_id: None)
@@ -696,7 +700,7 @@ def test_lifecycle_monitors_work_protection_and_switch_without_nested_consumer(m
             stop_events[tool_call_id] = stop
             state['current'] = {'operation_id': tool_call_id, 'tool': tool.name,
                 'state': 'running', 'phase': 'working', 'fact_revision': 1,
-                'facts': {'oxygen': 100, 'position': [1, 60, 2]}}
+                'facts': {'oxygen': 100, 'position': [1, 60, 2], 'health': 20.0}}
             actions.append(tool.name)
 
             def invoke(*unused):

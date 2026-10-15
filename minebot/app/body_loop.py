@@ -377,7 +377,9 @@ class BodyLoop(CallSupervisor):
                             supplied=self._tree_options(record["supervision_context"]),
                             execution=execution,
                         )
-                        if decision_task is not None and not decision_task.done():
+                        if not self._protection_frame_due(record, execution):
+                            pass
+                        elif decision_task is not None and not decision_task.done():
                             pending = frame
                         elif decision_task is None and execution.get("state") not in {"succeeded", "failed", "cancelled", "unknown"}:
                             decision_revision = revision
@@ -1054,6 +1056,22 @@ class BodyLoop(CallSupervisor):
         finally:
             if reserved_here:
                 self._release_result_pending(call_id)
+
+    @staticmethod
+    def _protection_frame_due(record: dict[str, Any], execution: Mapping[str, Any]) -> bool:
+        """A running protective action is asked again only when the Body has
+        been hurt since the previous frame (user, 2026-10-15). Asked every
+        second, Decision chose by distance alone and switched between fighting
+        and fleeing before a single hit landed (step6-spare-claude2)."""
+        context = record.get("supervision_context") or {}
+        if not context.get("is_reflex_action") or context.get("is_life_action"):
+            return True
+        health = (execution.get("facts") or {}).get("health")
+        if not isinstance(health, (int, float)):
+            return False
+        previous = record.get("protection_health")
+        record["protection_health"] = float(health)
+        return isinstance(previous, (int, float)) and health < previous - rq.HURT_MARGIN
 
     def _continues_protection(self, record: Mapping[str, Any], choice: str,
                               execution: Mapping[str, Any]) -> bool:
