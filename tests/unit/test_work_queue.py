@@ -107,6 +107,29 @@ class PersistentWorkIntentQueueTests(unittest.TestCase):
             second_queue.close()
             reopened_store.close()
 
+    def test_a_quit_left_by_an_earlier_process_does_not_end_the_next_one(self):
+        # life-stage-20261015: the launcher's own /quit after the forwarded one
+        # stayed queued and ended the next session 0.4 s after it was ready.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "state.sqlite3"
+            scope = RuntimeScope("server", "world", "Bot1")
+            store = RuntimeStateStore(path)
+            first_queue = PersistentWorkIntentQueue(store, scope, lease_owner="process-1")
+            for _ in range(2):
+                first_queue.enqueue(WorkIntentKind.QUIT, source="user_quit", payload={"reason": "user_quit"})
+            kept = first_queue.enqueue(WorkIntentKind.MESSAGE, source="user_message", payload={"text": "later"})
+            first_queue.complete(first_queue.lease_next(kind=WorkIntentKind.QUIT))
+            first_queue.close()
+            store.close()
+
+            reopened_store = RuntimeStateStore(path)
+            second_queue = PersistentWorkIntentQueue(reopened_store, scope, lease_owner="process-2")
+            self.assertEqual(second_queue.stale_quits, 1)
+            self.assertEqual(second_queue.lease_next().intent_id, kept.intent_id)
+            self.assertEqual(second_queue.pending_count(), 0)
+            second_queue.close()
+            reopened_store.close()
+
     def test_scope_scheduler_lock_rejects_a_second_live_consumer(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "state.sqlite3"
