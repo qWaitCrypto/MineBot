@@ -431,10 +431,10 @@ class CallSupervisor:
         context = record.get("supervision_context")
         context = context if isinstance(context, Mapping) else {}
         if context.get("is_life_action") and not terminal:
-            options = rq.idle_options(cls._facts_for_options(current),
-                                      current=rq.call_text(str(record.get("tool")), record.get("params")))
-            options.pop(str(context.get("reflex_action_choice")), None)
-            return options
+            # Chosen again under its own name, the running action carries on
+            # (BodyLoop._continues_protection); another option switches.
+            return rq.life_running_options(cls._facts_for_options(current),
+                                           str(context.get("reflex_action_choice") or ""))
         reflex_choice = context.get("reflex_action_choice")
         if context.get("is_reflex_action") and not terminal and isinstance(reflex_choice, str):
             # The protective choice again, the running action one option of it.

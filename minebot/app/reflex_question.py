@@ -622,11 +622,23 @@ def player_distance(player: Mapping[str, Any], facts: Mapping[str, Any]) -> floa
     return None
 
 
-def idle_options(facts: Mapping[str, Any], *, current: str = "") -> dict[str, str]:
+def life_running_options(facts: Mapping[str, Any], running: str) -> dict[str, str]:
+    """A running life action: the same idle range with the running action under
+    its own name, first.  Offered only as "Keep doing the current life activity:
+    __reflex_look_at(...)", it was never chosen: following a walking player
+    switched between follow, approach and look every frame (step8-extra-claude2;
+    offline 64/64 switches, named 60/64 carried on)."""
+    options = idle_options(facts)
+    if running in options:
+        return {running: options[running], **{key: text for key, text in options.items() if key != running}}
+    return options
+
+
+def idle_options(facts: Mapping[str, Any]) -> dict[str, str]:
     """Idle range compiled from generic player/profile facts and protection."""
     if dead(facts):
         return {}
-    options = {"keep_going": f"Keep doing the current life activity: {current}."} if current else {}
+    options: dict[str, str] = {}
     profile = facts.get("life_profile") if isinstance(facts.get("life_profile"), Mapping) else {}
     players = nearby_players(facts) if profile else []
     thinking = facts.get("agent_thinking") is True

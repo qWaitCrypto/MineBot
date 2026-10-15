@@ -28,8 +28,8 @@ def test_thinking_filters_life_ranges_but_keeps_protection_and_current_first():
     facts = {"agent_thinking": True, "position": [10,64,0], "oxygen":100,
              "life_profile":{"home":{"pos":[0,64,0]},"relationships":[{"player":"Absent"}]},
              "nearby_entities":[{"type":"player","name":"Visitor","pos":[20,64,0]}]}
-    options = rq.idle_options(facts, current="walk toward Visitor")
-    assert list(options)[0] == "keep_going"
+    options = rq.life_running_options(facts, "approach_player")
+    assert list(options)[0] == "approach_player"
     assert {"look_player", "approach_player", "stay", "surface"} <= options.keys()
     assert not {"go_home", "follow_player", "seek_player"} & options.keys()
 
@@ -46,8 +46,9 @@ def test_life_running_uses_same_idle_range_without_completion_option():
               "supervision_context":{"is_life_action":True, "reflex_action_choice":"go_home"}}
     options = CallSupervisor._options_for(SimpleNamespace(name="move_to"), record,
                                          execution={"facts":facts, "state":"running"})
-    assert list(options)[0] == "keep_going"
-    assert not {"next_step", "go_home"} & options.keys()
+    # The running action under its own name, first; no "keep doing <raw call>".
+    assert list(options)[0] == "go_home" and "keep_going" not in options
+    assert "next_step" not in options
     assert "call_agent" in options and "stay" in options
 
 
@@ -88,3 +89,22 @@ def test_life_movement_waits_for_settings_to_be_applied_not_merely_accepted():
     loop=BodyLoop.__new__(BodyLoop);loop.runtime=SimpleNamespace(body=body)
     loop._life_tool(tool).callable({})
     assert timeline == ["accepted","applied","moved","accepted","applied"]
+
+
+def test_following_a_walking_player_is_offered_as_itself_and_carries_on():
+    """Offered as "Keep doing the current life activity: follow_entity(...)", it
+    was never chosen and the Body switched every frame (step8-extra-claude2)."""
+    from minebot.app.body_loop import BodyLoop
+    from minebot.app.direct_call_supervision import CallSupervisor
+    from types import SimpleNamespace
+    facts = {"position": [0, 64, 0], "life_profile": {"relationships": [{"player": "Visitor"}]},
+             "nearby_entities": [{"type": "player", "name": "Visitor", "id": "p1", "pos": [6, 64, 0]}]}
+    record = {"tool": "follow_entity", "params": {"target": "p1"},
+              "supervision_context": {"is_life_action": True, "is_reflex_action": True,
+                                      "reflex_action_choice": "follow_player"}}
+    options = CallSupervisor._options_for(SimpleNamespace(name="follow_entity"), record,
+                                         execution={"facts": facts, "state": "running"})
+    assert list(options)[0] == "follow_player" and "keep_going" not in options
+    loop = BodyLoop.__new__(BodyLoop)
+    assert loop._continues_protection(record, "follow_player", {"facts": facts})
+    assert not loop._continues_protection(record, "approach_player", {"facts": facts})
