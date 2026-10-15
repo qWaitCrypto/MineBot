@@ -203,16 +203,23 @@ class ReflexManager:
         run_revision = activity.revision
         self._active_activity_id = activity.activity_id
         state_before = await self._progress_state()
+
+        async def dispatch(tool_name, arguments, *, call_id, timeout_s):
+            return await self._call(
+                tool_name, arguments, call_id=call_id, timeout_s=timeout_s,
+                supervision_context=executor.call_context(call_id),
+            )
+
         executor = WorkPlanExecutor(
             activity.plan,
-            call=self._call,
+            call=dispatch,
             state=self._state,
             decision=self.runtime.decision_client,
             choice_provider=getattr(self.runtime, "choice_provider", None),
             observe=self._observe_condition,
             emit=lambda event, **payload: self.runtime.trace.emit(event, activity_id=activity.activity_id, **payload),
             records=activity.records,
-            idle_supervise=self._supervise_idle,
+            result_judge=getattr(getattr(self.runtime, "body_loop", None), "decide_plan_result", None),
         )
         try:
             wait_attempt = 0
@@ -320,10 +327,10 @@ class ReflexManager:
                 self.runtime.body_control.settle(claim_id=activity.activity_id)
 
     async def _state(self) -> dict[str, Any]:
-        if self.runtime.last_known_body_state:
-            return copy.deepcopy(self.runtime.last_known_body_state)
         try:
-            state = await self.runtime._read_lane.run(self.runtime.body.get_state)
+            getter = (getattr(self.runtime.body, "get_reflex_facts", None)
+                      or self.runtime.body.get_state)
+            state = await self.runtime._read_lane.run(getter)
             if isinstance(state, dict):
                 return copy.deepcopy(state)
             if is_dataclass(state):
@@ -331,7 +338,10 @@ class ReflexManager:
             values = getattr(state, "__dict__", None)
             return copy.deepcopy(values) if isinstance(values, dict) else {}
         except Exception:
-            return {}
+            # A plan can run while the Agent has no turns. Its cache may be
+            # the observation before that plan, so use it only if sampling
+            # fails, never in preference to the present Body observation.
+            return copy.deepcopy(self.runtime.last_known_body_state or {})
 
     async def _observe_condition(self, condition: dict[str, Any]) -> dict[str, Any]:
         """Read one generic object projection for non-body bindings.
@@ -387,85 +397,10 @@ class ReflexManager:
             "sampled_at_ms": sampled_at,
         }}
 
-    def _plan_supervision_context(self, call_id: str, tool_name: str) -> dict[str, Any]:
-        """Compile bounded intent facts for the shared Body supervisor.
-
-        The execution interpreter remains the owner of node state. This is
-        only a read of the submitted tree so Decision can see the range the
-        current call belongs to; it does not advance or stop the tree.
-        """
-        with self._lock:
-            activity = self._activities.get(self._active_activity_id or "")
-            if activity is None:
-                return {"is_plan": True, "node_description": f"plan call {tool_name}"}
-            goal = str(activity.plan.get("goal", ""))[:800]
-            found: dict[str, Any] = {}
-
-            lookup_id = str(call_id).split("__repeat_", 1)[0]
-
-            def walk(node: Any, chain: list[str]) -> None:
-                if not isinstance(node, dict) or found:
-                    return
-                next_chain = chain + ([str(node["intent"])] if node.get("intent") else [])
-                if node.get("kind") == "call" and str(node.get("id") or "") == lookup_id:
-                    arguments = node.get("arguments") if isinstance(node.get("arguments"), dict) else {}
-                    own = str(node.get("intent") or arguments.get("intent") or "").strip()
-                    intent = own or str(next_chain[-1] if next_chain else "").strip()
-                    found.update({
-                        "node_description": intent[:800],
-                        "intent": intent[:500],
-                        "intent_of_plan": bool(intent) and not own,
-                        "intent_chain": next_chain[-8:],
-                    })
-                    return
-                kind = node.get("kind")
-                if kind == "sequence":
-                    steps = node.get("steps", [])
-                    for index, child in enumerate(steps):
-                        walk(child, next_chain)
-                        if found:
-                            # The step after the current call, so a running
-                            # frame can offer "start the next step" concretely.
-                            if not found.get("next_call") and index + 1 < len(steps) and isinstance(steps[index + 1], dict):
-                                found["next_call"] = WorkPlanExecutor._first_call_description(steps[index + 1])
-                            return
-                elif kind == "batch":
-                    walk(node.get("body"), next_chain)
-                elif kind == "choice":
-                    for option in node.get("options", []):
-                        if isinstance(option, dict):
-                            walk(option.get("work"), next_chain + ([str(option["intent"])] if option.get("intent") else []))
-
-            walk(activity.plan.get("work"), [])
-            return {
-                "is_plan": True,
-                "goal": goal,
-                "node_description": found.get("node_description", f"plan call {tool_name}"),
-                "intent": found.get("intent", ""),
-                "intent_of_plan": bool(found.get("intent_of_plan")),
-                "intent_chain": found.get("intent_chain", []),
-                "next_call": found.get("next_call", ""),
-            }
-
-    async def _supervise_idle(
-        self, tool_name: str, *, call_id: str, plan_context: dict[str, Any],
-        options: dict[str, str], facts: dict[str, Any],
+    async def _call(
+        self, tool_name: str, arguments: dict[str, Any], *, call_id: str,
+        timeout_s: float | None, supervision_context: dict[str, Any],
     ) -> dict[str, Any]:
-        """Keep the shared Decision loop online while a plan has no call running."""
-        try:
-            tool = self.runtime.registry.get(tool_name)
-        except Exception:
-            return {"choice": "unknown"}
-        supervisor = getattr(self.runtime, "call_supervisor", None)
-        if supervisor is None:
-            return {"choice": "unknown"}
-        return await supervisor.supervise_idle(
-            tool, call_id=f"plan-{call_id}", plan_context={**plan_context, "is_plan": True},
-            options=options, stop_on_choice=True, notify_agent=False,
-            decision_context=facts,
-        )
-
-    async def _call(self, tool_name: str, arguments: dict[str, Any], *, call_id: str, timeout_s: float | None) -> dict[str, Any]:
         tool = self.runtime.registry.get(tool_name)
         raw = await self.runtime.run_tool(
             tool,
@@ -479,10 +414,16 @@ class ReflexManager:
             body_claim_id=self._active_activity_id,
             retain_claim=self._active_activity_id is not None,
             return_execution_receipt=True,
-            supervision_context=self._plan_supervision_context(call_id, tool_name),
+            supervision_context=supervision_context,
         )
         if not isinstance(raw, dict):
             return raw
+        # Plan calls execute outside the Agent tool wrapper, whose settlement
+        # normally records these observations. Update from the real result
+        # before the executor takes its terminal Body snapshot or projects it.
+        remember_body = getattr(self.runtime, "remember_tool_body_facts", None)
+        if callable(remember_body):
+            remember_body(raw)
         # WorkPlanExecutor must judge the same bounded projector that the
         # Agent sees for an ordinary tool call. Preserve supervision handoff
         # facts privately so the interpreter can record the Decision choice
@@ -811,7 +752,7 @@ class ReflexManager:
                                         decision=self.runtime.decision_client,
                                         choice_provider=getattr(self.runtime, "choice_provider", None),
                                         observe=self._observe_condition,
-                                        records=activity.records, idle_supervise=self._supervise_idle)
+                                        records=activity.records)
             return executor.annotated_tree()
         except Exception:
             return copy.deepcopy(activity.plan)
@@ -832,7 +773,7 @@ def reflex_observation_projector(reason: str, metrics: dict[str, object]) -> dic
 def register_reflex_tools(registry: ToolRegistry, manager: ReflexManager) -> None:
     registry.register(RegisteredTool(
         "delegate_work",
-        "Use this tool when a goal involves multiple dependent steps, a long-running action followed by later actions, a condition that may remain pending, or work that may need pause, resume, cancellation, or revision. The reflex layer walks the submitted tree one step at a time from bounded facts; you do not need to poll or wait after delegating, and terminal results are delivered asynchronously. The tree is a range of allowed steps and intents, not a perfect script.\n\nFor work that means ‘do this until enough’, express the range as repeat around a call or choice and write one natural-language ending condition. The reflex layer decides whether the current facts satisfy that condition, whether the same call can make progress again, or whether to return control. After handing over a plan, use your turn to prepare later reasoning instead of reading progress.\n\nSubmit one minebot-work/0.2 plan object with: language='minebot-work/0.2', goal (string), positive timeout_s, a required work.intent, and work (the root node). Every mutating direct body call also requires an intent field. Intent states the result to achieve, not the thought or tactic while starting it: good: “把 2 块生铁熔炼成 2 个铁锭”; bad: “我先把东西放进炉子”。 Child nodes may inherit their parent's intent; read-only calls do not need one. Missing intent is rejected.\n\nNode kinds:\n- call   {kind:'call', tool, arguments, optional id/when/timeout_s/repeat} — one tool call; Decision judges its result and may repeat it\n- sequence {kind:'sequence', intent, steps:[...]} — ordered range of steps; intent is required and must describe the composite action\n- wait   {kind:'wait', condition:{text,...}, timeout_s} — hold until a condition is satisfied or times out\n- batch  {kind:'batch', intent, items:[...], body:<node>} — run body once per item; intent required\n- choice {kind:'choice', intent, options:[{id,intent,work},...]} — Decision picks among the declared branches whenever the choice is entered; every option needs id, intent and work\n\nA call repeat is {again_when:<text or object>, until:<text or object>}; those conditions are interpreted by Decision after each result. The same-call option is always available even when repeat is omitted; repeat adds the Agent’s extra wording. interrupt_when is reserved for a later slice.\n\nsequence, batch, choice, and every choice option all require a non-empty intent field.\n\nExample multi-step plan (move then place):\n  {language:'minebot-work/0.2', goal:'go to [10,64,20] and place oak_log at [10,65,20]', timeout_s:60,\n   work:{kind:'sequence', intent:'travel then build',\n     steps:[\n       {kind:'call', tool:'move_to', arguments:{x:10,y:64,z:20}},\n       {kind:'call', tool:'place_block', arguments:{block:'oak_log',x:10,y:65,z:20}}\n     ]}}\n\nUse only registered tool names and keep arguments as the tool schema requires. Let the reflex layer judge enough, completion and off-intent from facts; do not encode scene detectors or a polling loop in the plan.",
+        "Use this tool when a goal involves multiple dependent steps, a long-running action followed by later actions, a condition that may remain pending, or work that may need pause, resume, cancellation, or revision. The reflex layer walks the submitted tree one step at a time from bounded facts; you do not need to poll or wait after delegating, and terminal results are delivered asynchronously. The tree is a range of allowed steps and intents, not a perfect script.\n\nFor work that means ‘do this until enough’, express the range as repeat around a call or choice and write one natural-language ending condition. The reflex layer decides whether the current facts satisfy that condition, whether the same call can make progress again, or whether to return control. After handing over a plan, use your turn to prepare later reasoning instead of reading progress.\n\nSubmit one minebot-work/0.2 plan object with: language='minebot-work/0.2', goal (string), positive timeout_s, a required work.intent, and work (the root node). Every mutating direct body call also requires an intent field. Intent states the result to achieve, not the thought or tactic while starting it, written in English as facts the Body reports: inventory item ids and counts, the item held in the main hand, or a position or height. Use the item ids the inventory shows; when any kind will do, list them, e.g. \'at least 8 logs of any kind (oak_log, birch_log, spruce_log, ...) in the inventory\', never a bare category such as \'logs\'. Good: \'at least 4 oak_log in the inventory\', \'stone_pickaxe held in the main hand\', \'standing at y 70 or higher\'. Bad: \'I will try the trees first\', \'back on open ground\'. Child nodes may inherit their parent's intent; read-only calls do not need one. Missing intent is rejected.\n\nNode kinds:\n- call   {kind:'call', tool, arguments, optional id/when/timeout_s/repeat} — one tool call; Decision judges its result and may repeat it\n- sequence {kind:'sequence', intent, steps:[...]} — ordered range of steps; intent is required and must describe the composite action\n- wait   {kind:'wait', condition:{text,...}, timeout_s} — hold until a condition is satisfied or times out\n- batch  {kind:'batch', intent, items:[...], body:<node>} — run body once per item; intent required\n- choice {kind:'choice', intent, options:[{id,intent,work},...]} — Decision picks among the declared branches whenever the choice is entered; every option needs id, intent and work\n\nA call repeat is {again_when:<text or object>, until:<text or object>}; those conditions are interpreted by Decision after each result. The same-call option is always available even when repeat is omitted; repeat adds the Agent’s extra wording. A plan may include interrupt_when={condition:{text:...},handler:<work node with intent>}. The condition and handler intent appear in each running work frame. Decision stops and settles the current action, executes the handler, then chooses resume, repeat the handler, or call the Agent. User cancellation cancels both.\n\nsequence, batch, choice, and every choice option all require a non-empty intent field.\n\nExample multi-step plan (move then place):\n  {language:'minebot-work/0.2', goal:'go to [10,64,20] and place oak_log at [10,65,20]', timeout_s:60,\n   work:{kind:'sequence', intent:'oak_log placed at [10,65,20]',\n     steps:[\n       {kind:'call', tool:'move_to', arguments:{x:10,y:64,z:20}},\n       {kind:'call', tool:'place_block', arguments:{block:'oak_log',x:10,y:65,z:20}}\n     ]}}\n\nUse only registered tool names and keep arguments as the tool schema requires. Let the reflex layer judge enough, completion and off-intent from facts; do not encode scene detectors or a polling loop in the plan.",
         {"type": "object", "properties": {"plan": {"type": "object"}}, "required": ["plan"], "additionalProperties": False},
         manager.delegate,
         ToolSidecar("reflex_delegate", mutating=False, source="agent.reflex", tool_type="plan", permission="manage_reflex"),

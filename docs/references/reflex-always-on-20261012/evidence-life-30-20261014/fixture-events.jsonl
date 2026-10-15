@@ -1,0 +1,84 @@
+{"time": 1791950585.927142, "last_seq": 8, "kind": "first_question", "matched_seq": 6}
+{"time": 1791950585.9500208, "last_seq": 8, "kind": "fixture_day", "command": "time set day", "response": "Set minecraft:overworld to time marker minecraft:day"}
+{"time": 1791950585.9533331, "last_seq": 8, "kind": "fixture_day_frozen", "command": "gamerule minecraft:advance_time false", "response": "Gamerule advance_time is now set to: false"}
+{"time": 1791950585.9563444, "last_seq": 8, "kind": "fixture_natural_spawns", "command": "gamerule minecraft:spawn_mobs true", "response": "Gamerule spawn_mobs is now set to: true"}
+{"time": 1791950585.958544, "last_seq": 8, "kind": "fixture_restore_regeneration", "command": "gamerule minecraft:natural_health_regeneration true", "response": "Gamerule natural_health_regeneration is now set to: true"}
+{"time": 1791950585.971412, "last_seq": 8, "kind": "fixture_heal", "command": "effect give Step5NextBot minecraft:instant_health 1 10 true", "response": "Applied effect Instant Health to Step5NextBot"}
+{"time": 1791950585.9748569, "last_seq": 8, "kind": "fixture_feed", "command": "effect give Step5NextBot minecraft:saturation 1 10 true", "response": "Applied effect Saturation to Step5NextBot"}
+{"time": 1791950585.9846961, "last_seq": 9, "kind": "fixture_retained_inventory", "command": "data get entity Step5NextBot Inventory", "response": "Step5NextBot has the following entity data: [{count: 1, Slot: 0b, id: \"minecraft:stone_sword\"}]"}
+{"time": 1791950586.060014, "last_seq": 9, "kind": "fixture_remove_old_visitor", "command": "player Visitor kill", "response": "Can only manipulate existing players"}
+{"time": 1791950586.0778463, "last_seq": 9, "kind": "fixture_start_away_from_home", "command": "tp Step5NextBot 250.5 121 250.5", "response": "Teleported Step5NextBot to 250.500000, 121.000000, 250.500000"}
+{"time": 1791950586.0780096, "last_seq": 9, "kind": "life_observation_started", "duration_s": 1800, "home": [220.5, 121, 220.5]}
+{"time": 1791950586.09286, "last_seq": 9, "kind": "minute_health", "command": "data get entity Step5NextBot Health", "response": "Step5NextBot has the following entity data: 20.0f"}
+{"time": 1791950586.0930738, "last_seq": 9, "kind": "observation_minute", "elapsed_s": 0.0, "body_seq": null, "position": null, "health": null, "deaths": []}
+{"time": 1791950646.28026, "last_seq": 239, "kind": "minute_health", "command": "data get entity Step5NextBot Health", "response": "Step5NextBot has the following entity data: 20.0f"}
+{"time": 1791950646.2806032, "last_seq": 239, "kind": "observation_minute", "elapsed_s": 60.2, "body_seq": 239, "position": [250.5, 121.0, 250.5], "health": 20.0, "deaths": []}
+{"time": 1791950706.0951424, "last_seq": 470, "kind": "fixture_visitor_spawn", "command": "player Visitor spawn at 256.5 121.0 250.5", "response": ""}
+{"time": 1791950706.099676, "last_seq": 470, "kind": "minute_health", "command": "data get entity Step5NextBot Health", "response": "Step5NextBot has the following entity data: 20.0f"}
+{"time": 1791950706.1002169, "last_seq": 470, "kind": "observation_minute", "elapsed_s": 120.0, "body_seq": 466, "position": [250.5, 121.0, 250.5], "health": 20.0, "deaths": []}
+{"time": 1791950766.3083208, "last_seq": 703, "kind": "fixture_visitor_walk", "command": "player Visitor move forward", "response": ""}
+{"time": 1791950766.3109853, "last_seq": 703, "kind": "minute_health", "command": "data get entity Step5NextBot Health", "response": "Step5NextBot has the following entity data: 20.0f"}
+{"time": 1791950766.3114042, "last_seq": 703, "kind": "observation_minute", "elapsed_s": 180.2, "body_seq": 699, "position": [250.5, 121.0, 250.5], "health": 20.0, "deaths": []}
+{"time": 1791950771.3411112, "last_seq": 724, "kind": "fixture_visitor_stop", "command": "player Visitor stop", "response": ""}
+{"time": 1791950816.5550425, "last_seq": 919, "kind": "fixture_visitor_leave", "command": "player Visitor kill", "response": ""}
+{"time": 1791950826.0886555, "last_seq": 960, "kind": "minute_health", "command": "data get entity Step5NextBot Health", "response": "Step5NextBot has the following entity data: 20.0f"}
+{"time": 1791950826.089187, "last_seq": 960, "kind": "observation_minute", "elapsed_s": 240.0, "body_seq": 954, "position": [250.5, 121.0, 250.5], "health": 20.0, "deaths": []}
+{"time": 1791950886.3012514, "last_seq": 1193, "kind": "fixture_dusk", "command": "time set 12500", "response": "Set minecraft:overworld to 12500 tick(s)"}
+{"time": 1791950886.305159, "last_seq": 1193, "kind": "minute_health", "command": "data get entity Step5NextBot Health", "response": "Step5NextBot has the following entity data: 20.0f"}
+{"time": 1791950886.3062572, "last_seq": 1193, "kind": "observation_minute", "elapsed_s": 300.2, "body_seq": 1187, "position": [250.5, 121.0, 250.5], "health": 20.0, "deaths": []}
+{"time": 1791950887.8100874, "last_seq": 1209, "kind": "user_message", "text": "/goal 请走到 [210,121,230]，不破坏或放置方块，不采集。意图写到达这个位置；完成后如实报告，然后让身体回到空闲生活。"}
+{"time": 1791950887.8102033, "last_seq": 1209, "kind": "task_during_life", "while_native_home_move": true, "native_body_seq": 1209, "life_request_seq": 1199}
+{"time": 1791950946.0979009, "last_seq": 2412, "kind": "minute_health", "command": "data get entity Step5NextBot Health", "response": "Step5NextBot has the following entity data: 20.0f"}
+{"time": 1791950946.0988152, "last_seq": 2412, "kind": "observation_minute", "elapsed_s": 360.0, "body_seq": 2402, "position": [219.25, 121.0, 221.75], "health": 20.0, "deaths": []}
+{"time": 1791951006.403122, "last_seq": 3301, "kind": "minute_health", "command": "data get entity Step5NextBot Health", "response": "Step5NextBot has the following entity data: 20.0f"}
+{"time": 1791951006.4042583, "last_seq": 3301, "kind": "observation_minute", "elapsed_s": 420.3, "body_seq": 3299, "position": [210.72, 121.0, 230.28], "health": 20.0, "deaths": []}
+{"time": 1791951066.1783478, "last_seq": 3885, "kind": "fixture_day_after_task", "command": "time set day", "response": "Set minecraft:overworld to time marker minecraft:day"}
+{"time": 1791951066.1862466, "last_seq": 3885, "kind": "minute_health", "command": "data get entity Step5NextBot Health", "response": "Step5NextBot has the following entity data: 20.0f"}
+{"time": 1791951066.1872814, "last_seq": 3885, "kind": "observation_minute", "elapsed_s": 480.1, "body_seq": 3881, "position": [219.25, 121.0, 221.75], "health": 20.0, "deaths": []}
+{"time": 1791951126.4699118, "last_seq": 4472, "kind": "minute_health", "command": "data get entity Step5NextBot Health", "response": "Step5NextBot has the following entity data: 20.0f"}
+{"time": 1791951126.4709513, "last_seq": 4472, "kind": "observation_minute", "elapsed_s": 540.4, "body_seq": 4466, "position": [210.72, 121.0, 230.28], "health": 20.0, "deaths": []}
+{"time": 1791951186.271763, "last_seq": 5204, "kind": "minute_health", "command": "data get entity Step5NextBot Health", "response": "Step5NextBot has the following entity data: 20.0f"}
+{"time": 1791951186.2735336, "last_seq": 5204, "kind": "observation_minute", "elapsed_s": 600.2, "body_seq": 5198, "position": [210.33, 121.0, 230.32], "health": 20.0, "deaths": []}
+{"time": 1791951246.5497417, "last_seq": 5748, "kind": "minute_health", "command": "data get entity Step5NextBot Health", "response": "Step5NextBot has the following entity data: 20.0f"}
+{"time": 1791951246.5511987, "last_seq": 5748, "kind": "observation_minute", "elapsed_s": 660.5, "body_seq": 5744, "position": [210.33, 121.0, 230.32], "health": 20.0, "deaths": []}
+{"time": 1791951306.4002452, "last_seq": 6449, "kind": "minute_health", "command": "data get entity Step5NextBot Health", "response": "Step5NextBot has the following entity data: 20.0f"}
+{"time": 1791951306.4020226, "last_seq": 6449, "kind": "observation_minute", "elapsed_s": 720.3, "body_seq": 6445, "position": [210.33, 121.0, 230.32], "health": 20.0, "deaths": []}
+{"time": 1791951366.200684, "last_seq": 7036, "kind": "minute_health", "command": "data get entity Step5NextBot Health", "response": "Step5NextBot has the following entity data: 20.0f"}
+{"time": 1791951366.2027767, "last_seq": 7036, "kind": "observation_minute", "elapsed_s": 780.1, "body_seq": 7028, "position": [210.33, 121.0, 230.32], "health": 20.0, "deaths": []}
+{"time": 1791951426.277066, "last_seq": 7384, "kind": "minute_health", "command": "data get entity Step5NextBot Health", "response": "Step5NextBot has the following entity data: 20.0f"}
+{"time": 1791951426.2787108, "last_seq": 7384, "kind": "observation_minute", "elapsed_s": 840.2, "body_seq": 7375, "position": [210.33, 121.0, 230.32], "health": 20.0, "deaths": []}
+{"time": 1791951486.3678126, "last_seq": 7930, "kind": "minute_health", "command": "data get entity Step5NextBot Health", "response": "Step5NextBot has the following entity data: 20.0f"}
+{"time": 1791951486.3694222, "last_seq": 7930, "kind": "observation_minute", "elapsed_s": 900.3, "body_seq": 7924, "position": [210.33, 121.0, 230.32], "health": 20.0, "deaths": []}
+{"time": 1791951546.2644145, "last_seq": 8795, "kind": "minute_health", "command": "data get entity Step5NextBot Health", "response": "Step5NextBot has the following entity data: 20.0f"}
+{"time": 1791951546.2663257, "last_seq": 8795, "kind": "observation_minute", "elapsed_s": 960.2, "body_seq": 8789, "position": [210.33, 121.0, 230.32], "health": 20.0, "deaths": []}
+{"time": 1791951606.190124, "last_seq": 9498, "kind": "minute_health", "command": "data get entity Step5NextBot Health", "response": "Step5NextBot has the following entity data: 20.0f"}
+{"time": 1791951606.1926346, "last_seq": 9498, "kind": "observation_minute", "elapsed_s": 1020.1, "body_seq": 9494, "position": [210.33, 121.0, 230.32], "health": 20.0, "deaths": []}
+{"time": 1791951666.209479, "last_seq": 10379, "kind": "minute_health", "command": "data get entity Step5NextBot Health", "response": "Step5NextBot has the following entity data: 20.0f"}
+{"time": 1791951666.2129495, "last_seq": 10379, "kind": "observation_minute", "elapsed_s": 1080.1, "body_seq": 10373, "position": [210.33, 121.0, 230.32], "health": 20.0, "deaths": []}
+{"time": 1791951726.2260282, "last_seq": 11410, "kind": "minute_health", "command": "data get entity Step5NextBot Health", "response": "Step5NextBot has the following entity data: 20.0f"}
+{"time": 1791951726.2500358, "last_seq": 11410, "kind": "observation_minute", "elapsed_s": 1140.1, "body_seq": 11406, "position": [210.33, 121.0, 230.32], "health": 20.0, "deaths": []}
+{"time": 1791951786.490279, "last_seq": 12725, "kind": "minute_health", "command": "data get entity Step5NextBot Health", "response": "Step5NextBot has the following entity data: 20.0f"}
+{"time": 1791951786.4933765, "last_seq": 12725, "kind": "observation_minute", "elapsed_s": 1200.4, "body_seq": 12722, "position": [210.33, 121.0, 230.32], "health": 20.0, "deaths": []}
+{"time": 1791951846.456381, "last_seq": 14226, "kind": "minute_health", "command": "data get entity Step5NextBot Health", "response": "Step5NextBot has the following entity data: 20.0f"}
+{"time": 1791951846.459948, "last_seq": 14226, "kind": "observation_minute", "elapsed_s": 1260.4, "body_seq": 14224, "position": [210.33, 121.0, 230.32], "health": 20.0, "deaths": []}
+{"time": 1791951906.1758835, "last_seq": 15548, "kind": "minute_health", "command": "data get entity Step5NextBot Health", "response": "Step5NextBot has the following entity data: 20.0f"}
+{"time": 1791951906.1784766, "last_seq": 15548, "kind": "observation_minute", "elapsed_s": 1320.1, "body_seq": 15542, "position": [210.33, 121.0, 230.32], "health": 20.0, "deaths": []}
+{"time": 1791951966.4500935, "last_seq": 17040, "kind": "minute_health", "command": "data get entity Step5NextBot Health", "response": "Step5NextBot has the following entity data: 20.0f"}
+{"time": 1791951966.4545736, "last_seq": 17040, "kind": "observation_minute", "elapsed_s": 1380.4, "body_seq": 17040, "position": [210.33, 121.0, 230.32], "health": 20.0, "deaths": []}
+{"time": 1791952026.3623016, "last_seq": 18532, "kind": "minute_health", "command": "data get entity Step5NextBot Health", "response": "Step5NextBot has the following entity data: 20.0f"}
+{"time": 1791952026.3656907, "last_seq": 18532, "kind": "observation_minute", "elapsed_s": 1440.3, "body_seq": 18526, "position": [210.33, 121.0, 230.32], "health": 20.0, "deaths": []}
+{"time": 1791952086.2506955, "last_seq": 19875, "kind": "minute_health", "command": "data get entity Step5NextBot Health", "response": "Step5NextBot has the following entity data: 20.0f"}
+{"time": 1791952086.2550428, "last_seq": 19875, "kind": "observation_minute", "elapsed_s": 1500.2, "body_seq": 19871, "position": [210.33, 121.0, 230.32], "health": 20.0, "deaths": []}
+{"time": 1791952146.2442868, "last_seq": 20731, "kind": "minute_health", "command": "data get entity Step5NextBot Health", "response": "Step5NextBot has the following entity data: 20.0f"}
+{"time": 1791952146.2550387, "last_seq": 20731, "kind": "observation_minute", "elapsed_s": 1560.1, "body_seq": 20725, "position": [210.33, 121.0, 230.32], "health": 20.0, "deaths": []}
+{"time": 1791952206.2010562, "last_seq": 21914, "kind": "minute_health", "command": "data get entity Step5NextBot Health", "response": "Step5NextBot has the following entity data: 20.0f"}
+{"time": 1791952206.205037, "last_seq": 21914, "kind": "observation_minute", "elapsed_s": 1620.1, "body_seq": 21910, "position": [210.33, 121.0, 230.32], "health": 20.0, "deaths": []}
+{"time": 1791952266.2486794, "last_seq": 23419, "kind": "minute_health", "command": "data get entity Step5NextBot Health", "response": "Step5NextBot has the following entity data: 20.0f"}
+{"time": 1791952266.2537103, "last_seq": 23419, "kind": "observation_minute", "elapsed_s": 1680.2, "body_seq": 23413, "position": [210.33, 121.0, 230.32], "health": 20.0, "deaths": []}
+{"time": 1791952326.305941, "last_seq": 24762, "kind": "minute_health", "command": "data get entity Step5NextBot Health", "response": "Step5NextBot has the following entity data: 20.0f"}
+{"time": 1791952326.312933, "last_seq": 24762, "kind": "observation_minute", "elapsed_s": 1740.2, "body_seq": 24760, "position": [210.33, 121.0, 230.32], "health": 20.0, "deaths": []}
+{"time": 1791952386.5836236, "last_seq": 25940, "kind": "fixture_final_health", "command": "data get entity Step5NextBot Health", "response": "Step5NextBot has the following entity data: 20.0f"}
+{"time": 1791952386.587161, "last_seq": 25940, "kind": "fixture_final_position", "command": "data get entity Step5NextBot Pos", "response": "Step5NextBot has the following entity data: [210.3277399601575d, 121.0d, 230.32420501042876d]"}
+{"time": 1791952386.5912514, "last_seq": 25940, "kind": "fixture_complete", "observed_s": 1800.5, "deaths": []}
+{"time": 1791952386.5936089, "last_seq": 25940, "kind": "fixture_visitor_cleanup", "command": "player Visitor kill", "response": "Can only manipulate existing players"}
+{"time": 1791952386.9036698, "last_seq": 25943, "kind": "user_message", "text": "/quit"}

@@ -1,0 +1,2913 @@
+[
+  {
+    "action_id": null,
+    "allow_break": true,
+    "allow_inventory": false,
+    "allow_place": true,
+    "any_process_active": false,
+    "baritone_goal": "",
+    "builder_paused": false,
+    "dimension": "minecraft:overworld",
+    "effects": [],
+    "entities_near": [
+      {
+        "dist": 22.4,
+        "health": 20.0,
+        "hostile": false,
+        "name": "Visitor",
+        "pos": [
+          227.7,
+          121.0,
+          243.3
+        ],
+        "type": "player"
+      },
+      {
+        "dist": 55.6,
+        "health": 10.0,
+        "hostile": false,
+        "name": "Cow",
+        "pos": [
+          228.7,
+          67.0,
+          210.3
+        ],
+        "type": "cow"
+      },
+      {
+        "dist": 57.1,
+        "health": 10.0,
+        "hostile": false,
+        "name": "Cow",
+        "pos": [
+          235.2,
+          67.0,
+          208.8
+        ],
+        "type": "cow"
+      },
+      {
+        "dist": 57.9,
+        "health": 10.0,
+        "hostile": false,
+        "name": "Cow",
+        "pos": [
+          237.1,
+          67.0,
+          207.8
+        ],
+        "type": "cow"
+      },
+      {
+        "dist": 61.0,
+        "health": 10.0,
+        "hostile": false,
+        "name": "Cow",
+        "pos": [
+          255.2,
+          70.0,
+          222.8
+        ],
+        "type": "cow"
+      },
+      {
+        "dist": 71.8,
+        "health": 10.0,
+        "hostile": false,
+        "name": "Cow",
+        "pos": [
+          249.1,
+          65.0,
+          186.2
+        ],
+        "type": "cow"
+      },
+      {
+        "dist": 78.3,
+        "health": 10.0,
+        "hostile": false,
+        "name": "Cow",
+        "pos": [
+          229.8,
+          64.0,
+          274.8
+        ],
+        "type": "cow"
+      },
+      {
+        "dist": 78.6,
+        "health": 10.0,
+        "hostile": false,
+        "name": "Cow",
+        "pos": [
+          264.6,
+          64.0,
+          254.7
+        ],
+        "type": "cow"
+      }
+    ],
+    "event": "body_progress",
+    "fall_flying": false,
+    "food": 20,
+    "health": 20.0,
+    "hotbar": [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+    ],
+    "lite": false,
+    "offhand_item": "",
+    "on_ground": true,
+    "oxygen": 300,
+    "pathing": false,
+    "pitch": 9.3,
+    "pos": [
+      221.73,
+      121.0,
+      221.73
+    ],
+    "processes": {
+      "builder": false,
+      "elytra": false,
+      "explore": false,
+      "farm": false,
+      "follow": false,
+      "get": false,
+      "goal": false,
+      "mine": false
+    },
+    "sampled_at_ms": 1791944836994,
+    "selected_item": "",
+    "selected_slot": 0,
+    "seq": 1024,
+    "session_id": "Step5NextBot",
+    "source": "idle",
+    "time": 1000,
+    "tool_call_id": null,
+    "ts": 1791944836.9959958,
+    "weather": "clear",
+    "yaw": -225.0
+  },
+  {
+    "seq": 1025,
+    "ts": 1791944837.7003043,
+    "session_id": "Step5NextBot",
+    "event": "call_supervision_request",
+    "tool_call_id": "idle-loop",
+    "tool": "__idle__",
+    "purpose": "idle_frame",
+    "loop_state": "idle",
+    "fact_revision": 204,
+    "request": {
+      "state": {
+        "body": "Health is 20 of 20. Hunger is 20 of 20. Air supply is full. The main hand holds nothing.",
+        "agent_intent": "This is the idle-life intention: “白天在住处附近待着，有人来就过去看看；天黑前回住处。 安静，好奇，不爱冒险。 他在附近时我会过去看看他在做什么。”.",
+        "daylight": "It is day.",
+        "threats": "No hostile mob is in view.",
+        "inventory": "empty",
+        "position": "now at [221.7, 121.0, 221.7]."
+      },
+      "questions": {
+        "q": {
+          "type": "choice",
+          "instructions": "Choose what the Body does next.",
+          "criteria": {
+            "seek_player": "Search nearby for Visitor and walk up to them.",
+            "stay": "Stay where the Body is and wait for the next step.",
+            "call_agent": "Hand control back to the Agent for a new direction."
+          }
+        }
+      }
+    },
+    "request_chars": 658,
+    "frame_input": {
+      "execution": {
+        "facts": {
+          "bot": "Step5NextBot",
+          "pos": [
+            221.7323050015919,
+            121.0,
+            221.73104953302166
+          ],
+          "yaw": -224.99988,
+          "pitch": 9.30001,
+          "health": 20.0,
+          "food": 20,
+          "oxygen": 300,
+          "inventory_raw": "{}",
+          "inventory_hash": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "effects": [],
+          "time": 1000,
+          "weather": "clear",
+          "dimension": "minecraft:overworld",
+          "complete": true,
+          "sleeping": false,
+          "missing": false,
+          "selected_slot": 0,
+          "inventory_counts": {},
+          "selected_item": "",
+          "offhand_item": "",
+          "body_owner": "Step5NextBot",
+          "pending_action_count": 0,
+          "hazard_unresolved": null,
+          "selected_item_known": true,
+          "inventory_complete": true,
+          "inventory_includes_selected": true,
+          "disposable_world": true,
+          "protocol": "minebot-client-spike/1",
+          "ready": true,
+          "active_action_known": true,
+          "active_action_id": null,
+          "sampled_at_ms": 1791944837694,
+          "pid": 2042399,
+          "heap_used_bytes": 420545920,
+          "heap_committed_bytes": 568328192,
+          "player": "Step5NextBot",
+          "position": [
+            221.7323050015919,
+            121.0,
+            221.73104953302166
+          ],
+          "on_ground": true,
+          "head_in_liquid": false,
+          "creative": false,
+          "difficulty": "easy",
+          "using_item": false,
+          "use_key_down": false,
+          "fall_flying": false,
+          "menu": "InventoryMenu",
+          "chest_item": "air",
+          "feet_chunk_loaded": true,
+          "inventory": {},
+          "scaffold_blocks": 0,
+          "inventory_count_scope": "all_player_inventory_slots_including_selected_hotbar",
+          "inventory_slots": [
+            {
+              "slot": 0,
+              "slotType": "hotbar",
+              "slotLabel": "hotbar.0",
+              "empty": true,
+              "count": 0
+            },
+            {
+              "slot": 1,
+              "slotType": "hotbar",
+              "slotLabel": "hotbar.1",
+              "empty": true,
+              "count": 0
+            },
+            {
+              "slot": 2,
+              "slotType": "hotbar",
+              "slotLabel": "hotbar.2",
+              "empty": true,
+              "count": 0
+            },
+            {
+              "slot": 3,
+              "slotType": "hotbar",
+              "slotLabel": "hotbar.3",
+              "empty": true,
+              "count": 0
+            },
+            {
+              "slot": 4,
+              "slotType": "hotbar",
+              "slotLabel": "hotbar.4",
+              "empty": true,
+              "count": 0
+            },
+            {
+              "slot": 5,
+              "slotType": "hotbar",
+              "slotLabel": "hotbar.5",
+              "empty": true,
+              "count": 0
+            },
+            {
+              "slot": 6,
+              "slotType": "hotbar",
+              "slotLabel": "hotbar.6",
+              "empty": true,
+              "count": 0
+            },
+            {
+              "slot": 7,
+              "slotType": "hotbar",
+              "slotLabel": "hotbar.7",
+              "empty": true,
+              "count": 0
+            },
+            {
+              "slot": 8,
+              "slotType": "hotbar",
+              "slotLabel": "hotbar.8",
+              "empty": true,
+              "count": 0
+            },
+            {
+              "slot": 9,
+              "slotType": "inventory",
+              "slotLabel": "inventory.9",
+              "empty": true,
+              "count": 0
+            },
+            {
+              "slot": 10,
+              "slotType": "inventory",
+              "slotLabel": "inventory.10",
+              "empty": true,
+              "count": 0
+            },
+            {
+              "slot": 11,
+              "slotType": "inventory",
+              "slotLabel": "inventory.11",
+              "empty": true,
+              "count": 0
+            },
+            {
+              "slot": 12,
+              "slotType": "inventory",
+              "slotLabel": "inventory.12",
+              "empty": true,
+              "count": 0
+            },
+            {
+              "slot": 13,
+              "slotType": "inventory",
+              "slotLabel": "inventory.13",
+              "empty": true,
+              "count": 0
+            },
+            {
+              "slot": 14,
+              "slotType": "inventory",
+              "slotLabel": "inventory.14",
+              "empty": true,
+              "count": 0
+            },
+            {
+              "slot": 15,
+              "slotType": "inventory",
+              "slotLabel": "inventory.15",
+              "empty": true,
+              "count": 0
+            },
+            {
+              "slot": 16,
+              "slotType": "inventory",
+              "slotLabel": "inventory.16",
+              "empty": true,
+              "count": 0
+            },
+            {
+              "slot": 17,
+              "slotType": "inventory",
+              "slotLabel": "inventory.17",
+              "empty": true,
+              "count": 0
+            },
+            {
+              "slot": 18,
+              "slotType": "inventory",
+              "slotLabel": "inventory.18",
+              "empty": true,
+              "count": 0
+            },
+            {
+              "slot": 19,
+              "slotType": "inventory",
+              "slotLabel": "inventory.19",
+              "empty": true,
+              "count": 0
+            },
+            {
+              "slot": 20,
+              "slotType": "inventory",
+              "slotLabel": "inventory.20",
+              "empty": true,
+              "count": 0
+            },
+            {
+              "slot": 21,
+              "slotType": "inventory",
+              "slotLabel": "inventory.21",
+              "empty": true,
+              "count": 0
+            },
+            {
+              "slot": 22,
+              "slotType": "inventory",
+              "slotLabel": "inventory.22",
+              "empty": true,
+              "count": 0
+            },
+            {
+              "slot": 23,
+              "slotType": "inventory",
+              "slotLabel": "inventory.23",
+              "empty": true,
+              "count": 0
+            },
+            {
+              "slot": 24,
+              "slotType": "inventory",
+              "slotLabel": "inventory.24",
+              "empty": true,
+              "count": 0
+            },
+            {
+              "slot": 25,
+              "slotType": "inventory",
+              "slotLabel": "inventory.25",
+              "empty": true,
+              "count": 0
+            },
+            {
+              "slot": 26,
+              "slotType": "inventory",
+              "slotLabel": "inventory.26",
+              "empty": true,
+              "count": 0
+            },
+            {
+              "slot": 27,
+              "slotType": "inventory",
+              "slotLabel": "inventory.27",
+              "empty": true,
+              "count": 0
+            },
+            {
+              "slot": 28,
+              "slotType": "inventory",
+              "slotLabel": "inventory.28",
+              "empty": true,
+              "count": 0
+            },
+            {
+              "slot": 29,
+              "slotType": "inventory",
+              "slotLabel": "inventory.29",
+              "empty": true,
+              "count": 0
+            },
+            {
+              "slot": 30,
+              "slotType": "inventory",
+              "slotLabel": "inventory.30",
+              "empty": true,
+              "count": 0
+            },
+            {
+              "slot": 31,
+              "slotType": "inventory",
+              "slotLabel": "inventory.31",
+              "empty": true,
+              "count": 0
+            },
+            {
+              "slot": 32,
+              "slotType": "inventory",
+              "slotLabel": "inventory.32",
+              "empty": true,
+              "count": 0
+            },
+            {
+              "slot": 33,
+              "slotType": "inventory",
+              "slotLabel": "inventory.33",
+              "empty": true,
+              "count": 0
+            },
+            {
+              "slot": 34,
+              "slotType": "inventory",
+              "slotLabel": "inventory.34",
+              "empty": true,
+              "count": 0
+            },
+            {
+              "slot": 35,
+              "slotType": "inventory",
+              "slotLabel": "inventory.35",
+              "empty": true,
+              "count": 0
+            },
+            {
+              "slot": 36,
+              "slotType": "armor",
+              "slotLabel": "armor.36",
+              "empty": true,
+              "count": 0
+            },
+            {
+              "slot": 37,
+              "slotType": "armor",
+              "slotLabel": "armor.37",
+              "empty": true,
+              "count": 0
+            },
+            {
+              "slot": 38,
+              "slotType": "armor",
+              "slotLabel": "armor.38",
+              "empty": true,
+              "count": 0
+            },
+            {
+              "slot": 39,
+              "slotType": "armor",
+              "slotLabel": "armor.39",
+              "empty": true,
+              "count": 0
+            },
+            {
+              "slot": 40,
+              "slotType": "offhand",
+              "slotLabel": "offhand.40",
+              "empty": true,
+              "count": 0
+            },
+            {
+              "slot": 41,
+              "slotType": "aux",
+              "slotLabel": "aux.41",
+              "empty": true,
+              "count": 0
+            },
+            {
+              "slot": 42,
+              "slotType": "aux",
+              "slotLabel": "aux.42",
+              "empty": true,
+              "count": 0
+            },
+            {
+              "slot": 43,
+              "slotType": "aux",
+              "slotLabel": "aux.43",
+              "empty": true,
+              "count": 0
+            },
+            {
+              "slot": 44,
+              "slotType": "aux",
+              "slotLabel": "aux.44",
+              "empty": true,
+              "count": 0
+            },
+            {
+              "slot": 45,
+              "slotType": "aux",
+              "slotLabel": "aux.45",
+              "empty": true,
+              "count": 0
+            }
+          ],
+          "entities": [
+            {
+              "id": "d4a4d9ea-8308-4c0c-9713-3ae373d2f098",
+              "name": "Cow",
+              "type": "cow",
+              "pos": [
+                175.2057609694563,
+                72.0,
+                176.52014896175874
+              ],
+              "dist2": 6609.744830038876,
+              "hostile": false,
+              "health": 10.0
+            },
+            {
+              "id": "d4f23c81-b5c1-403f-9722-3213bdcf8f2d",
+              "name": "Chicken",
+              "type": "chicken",
+              "pos": [
+                196.08663201574544,
+                68.0,
+                280.84123748210226
+              ],
+              "dist2": 6960.714862272608,
+              "hostile": false,
+              "health": 4.0
+            },
+            {
+              "id": "2867da34-27f2-44cc-8a34-1793a59a3d83",
+              "name": "Egg",
+              "type": "item",
+              "pos": [
+                195.50393230693072,
+                68.0,
+                281.4983622733757
+              ],
+              "dist2": 7069.059206413332,
+              "hostile": false
+            },
+            {
+              "id": "eed0a4c5-f773-4c78-b0db-36ea22256dc3",
+              "name": "Pig",
+              "type": "pig",
+              "pos": [
+                235.25072675049248,
+                63.0,
+                167.28038147586932
+              ],
+              "dist2": 6511.622978451338,
+              "hostile": false,
+              "health": 10.0
+            },
+            {
+              "id": "5d85ca5e-abe8-489c-9ad8-e85c5221ffe2",
+              "name": "Cow",
+              "type": "cow",
+              "pos": [
+                237.14673935738367,
+                67.0,
+                207.78209341807104
+              ],
+              "dist2": 3348.178163205832,
+              "hostile": false,
+              "health": 10.0
+            },
+            {
+              "id": "8e50d21a-ad90-4ae0-a1f9-cc5df41f4422",
+              "name": "Cow",
+              "type": "cow",
+              "pos": [
+                235.1903919301992,
+                67.0,
+                208.843329476963
+              ],
+              "dist2": 3263.213432021288,
+              "hostile": false,
+              "health": 10.0
+            },
+            {
+              "id": "5cd158fb-5ebf-408c-b9a2-c806fb5a38db",
+              "name": "Cow",
+              "type": "cow",
+              "pos": [
+                228.68913683868342,
+                67.0,
+                210.31039016854746
+              ],
+              "dist2": 3094.8289695289227,
+              "hostile": false,
+              "health": 10.0
+            },
+            {
+              "id": "47adfe28-5d0f-31e3-992c-e409ace53612",
+              "name": "Visitor",
+              "type": "player",
+              "pos": [
+                227.7,
+                121.0,
+                243.28215144211674
+              ],
+              "dist2": 500.06337709022665,
+              "hostile": false,
+              "health": 20.0
+            },
+            {
+              "id": "14510fa6-a618-4e00-a134-c31990921a95",
+              "name": "Cow",
+              "type": "cow",
+              "pos": [
+                229.80714588398473,
+                64.0,
+                274.75502156411187
+              ],
+              "dist2": 6125.7446652297995,
+              "hostile": false,
+              "health": 10.0
+            },
+            {
+              "id": "d099443d-ca3f-4f74-bbe8-e8966c5efc07",
+              "name": "Pig",
+              "type": "pig",
+              "pos": [
+                232.73049929953083,
+                64.0,
+                285.2438370450456
+              ],
+              "dist2": 7403.834455362721,
+              "hostile": false,
+              "health": 10.0
+            },
+            {
+              "id": "90d22a00-f1c8-4cfa-8168-5b08b30f61c8",
+              "name": "Pig",
+              "type": "pig",
+              "pos": [
+                239.26198211073822,
+                64.0,
+                286.2819309812564
+              ],
+              "dist2": 7723.105875294982,
+              "hostile": false,
+              "health": 10.0
+            },
+            {
+              "id": "a5dc949e-42b7-4e6d-ad91-52fa8491f3d5",
+              "name": "Cow",
+              "type": "cow",
+              "pos": [
+                231.86667967237318,
+                64.0,
+                276.1336271581943
+              ],
+              "dist2": 6311.34600223071,
+              "hostile": false,
+              "health": 10.0
+            },
+            {
+              "id": "32ce9dfc-e374-415d-8251-30ff0b4087c6",
+              "name": "Cow",
+              "type": "cow",
+              "pos": [
+                239.83925117903453,
+                64.0,
+                277.4686884094156
+              ],
+              "dist2": 6683.545887388107,
+              "hostile": false,
+              "health": 10.0
+            },
+            {
+              "id": "4ed15022-9b9e-41e4-afd5-0676547777ac",
+              "name": "Cow",
+              "type": "cow",
+              "pos": [
+                249.13565244869847,
+                65.0,
+                186.2030126611456
+              ],
+              "dist2": 5149.184855276227,
+              "hostile": false,
+              "health": 10.0
+            },
+            {
+              "id": "7bcb1214-edc0-4914-822b-55c5eec53d2d",
+              "name": "Cow",
+              "type": "cow",
+              "pos": [
+                255.15761256083945,
+                70.0,
+                222.84228757719296
+              ],
+              "dist2": 3719.4860354211055,
+              "hostile": false,
+              "health": 10.0
+            },
+            {
+              "id": "b59358a1-6902-4381-bf9e-f7f5f0fd4aee",
+              "name": "Cow",
+              "type": "cow",
+              "pos": [
+                255.1607903318625,
+                63.0,
+                264.5306079996901
+              ],
+              "dist2": 6313.265836417889,
+              "hostile": false,
+              "health": 10.0
+            },
+            {
+              "id": "7d024208-b804-444f-8915-825a10acfe8d",
+              "name": "Cow",
+              "type": "cow",
+              "pos": [
+                240.5077282074755,
+                64.0,
+                276.2155725217137
+              ],
+              "dist2": 6570.079761865342,
+              "hostile": false,
+              "health": 10.0
+            },
+            {
+              "id": "8942de41-5739-453e-bf2e-b4adb4022ceb",
+              "name": "Cow",
+              "type": "cow",
+              "pos": [
+                256.13760656384426,
+                64.0,
+                166.80210743722563
+              ],
+              "dist2": 7449.913455352838,
+              "hostile": false,
+              "health": 10.0
+            },
+            {
+              "id": "fd5020d4-0f85-4f06-a50b-c4778cb9c726",
+              "name": "Cow",
+              "type": "cow",
+              "pos": [
+                266.52612334684557,
+                65.0,
+                174.19717521781476
+              ],
+              "dist2": 7401.955369361471,
+              "hostile": false,
+              "health": 10.0
+            },
+            {
+              "id": "bee2a9ad-eb70-4084-942d-80cf9f0bd66b",
+              "name": "Cow",
+              "type": "cow",
+              "pos": [
+                264.5535381541964,
+                64.0,
+                254.72340989711225
+              ],
+              "dist2": 6171.153851103732,
+              "hostile": false,
+              "health": 10.0
+            },
+            {
+              "id": "d1e58d33-f3c3-4355-8918-f9649054492c",
+              "name": "Pig",
+              "type": "pig",
+              "pos": [
+                262.7954688624774,
+                64.0,
+                270.7429885503921
+              ],
+              "dist2": 7337.353592508372,
+              "hostile": false,
+              "health": 10.0
+            },
+            {
+              "id": "adabd36c-f88d-455d-ae93-c1466e101302",
+              "name": "Cow",
+              "type": "cow",
+              "pos": [
+                266.1980023627495,
+                64.0,
+                258.5306957071232
+              ],
+              "dist2": 6580.412200353123,
+              "hostile": false,
+              "health": 10.0
+            },
+            {
+              "id": "779ae1ed-b255-4bc7-8284-61fa3b60db4a",
+              "name": "Pig",
+              "type": "pig",
+              "pos": [
+                269.2126736987453,
+                66.0,
+                283.752144092383
+              ],
+              "dist2": 9126.001581958863,
+              "hostile": false,
+              "health": 10.0
+            },
+            {
+              "id": "f6338afa-7932-43c1-b512-2de8d3b9ecb2",
+              "name": "Cow",
+              "type": "cow",
+              "pos": [
+                274.12877241664233,
+                66.0,
+                177.1290344499176
+              ],
+              "dist2": 7759.729547049883,
+              "hostile": false,
+              "health": 10.0
+            },
+            {
+              "id": "b69c245a-1f4c-4fc7-8dc3-4072da069c06",
+              "name": "Pig",
+              "type": "pig",
+              "pos": [
+                281.6896128963352,
+                70.0,
+                237.17822798624462
+              ],
+              "dist2": 6434.494092150761,
+              "hostile": false,
+              "health": 10.0
+            }
+          ],
+          "pathing": false,
+          "allow_inventory": false,
+          "mine_active": false,
+          "goal_active": false,
+          "get_active": false,
+          "explore_active": false,
+          "follow_active": false,
+          "farm_active": false,
+          "builder_active": false,
+          "builder_paused": false,
+          "builder_placeable": [],
+          "builder_selections": [],
+          "elytra_active": false,
+          "elytra_loaded": true,
+          "elytra_safe_to_cancel": true,
+          "elytra_destination": "",
+          "elytra_path_size": 0,
+          "following": [],
+          "any_process_active": false,
+          "baritone_goal": "",
+          "build_in_layers": false,
+          "allow_break": true,
+          "allow_place": true,
+          "explore_for_blocks": true,
+          "replant_crops": true,
+          "farm_max_scan_size": 256,
+          "legit_mine_y": -59,
+          "free_look": true,
+          "block_free_look": false,
+          "remain_with_existing_look": true,
+          "smooth_look": false,
+          "random_looking": 0.01,
+          "random_looking_113": 2.0,
+          "type": "state",
+          "request_id": "request-450",
+          "life_profile": {
+            "world": "step5-next-edc89ff-20261014",
+            "dimension": "overworld",
+            "home": {
+              "pos": [
+                220.5,
+                121,
+                220.5
+              ],
+              "note": "人工测试高台中心"
+            },
+            "routine": "白天在住处附近待着，有人来就过去看看；天黑前回住处。",
+            "relationships": [
+              {
+                "player": "Visitor",
+                "note": "他在附近时我会过去看看他在做什么。"
+              }
+            ],
+            "personality": "安静，好奇，不爱冒险。"
+          },
+          "life_intent": "白天在住处附近待着，有人来就过去看看；天黑前回住处。 安静，好奇，不爱冒险。 他在附近时我会过去看看他在做什么。"
+        }
+      },
+      "monotonic_s": 536073.051198629,
+      "vital_samples": [
+        [
+          536064.876555207,
+          {
+            "health": 20.0,
+            "oxygen": 300.0
+          }
+        ],
+        [
+          536066.0512124,
+          {
+            "health": 20.0,
+            "oxygen": 300.0
+          }
+        ],
+        [
+          536067.245839497,
+          {
+            "health": 20.0,
+            "oxygen": 300.0
+          }
+        ],
+        [
+          536068.420267643,
+          {
+            "health": 20.0,
+            "oxygen": 300.0
+          }
+        ],
+        [
+          536069.578580836,
+          {
+            "health": 20.0,
+            "oxygen": 300.0
+          }
+        ],
+        [
+          536070.719357713,
+          {
+            "health": 20.0,
+            "oxygen": 300.0
+          }
+        ],
+        [
+          536071.887005214,
+          {
+            "health": 20.0,
+            "oxygen": 300.0
+          }
+        ]
+      ],
+      "ambient_facts": {
+        "selected_item": "",
+        "selected_item_known": true,
+        "inventory_complete": true,
+        "inventory_includes_selected": true,
+        "creative": false,
+        "dimension": "minecraft:overworld",
+        "time": 1000,
+        "inventory": {},
+        "inventory_counts": {},
+        "entities": [
+          {
+            "id": "d4a4d9ea-8308-4c0c-9713-3ae373d2f098",
+            "name": "Cow",
+            "type": "cow",
+            "pos": [
+              175.2057609694563,
+              72.0,
+              176.52014896175874
+            ],
+            "dist2": 6609.744830038876,
+            "hostile": false,
+            "health": 10.0
+          },
+          {
+            "id": "d4f23c81-b5c1-403f-9722-3213bdcf8f2d",
+            "name": "Chicken",
+            "type": "chicken",
+            "pos": [
+              196.08663201574544,
+              68.0,
+              280.84123748210226
+            ],
+            "dist2": 6960.714862272608,
+            "hostile": false,
+            "health": 4.0
+          },
+          {
+            "id": "2867da34-27f2-44cc-8a34-1793a59a3d83",
+            "name": "Egg",
+            "type": "item",
+            "pos": [
+              195.50393230693072,
+              68.0,
+              281.4983622733757
+            ],
+            "dist2": 7069.059206413332,
+            "hostile": false
+          },
+          {
+            "id": "eed0a4c5-f773-4c78-b0db-36ea22256dc3",
+            "name": "Pig",
+            "type": "pig",
+            "pos": [
+              235.25072675049248,
+              63.0,
+              167.28038147586932
+            ],
+            "dist2": 6511.622978451338,
+            "hostile": false,
+            "health": 10.0
+          },
+          {
+            "id": "5d85ca5e-abe8-489c-9ad8-e85c5221ffe2",
+            "name": "Cow",
+            "type": "cow",
+            "pos": [
+              237.14673935738367,
+              67.0,
+              207.78209341807104
+            ],
+            "dist2": 3348.178163205832,
+            "hostile": false,
+            "health": 10.0
+          },
+          {
+            "id": "8e50d21a-ad90-4ae0-a1f9-cc5df41f4422",
+            "name": "Cow",
+            "type": "cow",
+            "pos": [
+              235.1903919301992,
+              67.0,
+              208.843329476963
+            ],
+            "dist2": 3263.213432021288,
+            "hostile": false,
+            "health": 10.0
+          },
+          {
+            "id": "5cd158fb-5ebf-408c-b9a2-c806fb5a38db",
+            "name": "Cow",
+            "type": "cow",
+            "pos": [
+              228.68913683868342,
+              67.0,
+              210.31039016854746
+            ],
+            "dist2": 3094.8289695289227,
+            "hostile": false,
+            "health": 10.0
+          },
+          {
+            "id": "47adfe28-5d0f-31e3-992c-e409ace53612",
+            "name": "Visitor",
+            "type": "player",
+            "pos": [
+              227.7,
+              121.0,
+              243.28215144211674
+            ],
+            "dist2": 500.06337709022665,
+            "hostile": false,
+            "health": 20.0
+          },
+          {
+            "id": "14510fa6-a618-4e00-a134-c31990921a95",
+            "name": "Cow",
+            "type": "cow",
+            "pos": [
+              229.80714588398473,
+              64.0,
+              274.75502156411187
+            ],
+            "dist2": 6125.7446652297995,
+            "hostile": false,
+            "health": 10.0
+          },
+          {
+            "id": "d099443d-ca3f-4f74-bbe8-e8966c5efc07",
+            "name": "Pig",
+            "type": "pig",
+            "pos": [
+              232.73049929953083,
+              64.0,
+              285.2438370450456
+            ],
+            "dist2": 7403.834455362721,
+            "hostile": false,
+            "health": 10.0
+          },
+          {
+            "id": "90d22a00-f1c8-4cfa-8168-5b08b30f61c8",
+            "name": "Pig",
+            "type": "pig",
+            "pos": [
+              239.26198211073822,
+              64.0,
+              286.2819309812564
+            ],
+            "dist2": 7723.105875294982,
+            "hostile": false,
+            "health": 10.0
+          },
+          {
+            "id": "a5dc949e-42b7-4e6d-ad91-52fa8491f3d5",
+            "name": "Cow",
+            "type": "cow",
+            "pos": [
+              231.86667967237318,
+              64.0,
+              276.1336271581943
+            ],
+            "dist2": 6311.34600223071,
+            "hostile": false,
+            "health": 10.0
+          },
+          {
+            "id": "32ce9dfc-e374-415d-8251-30ff0b4087c6",
+            "name": "Cow",
+            "type": "cow",
+            "pos": [
+              239.83925117903453,
+              64.0,
+              277.4686884094156
+            ],
+            "dist2": 6683.545887388107,
+            "hostile": false,
+            "health": 10.0
+          },
+          {
+            "id": "4ed15022-9b9e-41e4-afd5-0676547777ac",
+            "name": "Cow",
+            "type": "cow",
+            "pos": [
+              249.13565244869847,
+              65.0,
+              186.2030126611456
+            ],
+            "dist2": 5149.184855276227,
+            "hostile": false,
+            "health": 10.0
+          },
+          {
+            "id": "7bcb1214-edc0-4914-822b-55c5eec53d2d",
+            "name": "Cow",
+            "type": "cow",
+            "pos": [
+              255.15761256083945,
+              70.0,
+              222.84228757719296
+            ],
+            "dist2": 3719.4860354211055,
+            "hostile": false,
+            "health": 10.0
+          },
+          {
+            "id": "b59358a1-6902-4381-bf9e-f7f5f0fd4aee",
+            "name": "Cow",
+            "type": "cow",
+            "pos": [
+              255.1607903318625,
+              63.0,
+              264.5306079996901
+            ],
+            "dist2": 6313.265836417889,
+            "hostile": false,
+            "health": 10.0
+          },
+          {
+            "id": "7d024208-b804-444f-8915-825a10acfe8d",
+            "name": "Cow",
+            "type": "cow",
+            "pos": [
+              240.5077282074755,
+              64.0,
+              276.2155725217137
+            ],
+            "dist2": 6570.079761865342,
+            "hostile": false,
+            "health": 10.0
+          },
+          {
+            "id": "8942de41-5739-453e-bf2e-b4adb4022ceb",
+            "name": "Cow",
+            "type": "cow",
+            "pos": [
+              256.13760656384426,
+              64.0,
+              166.80210743722563
+            ],
+            "dist2": 7449.913455352838,
+            "hostile": false,
+            "health": 10.0
+          },
+          {
+            "id": "fd5020d4-0f85-4f06-a50b-c4778cb9c726",
+            "name": "Cow",
+            "type": "cow",
+            "pos": [
+              266.52612334684557,
+              65.0,
+              174.19717521781476
+            ],
+            "dist2": 7401.955369361471,
+            "hostile": false,
+            "health": 10.0
+          },
+          {
+            "id": "bee2a9ad-eb70-4084-942d-80cf9f0bd66b",
+            "name": "Cow",
+            "type": "cow",
+            "pos": [
+              264.5535381541964,
+              64.0,
+              254.72340989711225
+            ],
+            "dist2": 6171.153851103732,
+            "hostile": false,
+            "health": 10.0
+          },
+          {
+            "id": "d1e58d33-f3c3-4355-8918-f9649054492c",
+            "name": "Pig",
+            "type": "pig",
+            "pos": [
+              262.7954688624774,
+              64.0,
+              270.7429885503921
+            ],
+            "dist2": 7337.353592508372,
+            "hostile": false,
+            "health": 10.0
+          },
+          {
+            "id": "adabd36c-f88d-455d-ae93-c1466e101302",
+            "name": "Cow",
+            "type": "cow",
+            "pos": [
+              266.1980023627495,
+              64.0,
+              258.5306957071232
+            ],
+            "dist2": 6580.412200353123,
+            "hostile": false,
+            "health": 10.0
+          },
+          {
+            "id": "779ae1ed-b255-4bc7-8284-61fa3b60db4a",
+            "name": "Pig",
+            "type": "pig",
+            "pos": [
+              269.2126736987453,
+              66.0,
+              283.752144092383
+            ],
+            "dist2": 9126.001581958863,
+            "hostile": false,
+            "health": 10.0
+          },
+          {
+            "id": "f6338afa-7932-43c1-b512-2de8d3b9ecb2",
+            "name": "Cow",
+            "type": "cow",
+            "pos": [
+              274.12877241664233,
+              66.0,
+              177.1290344499176
+            ],
+            "dist2": 7759.729547049883,
+            "hostile": false,
+            "health": 10.0
+          },
+          {
+            "id": "b69c245a-1f4c-4fc7-8dc3-4072da069c06",
+            "name": "Pig",
+            "type": "pig",
+            "pos": [
+              281.6896128963352,
+              70.0,
+              237.17822798624462
+            ],
+            "dist2": 6434.494092150761,
+            "hostile": false,
+            "health": 10.0
+          }
+        ]
+      },
+      "safe_standing_position": [
+        221.7323050015919,
+        121.0,
+        221.73104953302166
+      ]
+    },
+    "compiler_input": {
+      "facts": {
+        "selected_item": "",
+        "selected_item_known": true,
+        "inventory_complete": true,
+        "inventory_includes_selected": true,
+        "creative": false,
+        "dimension": "minecraft:overworld",
+        "time": 1000,
+        "inventory": {},
+        "inventory_counts": {},
+        "entities": [
+          {
+            "id": "d4a4d9ea-8308-4c0c-9713-3ae373d2f098",
+            "name": "Cow",
+            "type": "cow",
+            "pos": [
+              175.2057609694563,
+              72.0,
+              176.52014896175874
+            ],
+            "dist2": 6609.744830038876,
+            "hostile": false,
+            "health": 10.0
+          },
+          {
+            "id": "d4f23c81-b5c1-403f-9722-3213bdcf8f2d",
+            "name": "Chicken",
+            "type": "chicken",
+            "pos": [
+              196.08663201574544,
+              68.0,
+              280.84123748210226
+            ],
+            "dist2": 6960.714862272608,
+            "hostile": false,
+            "health": 4.0
+          },
+          {
+            "id": "2867da34-27f2-44cc-8a34-1793a59a3d83",
+            "name": "Egg",
+            "type": "item",
+            "pos": [
+              195.50393230693072,
+              68.0,
+              281.4983622733757
+            ],
+            "dist2": 7069.059206413332,
+            "hostile": false
+          },
+          {
+            "id": "eed0a4c5-f773-4c78-b0db-36ea22256dc3",
+            "name": "Pig",
+            "type": "pig",
+            "pos": [
+              235.25072675049248,
+              63.0,
+              167.28038147586932
+            ],
+            "dist2": 6511.622978451338,
+            "hostile": false,
+            "health": 10.0
+          },
+          {
+            "id": "5d85ca5e-abe8-489c-9ad8-e85c5221ffe2",
+            "name": "Cow",
+            "type": "cow",
+            "pos": [
+              237.14673935738367,
+              67.0,
+              207.78209341807104
+            ],
+            "dist2": 3348.178163205832,
+            "hostile": false,
+            "health": 10.0
+          },
+          {
+            "id": "8e50d21a-ad90-4ae0-a1f9-cc5df41f4422",
+            "name": "Cow",
+            "type": "cow",
+            "pos": [
+              235.1903919301992,
+              67.0,
+              208.843329476963
+            ],
+            "dist2": 3263.213432021288,
+            "hostile": false,
+            "health": 10.0
+          },
+          {
+            "id": "5cd158fb-5ebf-408c-b9a2-c806fb5a38db",
+            "name": "Cow",
+            "type": "cow",
+            "pos": [
+              228.68913683868342,
+              67.0,
+              210.31039016854746
+            ],
+            "dist2": 3094.8289695289227,
+            "hostile": false,
+            "health": 10.0
+          },
+          {
+            "id": "47adfe28-5d0f-31e3-992c-e409ace53612",
+            "name": "Visitor",
+            "type": "player",
+            "pos": [
+              227.7,
+              121.0,
+              243.28215144211674
+            ],
+            "dist2": 500.06337709022665,
+            "hostile": false,
+            "health": 20.0
+          },
+          {
+            "id": "14510fa6-a618-4e00-a134-c31990921a95",
+            "name": "Cow",
+            "type": "cow",
+            "pos": [
+              229.80714588398473,
+              64.0,
+              274.75502156411187
+            ],
+            "dist2": 6125.7446652297995,
+            "hostile": false,
+            "health": 10.0
+          },
+          {
+            "id": "d099443d-ca3f-4f74-bbe8-e8966c5efc07",
+            "name": "Pig",
+            "type": "pig",
+            "pos": [
+              232.73049929953083,
+              64.0,
+              285.2438370450456
+            ],
+            "dist2": 7403.834455362721,
+            "hostile": false,
+            "health": 10.0
+          },
+          {
+            "id": "90d22a00-f1c8-4cfa-8168-5b08b30f61c8",
+            "name": "Pig",
+            "type": "pig",
+            "pos": [
+              239.26198211073822,
+              64.0,
+              286.2819309812564
+            ],
+            "dist2": 7723.105875294982,
+            "hostile": false,
+            "health": 10.0
+          },
+          {
+            "id": "a5dc949e-42b7-4e6d-ad91-52fa8491f3d5",
+            "name": "Cow",
+            "type": "cow",
+            "pos": [
+              231.86667967237318,
+              64.0,
+              276.1336271581943
+            ],
+            "dist2": 6311.34600223071,
+            "hostile": false,
+            "health": 10.0
+          },
+          {
+            "id": "32ce9dfc-e374-415d-8251-30ff0b4087c6",
+            "name": "Cow",
+            "type": "cow",
+            "pos": [
+              239.83925117903453,
+              64.0,
+              277.4686884094156
+            ],
+            "dist2": 6683.545887388107,
+            "hostile": false,
+            "health": 10.0
+          },
+          {
+            "id": "4ed15022-9b9e-41e4-afd5-0676547777ac",
+            "name": "Cow",
+            "type": "cow",
+            "pos": [
+              249.13565244869847,
+              65.0,
+              186.2030126611456
+            ],
+            "dist2": 5149.184855276227,
+            "hostile": false,
+            "health": 10.0
+          },
+          {
+            "id": "7bcb1214-edc0-4914-822b-55c5eec53d2d",
+            "name": "Cow",
+            "type": "cow",
+            "pos": [
+              255.15761256083945,
+              70.0,
+              222.84228757719296
+            ],
+            "dist2": 3719.4860354211055,
+            "hostile": false,
+            "health": 10.0
+          },
+          {
+            "id": "b59358a1-6902-4381-bf9e-f7f5f0fd4aee",
+            "name": "Cow",
+            "type": "cow",
+            "pos": [
+              255.1607903318625,
+              63.0,
+              264.5306079996901
+            ],
+            "dist2": 6313.265836417889,
+            "hostile": false,
+            "health": 10.0
+          },
+          {
+            "id": "7d024208-b804-444f-8915-825a10acfe8d",
+            "name": "Cow",
+            "type": "cow",
+            "pos": [
+              240.5077282074755,
+              64.0,
+              276.2155725217137
+            ],
+            "dist2": 6570.079761865342,
+            "hostile": false,
+            "health": 10.0
+          },
+          {
+            "id": "8942de41-5739-453e-bf2e-b4adb4022ceb",
+            "name": "Cow",
+            "type": "cow",
+            "pos": [
+              256.13760656384426,
+              64.0,
+              166.80210743722563
+            ],
+            "dist2": 7449.913455352838,
+            "hostile": false,
+            "health": 10.0
+          },
+          {
+            "id": "fd5020d4-0f85-4f06-a50b-c4778cb9c726",
+            "name": "Cow",
+            "type": "cow",
+            "pos": [
+              266.52612334684557,
+              65.0,
+              174.19717521781476
+            ],
+            "dist2": 7401.955369361471,
+            "hostile": false,
+            "health": 10.0
+          },
+          {
+            "id": "bee2a9ad-eb70-4084-942d-80cf9f0bd66b",
+            "name": "Cow",
+            "type": "cow",
+            "pos": [
+              264.5535381541964,
+              64.0,
+              254.72340989711225
+            ],
+            "dist2": 6171.153851103732,
+            "hostile": false,
+            "health": 10.0
+          },
+          {
+            "id": "d1e58d33-f3c3-4355-8918-f9649054492c",
+            "name": "Pig",
+            "type": "pig",
+            "pos": [
+              262.7954688624774,
+              64.0,
+              270.7429885503921
+            ],
+            "dist2": 7337.353592508372,
+            "hostile": false,
+            "health": 10.0
+          },
+          {
+            "id": "adabd36c-f88d-455d-ae93-c1466e101302",
+            "name": "Cow",
+            "type": "cow",
+            "pos": [
+              266.1980023627495,
+              64.0,
+              258.5306957071232
+            ],
+            "dist2": 6580.412200353123,
+            "hostile": false,
+            "health": 10.0
+          },
+          {
+            "id": "779ae1ed-b255-4bc7-8284-61fa3b60db4a",
+            "name": "Pig",
+            "type": "pig",
+            "pos": [
+              269.2126736987453,
+              66.0,
+              283.752144092383
+            ],
+            "dist2": 9126.001581958863,
+            "hostile": false,
+            "health": 10.0
+          },
+          {
+            "id": "f6338afa-7932-43c1-b512-2de8d3b9ecb2",
+            "name": "Cow",
+            "type": "cow",
+            "pos": [
+              274.12877241664233,
+              66.0,
+              177.1290344499176
+            ],
+            "dist2": 7759.729547049883,
+            "hostile": false,
+            "health": 10.0
+          },
+          {
+            "id": "b69c245a-1f4c-4fc7-8dc3-4072da069c06",
+            "name": "Pig",
+            "type": "pig",
+            "pos": [
+              281.6896128963352,
+              70.0,
+              237.17822798624462
+            ],
+            "dist2": 6434.494092150761,
+            "hostile": false,
+            "health": 10.0
+          }
+        ],
+        "bot": "Step5NextBot",
+        "pos": [
+          221.7323050015919,
+          121.0,
+          221.73104953302166
+        ],
+        "yaw": -224.99988,
+        "pitch": 9.30001,
+        "health": 20.0,
+        "food": 20,
+        "oxygen": 300,
+        "inventory_raw": "{}",
+        "inventory_hash": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        "effects": [],
+        "weather": "clear",
+        "complete": true,
+        "sleeping": false,
+        "missing": false,
+        "selected_slot": 0,
+        "offhand_item": "",
+        "body_owner": "Step5NextBot",
+        "pending_action_count": 0,
+        "hazard_unresolved": null,
+        "disposable_world": true,
+        "protocol": "minebot-client-spike/1",
+        "ready": true,
+        "active_action_known": true,
+        "active_action_id": null,
+        "sampled_at_ms": 1791944837694,
+        "pid": 2042399,
+        "heap_used_bytes": 420545920,
+        "heap_committed_bytes": 568328192,
+        "player": "Step5NextBot",
+        "position": [
+          221.7323050015919,
+          121.0,
+          221.73104953302166
+        ],
+        "on_ground": true,
+        "head_in_liquid": false,
+        "difficulty": "easy",
+        "using_item": false,
+        "use_key_down": false,
+        "fall_flying": false,
+        "menu": "InventoryMenu",
+        "chest_item": "air",
+        "feet_chunk_loaded": true,
+        "scaffold_blocks": 0,
+        "inventory_count_scope": "all_player_inventory_slots_including_selected_hotbar",
+        "inventory_slots": [
+          {
+            "slot": 0,
+            "slotType": "hotbar",
+            "slotLabel": "hotbar.0",
+            "empty": true,
+            "count": 0
+          },
+          {
+            "slot": 1,
+            "slotType": "hotbar",
+            "slotLabel": "hotbar.1",
+            "empty": true,
+            "count": 0
+          },
+          {
+            "slot": 2,
+            "slotType": "hotbar",
+            "slotLabel": "hotbar.2",
+            "empty": true,
+            "count": 0
+          },
+          {
+            "slot": 3,
+            "slotType": "hotbar",
+            "slotLabel": "hotbar.3",
+            "empty": true,
+            "count": 0
+          },
+          {
+            "slot": 4,
+            "slotType": "hotbar",
+            "slotLabel": "hotbar.4",
+            "empty": true,
+            "count": 0
+          },
+          {
+            "slot": 5,
+            "slotType": "hotbar",
+            "slotLabel": "hotbar.5",
+            "empty": true,
+            "count": 0
+          },
+          {
+            "slot": 6,
+            "slotType": "hotbar",
+            "slotLabel": "hotbar.6",
+            "empty": true,
+            "count": 0
+          },
+          {
+            "slot": 7,
+            "slotType": "hotbar",
+            "slotLabel": "hotbar.7",
+            "empty": true,
+            "count": 0
+          },
+          {
+            "slot": 8,
+            "slotType": "hotbar",
+            "slotLabel": "hotbar.8",
+            "empty": true,
+            "count": 0
+          },
+          {
+            "slot": 9,
+            "slotType": "inventory",
+            "slotLabel": "inventory.9",
+            "empty": true,
+            "count": 0
+          },
+          {
+            "slot": 10,
+            "slotType": "inventory",
+            "slotLabel": "inventory.10",
+            "empty": true,
+            "count": 0
+          },
+          {
+            "slot": 11,
+            "slotType": "inventory",
+            "slotLabel": "inventory.11",
+            "empty": true,
+            "count": 0
+          },
+          {
+            "slot": 12,
+            "slotType": "inventory",
+            "slotLabel": "inventory.12",
+            "empty": true,
+            "count": 0
+          },
+          {
+            "slot": 13,
+            "slotType": "inventory",
+            "slotLabel": "inventory.13",
+            "empty": true,
+            "count": 0
+          },
+          {
+            "slot": 14,
+            "slotType": "inventory",
+            "slotLabel": "inventory.14",
+            "empty": true,
+            "count": 0
+          },
+          {
+            "slot": 15,
+            "slotType": "inventory",
+            "slotLabel": "inventory.15",
+            "empty": true,
+            "count": 0
+          },
+          {
+            "slot": 16,
+            "slotType": "inventory",
+            "slotLabel": "inventory.16",
+            "empty": true,
+            "count": 0
+          },
+          {
+            "slot": 17,
+            "slotType": "inventory",
+            "slotLabel": "inventory.17",
+            "empty": true,
+            "count": 0
+          },
+          {
+            "slot": 18,
+            "slotType": "inventory",
+            "slotLabel": "inventory.18",
+            "empty": true,
+            "count": 0
+          },
+          {
+            "slot": 19,
+            "slotType": "inventory",
+            "slotLabel": "inventory.19",
+            "empty": true,
+            "count": 0
+          },
+          {
+            "slot": 20,
+            "slotType": "inventory",
+            "slotLabel": "inventory.20",
+            "empty": true,
+            "count": 0
+          },
+          {
+            "slot": 21,
+            "slotType": "inventory",
+            "slotLabel": "inventory.21",
+            "empty": true,
+            "count": 0
+          },
+          {
+            "slot": 22,
+            "slotType": "inventory",
+            "slotLabel": "inventory.22",
+            "empty": true,
+            "count": 0
+          },
+          {
+            "slot": 23,
+            "slotType": "inventory",
+            "slotLabel": "inventory.23",
+            "empty": true,
+            "count": 0
+          },
+          {
+            "slot": 24,
+            "slotType": "inventory",
+            "slotLabel": "inventory.24",
+            "empty": true,
+            "count": 0
+          },
+          {
+            "slot": 25,
+            "slotType": "inventory",
+            "slotLabel": "inventory.25",
+            "empty": true,
+            "count": 0
+          },
+          {
+            "slot": 26,
+            "slotType": "inventory",
+            "slotLabel": "inventory.26",
+            "empty": true,
+            "count": 0
+          },
+          {
+            "slot": 27,
+            "slotType": "inventory",
+            "slotLabel": "inventory.27",
+            "empty": true,
+            "count": 0
+          },
+          {
+            "slot": 28,
+            "slotType": "inventory",
+            "slotLabel": "inventory.28",
+            "empty": true,
+            "count": 0
+          },
+          {
+            "slot": 29,
+            "slotType": "inventory",
+            "slotLabel": "inventory.29",
+            "empty": true,
+            "count": 0
+          },
+          {
+            "slot": 30,
+            "slotType": "inventory",
+            "slotLabel": "inventory.30",
+            "empty": true,
+            "count": 0
+          },
+          {
+            "slot": 31,
+            "slotType": "inventory",
+            "slotLabel": "inventory.31",
+            "empty": true,
+            "count": 0
+          },
+          {
+            "slot": 32,
+            "slotType": "inventory",
+            "slotLabel": "inventory.32",
+            "empty": true,
+            "count": 0
+          },
+          {
+            "slot": 33,
+            "slotType": "inventory",
+            "slotLabel": "inventory.33",
+            "empty": true,
+            "count": 0
+          },
+          {
+            "slot": 34,
+            "slotType": "inventory",
+            "slotLabel": "inventory.34",
+            "empty": true,
+            "count": 0
+          },
+          {
+            "slot": 35,
+            "slotType": "inventory",
+            "slotLabel": "inventory.35",
+            "empty": true,
+            "count": 0
+          },
+          {
+            "slot": 36,
+            "slotType": "armor",
+            "slotLabel": "armor.36",
+            "empty": true,
+            "count": 0
+          },
+          {
+            "slot": 37,
+            "slotType": "armor",
+            "slotLabel": "armor.37",
+            "empty": true,
+            "count": 0
+          },
+          {
+            "slot": 38,
+            "slotType": "armor",
+            "slotLabel": "armor.38",
+            "empty": true,
+            "count": 0
+          },
+          {
+            "slot": 39,
+            "slotType": "armor",
+            "slotLabel": "armor.39",
+            "empty": true,
+            "count": 0
+          },
+          {
+            "slot": 40,
+            "slotType": "offhand",
+            "slotLabel": "offhand.40",
+            "empty": true,
+            "count": 0
+          },
+          {
+            "slot": 41,
+            "slotType": "aux",
+            "slotLabel": "aux.41",
+            "empty": true,
+            "count": 0
+          },
+          {
+            "slot": 42,
+            "slotType": "aux",
+            "slotLabel": "aux.42",
+            "empty": true,
+            "count": 0
+          },
+          {
+            "slot": 43,
+            "slotType": "aux",
+            "slotLabel": "aux.43",
+            "empty": true,
+            "count": 0
+          },
+          {
+            "slot": 44,
+            "slotType": "aux",
+            "slotLabel": "aux.44",
+            "empty": true,
+            "count": 0
+          },
+          {
+            "slot": 45,
+            "slotType": "aux",
+            "slotLabel": "aux.45",
+            "empty": true,
+            "count": 0
+          }
+        ],
+        "pathing": false,
+        "allow_inventory": false,
+        "mine_active": false,
+        "goal_active": false,
+        "get_active": false,
+        "explore_active": false,
+        "follow_active": false,
+        "farm_active": false,
+        "builder_active": false,
+        "builder_paused": false,
+        "builder_placeable": [],
+        "builder_selections": [],
+        "elytra_active": false,
+        "elytra_loaded": true,
+        "elytra_safe_to_cancel": true,
+        "elytra_destination": "",
+        "elytra_path_size": 0,
+        "following": [],
+        "any_process_active": false,
+        "baritone_goal": "",
+        "build_in_layers": false,
+        "allow_break": true,
+        "allow_place": true,
+        "explore_for_blocks": true,
+        "replant_crops": true,
+        "farm_max_scan_size": 256,
+        "legit_mine_y": -59,
+        "free_look": true,
+        "block_free_look": false,
+        "remain_with_existing_look": true,
+        "smooth_look": false,
+        "random_looking": 0.01,
+        "random_looking_113": 2.0,
+        "type": "state",
+        "request_id": "request-450",
+        "life_profile": {
+          "world": "step5-next-edc89ff-20261014",
+          "dimension": "overworld",
+          "home": {
+            "pos": [
+              220.5,
+              121,
+              220.5
+            ],
+            "note": "人工测试高台中心"
+          },
+          "routine": "白天在住处附近待着，有人来就过去看看；天黑前回住处。",
+          "relationships": [
+            {
+              "player": "Visitor",
+              "note": "他在附近时我会过去看看他在做什么。"
+            }
+          ],
+          "personality": "安静，好奇，不爱冒险。"
+        },
+        "life_intent": "白天在住处附近待着，有人来就过去看看；天黑前回住处。 安静，好奇，不爱冒险。 他在附近时我会过去看看他在做什么。",
+        "agent_thinking": false,
+        "health_before": 20.0,
+        "vital_age_s": 6.9999862289987504,
+        "oxygen_before": 300.0,
+        "oxygen_age_s": 6.9999862289987504,
+        "safe_standing_position": [
+          221.7323050015919,
+          121.0,
+          221.73104953302166
+        ]
+      },
+      "options": {
+        "seek_player": "Search nearby for Visitor and walk up to them.",
+        "stay": "Stay where the Body is and wait for the next step.",
+        "call_agent": "Hand control back to the Agent for a new direction."
+      }
+    },
+    "clock": {
+      "request_monotonic_s": 536073.052567942
+    }
+  },
+  {
+    "event": "decision_request",
+    "payload": {
+      "questions": {
+        "q": {
+          "criteria": {
+            "call_agent": "Hand control back to the Agent for a new direction.",
+            "seek_player": "Search nearby for Visitor and walk up to them.",
+            "stay": "Stay where the Body is and wait for the next step."
+          },
+          "instructions": "Choose what the Body does next.",
+          "type": "choice"
+        }
+      },
+      "state": {
+        "agent_intent": "This is the idle-life intention: “白天在住处附近待着，有人来就过去看看；天黑前回住处。 安静，好奇，不爱冒险。 他在附近时我会过去看看他在做什么。”.",
+        "body": "Health is 20 of 20. Hunger is 20 of 20. Air supply is full. The main hand holds nothing.",
+        "daylight": "It is day.",
+        "inventory": "empty",
+        "position": "now at [221.7, 121.0, 221.7].",
+        "threats": "No hostile mob is in view."
+      }
+    },
+    "priority": 50,
+    "request_id": 212,
+    "seq": 1026,
+    "session_id": "Step5NextBot",
+    "ts": 1791944837.7041306
+  },
+  {
+    "choice": "stay",
+    "elapsed_s": 0.13030514598358423,
+    "event": "decision_response",
+    "priority": 50,
+    "request_id": 212,
+    "response": {
+      "answers": {
+        "q": {
+          "choice": "stay",
+          "confidence": 0.47950769725277836,
+          "probabilities": {
+            "call_agent": 0.07630593371829256,
+            "seek_player": 0.2706889347798553,
+            "stay": 0.6530051315018522
+          },
+          "type": "choice"
+        }
+      },
+      "effort_used": {
+        "passes_per_decision": 1,
+        "tier": "fast"
+      },
+      "model": "h2oai/h2o-lightning-4b",
+      "probability_source": "native",
+      "usage": {
+        "input_tokens": 242,
+        "latency_ms": 79.2,
+        "output_tokens": 0
+      }
+    },
+    "seq": 1027,
+    "session_id": "Step5NextBot",
+    "ts": 1791944837.8344371
+  },
+  {
+    "choice": "stay",
+    "decision_ms": 134.401,
+    "event": "call_supervision_result",
+    "purpose": "idle_frame",
+    "seq": 1028,
+    "session_id": "Step5NextBot",
+    "tool": "__idle__",
+    "tool_call_id": "idle-loop",
+    "ts": 1791944837.8346884,
+    "unknown": false
+  },
+  {
+    "action_id": null,
+    "allow_break": true,
+    "allow_inventory": false,
+    "allow_place": true,
+    "any_process_active": false,
+    "baritone_goal": "",
+    "builder_paused": false,
+    "event": "body_progress",
+    "lite": false,
+    "pathing": false,
+    "processes": {
+      "builder": false,
+      "elytra": false,
+      "explore": false,
+      "farm": false,
+      "follow": false,
+      "get": false,
+      "goal": false,
+      "mine": false
+    },
+    "sampled_at_ms": 1791944840793,
+    "seq": 1029,
+    "session_id": "Step5NextBot",
+    "source": "idle",
+    "tool_call_id": null,
+    "ts": 1791944840.79417
+  },
+  {
+    "event": "reflex_idle_read_unknown",
+    "scope": "nearbyEntities",
+    "seq": 1030,
+    "session_id": "Step5NextBot",
+    "ts": 1791944840.8347485
+  },
+  {
+    "cause": "death",
+    "event": "reflex_state_changed",
+    "from": "idle",
+    "seq": 1031,
+    "session_id": "Step5NextBot",
+    "to": "dead",
+    "ts": 1791944840.8365
+  },
+  {
+    "event": "execution_cancel_started",
+    "reason": "death",
+    "seq": 1032,
+    "session_id": "Step5NextBot",
+    "ts": 1791944840.836669
+  },
+  {
+    "active_action_id": null,
+    "active_count": 0,
+    "body_control": {
+      "claim_id": null,
+      "generation": 4,
+      "holder": "none",
+      "since_monotonic": 536076.255733333,
+      "stop_state": "settled"
+    },
+    "cancellation_scope_count": 0,
+    "control_unknown": false,
+    "elapsed_ms": 66.803,
+    "event": "execution_cancelled",
+    "execution_idle": true,
+    "idle": true,
+    "interrupt_accepted": false,
+    "interrupt_complete": true,
+    "interrupt_ok": false,
+    "interrupt_requested": true,
+    "late_native_terminal": null,
+    "native_stopped": true,
+    "owner": null,
+    "owner_checks": 0,
+    "owner_observed": false,
+    "owner_wait_ms": 0.0,
+    "phase_ms": {
+      "interrupt": 23.983,
+      "native_probe": 42.652,
+      "owner_idle": 0.006,
+      "request": 0.095,
+      "writer_idle": 0.026
+    },
+    "reason": "death",
+    "sampled_at_ms": 1791944840893,
+    "seq": 1033,
+    "session_id": "Step5NextBot",
+    "settled": true,
+    "ts": 1791944840.903479
+  },
+  {
+    "event": "reflex_death",
+    "facts": {
+      "active_action_id": null,
+      "active_action_known": true,
+      "agent_thinking": false,
+      "allow_break": true,
+      "allow_inventory": false,
+      "allow_place": true,
+      "any_process_active": false,
+      "baritone_goal": "",
+      "block_free_look": false,
+      "body_owner": null,
+      "bot": "Step5NextBot",
+      "build_in_layers": false,
+      "builder_active": false,
+      "builder_paused": false,
+      "builder_placeable": [],
+      "builder_selections": [],
+      "complete": false,
+      "creative": false,
+      "dimension": null,
+      "disposable_world": true,
+      "effects": null,
+      "elytra_active": false,
+      "elytra_destination": "",
+      "elytra_loaded": true,
+      "elytra_path_size": 0,
+      "elytra_safe_to_cancel": true,
+      "entities": [
+        {
+          "dist2": 6609.744830038876,
+          "health": 10.0,
+          "hostile": false,
+          "id": "d4a4d9ea-8308-4c0c-9713-3ae373d2f098",
+          "name": "Cow",
+          "pos": [
+            175.2057609694563,
+            72.0,
+            176.52014896175874
+          ],
+          "type": "cow"
+        },
+        {
+          "dist2": 6960.714862272608,
+          "health": 4.0,
+          "hostile": false,
+          "id": "d4f23c81-b5c1-403f-9722-3213bdcf8f2d",
+          "name": "Chicken",
+          "pos": [
+            196.08663201574544,
+            68.0,
+            280.84123748210226
+          ],
+          "type": "chicken"
+        },
+        {
+          "dist2": 7069.059206413332,
+          "hostile": false,
+          "id": "2867da34-27f2-44cc-8a34-1793a59a3d83",
+          "name": "Egg",
+          "pos": [
+            195.50393230693072,
+            68.0,
+            281.4983622733757
+          ],
+          "type": "item"
+        },
+        {
+          "dist2": 6511.622978451338,
+          "health": 10.0,
+          "hostile": false,
+          "id": "eed0a4c5-f773-4c78-b0db-36ea22256dc3",
+          "name": "Pig",
+          "pos": [
+            235.25072675049248,
+            63.0,
+            167.28038147586932
+          ],
+          "type": "pig"
+        },
+        {
+          "dist2": 3348.178163205832,
+          "health": 10.0,
+          "hostile": false,
+          "id": "5d85ca5e-abe8-489c-9ad8-e85c5221ffe2",
+          "name": "Cow",
+          "pos": [
+            237.14673935738367,
+            67.0,
+            207.78209341807104
+          ],
+          "type": "cow"
+        },
+        {
+          "dist2": 3263.213432021288,
+          "health": 10.0,
+          "hostile": false,
+          "id": "8e50d21a-ad90-4ae0-a1f9-cc5df41f4422",
+          "name": "Cow",
+          "pos": [
+            235.1903919301992,
+            67.0,
+            208.843329476963
+          ],
+          "type": "cow"
+        },
+        {
+          "dist2": 3094.8289695289227,
+          "health": 10.0,
+          "hostile": false,
+          "id": "5cd158fb-5ebf-408c-b9a2-c806fb5a38db",
+          "name": "Cow",
+          "pos": [
+            228.68913683868342,
+            67.0,
+            210.31039016854746
+          ],
+          "type": "cow"
+        },
+        {
+          "dist2": 500.06337709022665,
+          "health": 20.0,
+          "hostile": false,
+          "id": "47adfe28-5d0f-31e3-992c-e409ace53612",
+          "name": "Visitor",
+          "pos": [
+            227.7,
+            121.0,
+            243.28215144211674
+          ],
+          "type": "player"
+        },
+        {
+          "dist2": 6125.7446652297995,
+          "health": 10.0,
+          "hostile": false,
+          "id": "14510fa6-a618-4e00-a134-c31990921a95",
+          "name": "Cow",
+          "pos": [
+            229.80714588398473,
+            64.0,
+            274.75502156411187
+          ],
+          "type": "cow"
+        },
+        {
+          "dist2": 7403.834455362721,
+          "health": 10.0,
+          "hostile": false,
+          "id": "d099443d-ca3f-4f74-bbe8-e8966c5efc07",
+          "name": "Pig",
+          "pos": [
+            232.73049929953083,
+            64.0,
+            285.2438370450456
+          ],
+          "type": "pig"
+        },
+        {
+          "dist2": 7723.105875294982,
+          "health": 10.0,
+          "hostile": false,
+          "id": "90d22a00-f1c8-4cfa-8168-5b08b30f61c8",
+          "name": "Pig",
+          "pos": [
+            239.26198211073822,
+            64.0,
+            286.2819309812564
+          ],
+          "type": "pig"
+        },
+        {
+          "dist2": 6311.34600223071,
+          "health": 10.0,
+          "hostile": false,
+          "id": "a5dc949e-42b7-4e6d-ad91-52fa8491f3d5",
+          "name": "Cow",
+          "pos": [
+            231.86667967237318,
+            64.0,
+            276.1336271581943
+          ],
+          "type": "cow"
+        },
+        {
+          "dist2": 6683.545887388107,
+          "health": 10.0,
+          "hostile": false,
+          "id": "32ce9dfc-e374-415d-8251-30ff0b4087c6",
+          "name": "Cow",
+          "pos": [
+            239.83925117903453,
+            64.0,
+            277.4686884094156
+          ],
+          "type": "cow"
+        },
+        {
+          "dist2": 5149.184855276227,
+          "health": 10.0,
+          "hostile": false,
+          "id": "4ed15022-9b9e-41e4-afd5-0676547777ac",
+          "name": "Cow",
+          "pos": [
+            249.13565244869847,
+            65.0,
+            186.2030126611456
+          ],
+          "type": "cow"
+        },
+        {
+          "dist2": 3719.4860354211055,
+          "health": 10.0,
+          "hostile": false,
+          "id": "7bcb1214-edc0-4914-822b-55c5eec53d2d",
+          "name": "Cow",
+          "pos": [
+            255.15761256083945,
+            70.0,
+            222.84228757719296
+          ],
+          "type": "cow"
+        },
+        {
+          "dist2": 6313.265836417889,
+          "health": 10.0,
+          "hostile": false,
+          "id": "b59358a1-6902-4381-bf9e-f7f5f0fd4aee",
+          "name": "Cow",
+          "pos": [
+            255.1607903318625,
+            63.0,
+            264.5306079996901
+          ],
+          "type": "cow"
+        },
+        {
+          "dist2": 6570.079761865342,
+          "health": 10.0,
+          "hostile": false,
+          "id": "7d024208-b804-444f-8915-825a10acfe8d",
+          "name": "Cow",
+          "pos": [
+            240.5077282074755,
+            64.0,
+            276.2155725217137
+          ],
+          "type": "cow"
+        },
+        {
+          "dist2": 7449.913455352838,
+          "health": 10.0,
+          "hostile": false,
+          "id": "8942de41-5739-453e-bf2e-b4adb4022ceb",
+          "name": "Cow",
+          "pos": [
+            256.13760656384426,
+            64.0,
+            166.80210743722563
+          ],
+          "type": "cow"
+        },
+        {
+          "dist2": 7401.955369361471,
+          "health": 10.0,
+          "hostile": false,
+          "id": "fd5020d4-0f85-4f06-a50b-c4778cb9c726",
+          "name": "Cow",
+          "pos": [
+            266.52612334684557,
+            65.0,
+            174.19717521781476
+          ],
+          "type": "cow"
+        },
+        {
+          "dist2": 6171.153851103732,
+          "health": 10.0,
+          "hostile": false,
+          "id": "bee2a9ad-eb70-4084-942d-80cf9f0bd66b",
+          "name": "Cow",
+          "pos": [
+            264.5535381541964,
+            64.0,
+            254.72340989711225
+          ],
+          "type": "cow"
+        },
+        {
+          "dist2": 7337.353592508372,
+          "health": 10.0,
+          "hostile": false,
+          "id": "d1e58d33-f3c3-4355-8918-f9649054492c",
+          "name": "Pig",
+          "pos": [
+            262.7954688624774,
+            64.0,
+            270.7429885503921
+          ],
+          "type": "pig"
+        },
+        {
+          "dist2": 6580.412200353123,
+          "health": 10.0,
+          "hostile": false,
+          "id": "adabd36c-f88d-455d-ae93-c1466e101302",
+          "name": "Cow",
+          "pos": [
+            266.1980023627495,
+            64.0,
+            258.5306957071232
+          ],
+          "type": "cow"
+        },
+        {
+          "dist2": 9126.001581958863,
+          "health": 10.0,
+          "hostile": false,
+          "id": "779ae1ed-b255-4bc7-8284-61fa3b60db4a",
+          "name": "Pig",
+          "pos": [
+            269.2126736987453,
+            66.0,
+            283.752144092383
+          ],
+          "type": "pig"
+        },
+        {
+          "dist2": 7759.729547049883,
+          "health": 10.0,
+          "hostile": false,
+          "id": "f6338afa-7932-43c1-b512-2de8d3b9ecb2",
+          "name": "Cow",
+          "pos": [
+            274.12877241664233,
+            66.0,
+            177.1290344499176
+          ],
+          "type": "cow"
+        },
+        {
+          "dist2": 6434.494092150761,
+          "health": 10.0,
+          "hostile": false,
+          "id": "b69c245a-1f4c-4fc7-8dc3-4072da069c06",
+          "name": "Pig",
+          "pos": [
+            281.6896128963352,
+            70.0,
+            237.17822798624462
+          ],
+          "type": "pig"
+        }
+      ],
+      "explore_active": false,
+      "explore_for_blocks": true,
+      "farm_active": false,
+      "farm_max_scan_size": 256,
+      "follow_active": false,
+      "following": [],
+      "food": 0,
+      "free_look": true,
+      "get_active": false,
+      "goal_active": false,
+      "hazard_unresolved": null,
+      "health": 0.0,
+      "health_before": 20.0,
+      "heap_committed_bytes": 568328192,
+      "heap_used_bytes": 422731944,
+      "inventory_complete": null,
+      "inventory_counts": null,
+      "inventory_hash": "",
+      "inventory_includes_selected": null,
+      "inventory_raw": "",
+      "legit_mine_y": -59,
+      "life_intent": "白天在住处附近待着，有人来就过去看看；天黑前回住处。 安静，好奇，不爱冒险。 他在附近时我会过去看看他在做什么。",
+      "life_profile": {
+        "dimension": "overworld",
+        "home": {
+          "note": "人工测试高台中心",
+          "pos": [
+            220.5,
+            121,
+            220.5
+          ]
+        },
+        "personality": "安静，好奇，不爱冒险。",
+        "relationships": [
+          {
+            "note": "他在附近时我会过去看看他在做什么。",
+            "player": "Visitor"
+          }
+        ],
+        "routine": "白天在住处附近待着，有人来就过去看看；天黑前回住处。",
+        "world": "step5-next-edc89ff-20261014"
+      },
+      "mine_active": false,
+      "missing": true,
+      "offhand_item": null,
+      "oxygen": null,
+      "oxygen_before": 300.0,
+      "pathing": false,
+      "pending_action_count": 0,
+      "pid": 2042399,
+      "pitch": null,
+      "pos": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "protocol": "minebot-client-spike/1",
+      "random_looking": 0.01,
+      "random_looking_113": 2.0,
+      "ready": false,
+      "remain_with_existing_look": true,
+      "replant_crops": true,
+      "request_id": "request-452",
+      "safe_standing_position": [
+        221.7323050015919,
+        121.0,
+        221.73104953302166
+      ],
+      "sampled_at_ms": 1791944840793,
+      "selected_item": null,
+      "selected_item_known": null,
+      "selected_slot": null,
+      "sleeping": null,
+      "smooth_look": false,
+      "time": 0,
+      "type": "state",
+      "vital_age_s": 7.767677889904007,
+      "vital_samples": [
+        [
+          536068.420267643,
+          {
+            "health": 20.0,
+            "oxygen": 300.0
+          }
+        ],
+        [
+          536069.578580836,
+          {
+            "health": 20.0,
+            "oxygen": 300.0
+          }
+        ],
+        [
+          536070.719357713,
+          {
+            "health": 20.0,
+            "oxygen": 300.0
+          }
+        ],
+        [
+          536071.887005214,
+          {
+            "health": 20.0,
+            "oxygen": 300.0
+          }
+        ],
+        [
+          536073.051198629,
+          {
+            "health": 20.0,
+            "oxygen": 300.0
+          }
+        ],
+        [
+          536076.187945533,
+          {
+            "health": 0.0
+          }
+        ]
+      ],
+      "weather": null,
+      "yaw": null
+    },
+    "seq": 1034,
+    "session_id": "Step5NextBot",
+    "settlement": {
+      "active_action_id": null,
+      "body_control": {
+        "claim_id": null,
+        "generation": 4,
+        "holder": "none",
+        "since_monotonic": 536076.255733333,
+        "stop_state": "settled"
+      },
+      "cancellation_scope_count": 0,
+      "control_unknown": false,
+      "execution_idle": true,
+      "interrupt_accepted": false,
+      "interrupt_complete": true,
+      "interrupt_ok": false,
+      "interrupt_requested": true,
+      "late_native_terminal": null,
+      "native_stopped": true,
+      "owner": null,
+      "owner_checks": 0,
+      "owner_observed": false,
+      "owner_wait_ms": 0.0,
+      "reason": "death",
+      "sampled_at_ms": 1791944840893,
+      "settled": true
+    },
+    "ts": 1791944840.903855
+  },
+  {
+    "body_seq": 0,
+    "event": "body_lifecycle_queued",
+    "name": "death",
+    "seq": 1035,
+    "session_id": "Step5NextBot",
+    "ts": 1791944851.2292247
+  },
+  {
+    "body_seq": 0,
+    "event": "body_event_wake",
+    "name": "death",
+    "seq": 1036,
+    "session_id": "Step5NextBot",
+    "task_id": null,
+    "tick": 0,
+    "ts": 1791944851.6171448
+  },
+  {
+    "body_owner": null,
+    "bot": "Step5NextBot",
+    "complete": false,
+    "dimension": null,
+    "event": "body_state",
+    "food": 0,
+    "hazard_unresolved": null,
+    "health": 0.0,
+    "inventory_counts": {},
+    "inventory_hash": "",
+    "missing": true,
+    "offhand_item": null,
+    "oxygen": null,
+    "pending_action_count": 0,
+    "pos": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "selected_item": null,
+    "selected_slot": null,
+    "seq": 1037,
+    "session_id": "Step5NextBot",
+    "ts": 1791944852.0273108
+  },
+  {
+    "count": 0,
+    "event": "body_events",
+    "events": [],
+    "names": [],
+    "seq": 1038,
+    "seqs": [],
+    "session_id": "Step5NextBot",
+    "source": "turn_boundary",
+    "ts": 1791944852.0274527
+  },
+  {
+    "context_frame": "Death/recovery context; recount inventory and resume at the resource goal level.",
+    "effort": "standard",
+    "event": "turn_profile",
+    "lifecycle": "recovering",
+    "model_route": "primary",
+    "policy_tags": [
+      "death"
+    ],
+    "relationship": "autonomous.user_request",
+    "seq": 1039,
+    "session_id": "Step5NextBot",
+    "situational": "death",
+    "tool_focus": [
+      "recovery",
+      "inventory",
+      "navigation"
+    ],
+    "ts": 1791944852.0276096
+  },
+  {
+    "decision_context": "recovery",
+    "event": "turn_decision_context",
+    "has_durable_goal": false,
+    "intent_kind": "body_event",
+    "lifecycle": "recovering",
+    "route_context_profile": "full",
+    "route_effort": null,
+    "route_model": "primary",
+    "routing_active": false,
+    "seq": 1040,
+    "session_id": "Step5NextBot",
+    "situational": "death",
+    "ts": 1791944852.027789
+  },
+  {
+    "event": "reflex_loop_stopped",
+    "loop_state": "dead",
+    "seq": 1404,
+    "session_id": "Step5NextBot",
+    "ts": 1791945077.1015916
+  }
+]

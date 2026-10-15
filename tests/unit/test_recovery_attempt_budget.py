@@ -1,12 +1,28 @@
 from contextlib import closing
 import sqlite3
 import threading
+from datetime import UTC, datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
 from minebot.app.runtime_state import RuntimeScope, RuntimeStateConflict, RuntimeStateStore
 from minebot.app.work_queue import MemoryWorkIntentQueue, PersistentWorkIntentQueue, WorkIntentKind
+
+
+@pytest.fixture(autouse=True)
+def recovery_budget_clock(monkeypatch):
+    """Budget accounting is independent of wall-clock corrections on the host.
+
+    Immediate queue admission uses UTC; a backwards host correction can make
+    a freshly queued intent temporarily unavailable. Expired-lease tests below
+    set their own past expiry explicitly, so keep testing that boundary.
+    """
+    instant = datetime(2026, 10, 13, tzinfo=UTC)
+    monkeypatch.setattr("minebot.app.runtime_state._utc_now",
+        lambda: instant.isoformat(timespec="milliseconds"))
+    monkeypatch.setattr("minebot.app.runtime_state._utc_after",
+        lambda seconds: (instant + timedelta(seconds=max(0, seconds))).isoformat(timespec="milliseconds"))
 
 
 def admitted(queue, *, task_id=None, label="attempt"):

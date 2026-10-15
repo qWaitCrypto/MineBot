@@ -1,0 +1,342 @@
+FF                                                                       [100%]
+=================================== FAILURES ===================================
+_____ test_agent_read_completes_while_reflex_writer_is_still_running[life] _____
+
+fut = <coroutine object AgentRuntime.run_read at 0x7923f3df55d0>, timeout = 0.3
+
+    async def wait_for(fut, timeout):
+        """Wait for the single Future or coroutine to complete, with timeout.
+    
+        Coroutine will be wrapped in Task.
+    
+        Returns result of the Future or coroutine.  When a timeout occurs,
+        it cancels the task and raises TimeoutError.  To avoid the task
+        cancellation, wrap it in shield().
+    
+        If the wait is cancelled, the task is also cancelled.
+    
+        If the task suppresses the cancellation and returns a value instead,
+        that value is returned.
+    
+        This function is a coroutine.
+        """
+        # The special case for timeout <= 0 is for the following case:
+        #
+        # async def test_waitfor():
+        #     func_started = False
+        #
+        #     async def func():
+        #         nonlocal func_started
+        #         func_started = True
+        #
+        #     try:
+        #         await asyncio.wait_for(func(), 0)
+        #     except asyncio.TimeoutError:
+        #         assert not func_started
+        #     else:
+        #         assert False
+        #
+        # asyncio.run(test_waitfor())
+    
+    
+        if timeout is not None and timeout <= 0:
+            fut = ensure_future(fut)
+    
+            if fut.done():
+                return fut.result()
+    
+            await _cancel_and_wait(fut)
+            try:
+                return fut.result()
+            except exceptions.CancelledError as exc:
+                raise TimeoutError from exc
+    
+        async with timeouts.timeout(timeout):
+>           return await fut
+                   ^^^^^^^^^
+
+../miniconda3/lib/python3.13/asyncio/tasks.py:507: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+minebot/app/runner.py:2458: in run_read
+    return await self._off_writer_lane().run(callback, *args, timeout_s=timeout_s)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+minebot/app/execution_lane.py:84: in run
+    await asyncio.sleep(EXECUTION_LANE_POLL_S)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+delay = 0.01, result = None
+
+    async def sleep(delay, result=None):
+        """Coroutine that completes after a given time (in seconds)."""
+        if delay <= 0:
+            await __sleep0()
+            return result
+    
+        if math.isnan(delay):
+            raise ValueError("Invalid delay: NaN (not a number)")
+    
+        loop = events.get_running_loop()
+        future = loop.create_future()
+        h = loop.call_later(delay,
+                            futures._set_result_unless_cancelled,
+                            future, result)
+        try:
+>           return await future
+                   ^^^^^^^^^^^^
+E           asyncio.exceptions.CancelledError
+
+../miniconda3/lib/python3.13/asyncio/tasks.py:718: CancelledError
+
+The above exception was the direct cause of the following exception:
+
+holder = 'life'
+
+    @pytest.mark.parametrize('holder', ['life', 'threat'])
+    def test_agent_read_completes_while_reflex_writer_is_still_running(holder):
+        async def run():
+            runtime = AgentRuntime.__new__(AgentRuntime)
+            runtime.native_responses = False
+            runtime.background_call = None
+            runtime.body_control = BodyControl()
+            runtime.body_control.claim('reflex-test', holder=holder)
+            runtime.execution_lane = SerialExecutionLane(thread_name='test-reflex-writer')
+            runtime._read_lane = SerialExecutionLane(thread_name='test-agent-reader')
+            runtime.trace = SimpleNamespace(emit=lambda *args, **kwargs: None)
+            started, release = threading.Event(), threading.Event()
+    
+            def write():
+                started.set()
+                release.wait(2)
+    
+            worker = asyncio.create_task(runtime.execution_lane.run(write))
+            try:
+                assert await asyncio.to_thread(started.wait, 1)
+                observed = await asyncio.wait_for(runtime.run_read(lambda: 'native facts'), .3)
+                assert observed == 'native facts'
+                assert not worker.done()
+                assert runtime.body_control.snapshot().holder == holder
+            finally:
+                release.set()
+                await asyncio.gather(worker, return_exceptions=True)
+                runtime.execution_lane.close()
+                runtime._read_lane.close()
+>       asyncio.run(run())
+
+tests/unit/test_reflex_read_lane.py:42: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+../miniconda3/lib/python3.13/asyncio/runners.py:195: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+../miniconda3/lib/python3.13/asyncio/runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+../miniconda3/lib/python3.13/asyncio/base_events.py:725: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+tests/unit/test_reflex_read_lane.py:33: in run
+    observed = await asyncio.wait_for(runtime.run_read(lambda: 'native facts'), .3)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+../miniconda3/lib/python3.13/asyncio/tasks.py:506: in wait_for
+    async with timeouts.timeout(timeout):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <Timeout [expired]>
+exc_type = <class 'asyncio.exceptions.CancelledError'>
+exc_val = CancelledError(), exc_tb = <traceback object at 0x7923f3e4a800>
+
+    async def __aexit__(
+        self,
+        exc_type: Optional[Type[BaseException]],
+        exc_val: Optional[BaseException],
+        exc_tb: Optional[TracebackType],
+    ) -> Optional[bool]:
+        assert self._state in (_State.ENTERED, _State.EXPIRING)
+    
+        if self._timeout_handler is not None:
+            self._timeout_handler.cancel()
+            self._timeout_handler = None
+    
+        if self._state is _State.EXPIRING:
+            self._state = _State.EXPIRED
+    
+            if self._task.uncancel() <= self._cancelling and exc_type is not None:
+                # Since there are no new cancel requests, we're
+                # handling this.
+                if issubclass(exc_type, exceptions.CancelledError):
+>                   raise TimeoutError from exc_val
+E                   TimeoutError
+
+../miniconda3/lib/python3.13/asyncio/timeouts.py:116: TimeoutError
+____ test_agent_read_completes_while_reflex_writer_is_still_running[threat] ____
+
+fut = <coroutine object AgentRuntime.run_read at 0x7923f3df6e30>, timeout = 0.3
+
+    async def wait_for(fut, timeout):
+        """Wait for the single Future or coroutine to complete, with timeout.
+    
+        Coroutine will be wrapped in Task.
+    
+        Returns result of the Future or coroutine.  When a timeout occurs,
+        it cancels the task and raises TimeoutError.  To avoid the task
+        cancellation, wrap it in shield().
+    
+        If the wait is cancelled, the task is also cancelled.
+    
+        If the task suppresses the cancellation and returns a value instead,
+        that value is returned.
+    
+        This function is a coroutine.
+        """
+        # The special case for timeout <= 0 is for the following case:
+        #
+        # async def test_waitfor():
+        #     func_started = False
+        #
+        #     async def func():
+        #         nonlocal func_started
+        #         func_started = True
+        #
+        #     try:
+        #         await asyncio.wait_for(func(), 0)
+        #     except asyncio.TimeoutError:
+        #         assert not func_started
+        #     else:
+        #         assert False
+        #
+        # asyncio.run(test_waitfor())
+    
+    
+        if timeout is not None and timeout <= 0:
+            fut = ensure_future(fut)
+    
+            if fut.done():
+                return fut.result()
+    
+            await _cancel_and_wait(fut)
+            try:
+                return fut.result()
+            except exceptions.CancelledError as exc:
+                raise TimeoutError from exc
+    
+        async with timeouts.timeout(timeout):
+>           return await fut
+                   ^^^^^^^^^
+
+../miniconda3/lib/python3.13/asyncio/tasks.py:507: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+minebot/app/runner.py:2458: in run_read
+    return await self._off_writer_lane().run(callback, *args, timeout_s=timeout_s)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+minebot/app/execution_lane.py:84: in run
+    await asyncio.sleep(EXECUTION_LANE_POLL_S)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+delay = 0.01, result = None
+
+    async def sleep(delay, result=None):
+        """Coroutine that completes after a given time (in seconds)."""
+        if delay <= 0:
+            await __sleep0()
+            return result
+    
+        if math.isnan(delay):
+            raise ValueError("Invalid delay: NaN (not a number)")
+    
+        loop = events.get_running_loop()
+        future = loop.create_future()
+        h = loop.call_later(delay,
+                            futures._set_result_unless_cancelled,
+                            future, result)
+        try:
+>           return await future
+                   ^^^^^^^^^^^^
+E           asyncio.exceptions.CancelledError
+
+../miniconda3/lib/python3.13/asyncio/tasks.py:718: CancelledError
+
+The above exception was the direct cause of the following exception:
+
+holder = 'threat'
+
+    @pytest.mark.parametrize('holder', ['life', 'threat'])
+    def test_agent_read_completes_while_reflex_writer_is_still_running(holder):
+        async def run():
+            runtime = AgentRuntime.__new__(AgentRuntime)
+            runtime.native_responses = False
+            runtime.background_call = None
+            runtime.body_control = BodyControl()
+            runtime.body_control.claim('reflex-test', holder=holder)
+            runtime.execution_lane = SerialExecutionLane(thread_name='test-reflex-writer')
+            runtime._read_lane = SerialExecutionLane(thread_name='test-agent-reader')
+            runtime.trace = SimpleNamespace(emit=lambda *args, **kwargs: None)
+            started, release = threading.Event(), threading.Event()
+    
+            def write():
+                started.set()
+                release.wait(2)
+    
+            worker = asyncio.create_task(runtime.execution_lane.run(write))
+            try:
+                assert await asyncio.to_thread(started.wait, 1)
+                observed = await asyncio.wait_for(runtime.run_read(lambda: 'native facts'), .3)
+                assert observed == 'native facts'
+                assert not worker.done()
+                assert runtime.body_control.snapshot().holder == holder
+            finally:
+                release.set()
+                await asyncio.gather(worker, return_exceptions=True)
+                runtime.execution_lane.close()
+                runtime._read_lane.close()
+>       asyncio.run(run())
+
+tests/unit/test_reflex_read_lane.py:42: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+../miniconda3/lib/python3.13/asyncio/runners.py:195: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+../miniconda3/lib/python3.13/asyncio/runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+../miniconda3/lib/python3.13/asyncio/base_events.py:725: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+tests/unit/test_reflex_read_lane.py:33: in run
+    observed = await asyncio.wait_for(runtime.run_read(lambda: 'native facts'), .3)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+../miniconda3/lib/python3.13/asyncio/tasks.py:506: in wait_for
+    async with timeouts.timeout(timeout):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <Timeout [expired]>
+exc_type = <class 'asyncio.exceptions.CancelledError'>
+exc_val = CancelledError(), exc_tb = <traceback object at 0x7923f27dadc0>
+
+    async def __aexit__(
+        self,
+        exc_type: Optional[Type[BaseException]],
+        exc_val: Optional[BaseException],
+        exc_tb: Optional[TracebackType],
+    ) -> Optional[bool]:
+        assert self._state in (_State.ENTERED, _State.EXPIRING)
+    
+        if self._timeout_handler is not None:
+            self._timeout_handler.cancel()
+            self._timeout_handler = None
+    
+        if self._state is _State.EXPIRING:
+            self._state = _State.EXPIRED
+    
+            if self._task.uncancel() <= self._cancelling and exc_type is not None:
+                # Since there are no new cancel requests, we're
+                # handling this.
+                if issubclass(exc_type, exceptions.CancelledError):
+>                   raise TimeoutError from exc_val
+E                   TimeoutError
+
+../miniconda3/lib/python3.13/asyncio/timeouts.py:116: TimeoutError
+=========================== short test summary info ============================
+FAILED tests/unit/test_reflex_read_lane.py::test_agent_read_completes_while_reflex_writer_is_still_running[life]
+FAILED tests/unit/test_reflex_read_lane.py::test_agent_read_completes_while_reflex_writer_is_still_running[threat]
+2 failed in 2.50s

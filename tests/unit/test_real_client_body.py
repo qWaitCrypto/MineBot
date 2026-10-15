@@ -129,6 +129,33 @@ class FakeClientIpc:
 REGION = Region("test", (-64, -64, -64), (64, 320, 64))
 
 
+@pytest.mark.parametrize("sample", [{"ready": False}, {"position": [4, 70, 9]}])
+def test_reflex_facts_do_not_turn_unobserved_vitals_into_zero(sample) -> None:
+    class MissingSampleIpc(FakeClientIpc):
+        def state(self):
+            return dict(sample)
+    body = RealClientBody("CapProbe2", MissingSampleIpc())
+    facts = body.get_reflex_facts()
+    assert "health" not in facts
+    assert "food" not in facts
+    assert "oxygen" not in facts
+    assert "time" not in facts and "dimension" not in facts
+    if "position" not in sample:
+        assert facts["missing"] is True
+        assert "pos" not in facts
+    else:
+        assert facts["pos"] == (4, 70, 9)
+
+
+def test_reflex_facts_preserve_observed_zero_health_without_position() -> None:
+    class DeathSampleIpc(FakeClientIpc):
+        def state(self):
+            return {"health": 0, "ready": False}
+    facts = RealClientBody("CapProbe2", DeathSampleIpc()).get_reflex_facts()
+    assert facts["health"] == 0
+    assert "pos" not in facts
+
+
 def test_real_client_body_maps_state_inventory_and_find_blocks() -> None:
     ipc = FakeClientIpc()
     body = RealClientBody("CapProbe2", ipc)  # type: ignore[arg-type]

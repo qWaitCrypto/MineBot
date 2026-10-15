@@ -1,0 +1,8 @@
+{
+  "commit": "0a2840b8647346c13432855060b798b2060d6eef",
+  "pid": 2204066,
+  "owner_pid": 2203334,
+  "started_at": 1791950391.146799,
+  "command": "pytest tests/unit -q",
+  "concurrent_game_run": "life-30-final"
+}

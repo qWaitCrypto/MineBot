@@ -1,0 +1,393 @@
+{
+  "source": "logs/reflex-always-on-20261014-step5-threat-claude10/trace.jsonl",
+  "seq_end": 7966,
+  "elapsed_s": 473.4492287635803,
+  "requests_by_purpose": {
+    "idle_frame": 216,
+    "running_frame": 145,
+    "default_result_frame": 9,
+    "result_frame": 7,
+    "plan_result_frame": 1
+  },
+  "requests_by_loop_state": {
+    "idle": 217,
+    "work": 152,
+    "threat": 4,
+    "survival": 5
+  },
+  "requests_by_state_and_purpose": {
+    "idle / idle_frame": 216,
+    "work / running_frame": 145,
+    "threat / default_result_frame": 4,
+    "work / result_frame": 7,
+    "idle / plan_result_frame": 1,
+    "survival / default_result_frame": 5
+  },
+  "requests_per_session_minute_by_loop_state": {
+    "idle": 27.500308816643177,
+    "work": 19.26288912502195,
+    "threat": 0.5069181348689986,
+    "survival": 0.6336476685862483
+  },
+  "requests_per_minute_buckets": [
+    {
+      "minute_from_trace_start": 0,
+      "observed_seconds": 60,
+      "counts_by_state_and_purpose": {
+        "idle / idle_frame": 31,
+        "work / running_frame": 10,
+        "threat / default_result_frame": 2
+      }
+    },
+    {
+      "minute_from_trace_start": 1,
+      "observed_seconds": 60,
+      "counts_by_state_and_purpose": {
+        "work / running_frame": 19,
+        "threat / default_result_frame": 2,
+        "work / result_frame": 1,
+        "idle / idle_frame": 23,
+        "idle / plan_result_frame": 1
+      }
+    },
+    {
+      "minute_from_trace_start": 2,
+      "observed_seconds": 60,
+      "counts_by_state_and_purpose": {
+        "idle / idle_frame": 22,
+        "work / running_frame": 26,
+        "work / result_frame": 3
+      }
+    },
+    {
+      "minute_from_trace_start": 3,
+      "observed_seconds": 60,
+      "counts_by_state_and_purpose": {
+        "work / running_frame": 35,
+        "work / result_frame": 1,
+        "idle / idle_frame": 7,
+        "survival / default_result_frame": 3
+      }
+    },
+    {
+      "minute_from_trace_start": 4,
+      "observed_seconds": 60,
+      "counts_by_state_and_purpose": {
+        "survival / default_result_frame": 2,
+        "idle / idle_frame": 23,
+        "work / running_frame": 21,
+        "work / result_frame": 2
+      }
+    },
+    {
+      "minute_from_trace_start": 5,
+      "observed_seconds": 60,
+      "counts_by_state_and_purpose": {
+        "work / running_frame": 34,
+        "idle / idle_frame": 22
+      }
+    },
+    {
+      "minute_from_trace_start": 6,
+      "observed_seconds": 60,
+      "counts_by_state_and_purpose": {
+        "idle / idle_frame": 48
+      }
+    },
+    {
+      "minute_from_trace_start": 7,
+      "observed_seconds": 53.44922876358032,
+      "counts_by_state_and_purpose": {
+        "idle / idle_frame": 40
+      }
+    }
+  ],
+  "loop_state_seconds": {
+    "idle": 290.8342716693878,
+    "work": 164.721759557724,
+    "threat": 10.932857513427734,
+    "survival": 6.9603400230407715
+  },
+  "requests_per_session_minute_by_purpose": {
+    "idle_frame": 27.373579282925927,
+    "running_frame": 18.375782389001202,
+    "default_result_frame": 1.1405658034552468,
+    "result_frame": 0.8871067360207476,
+    "plan_result_frame": 0.12672953371724965
+  },
+  "requests_per_observed_body_work_minute_by_purpose": {
+    "idle_frame": 96.92473366073368,
+    "running_frame": 65.06521472595547,
+    "default_result_frame": 4.038530569197237,
+    "result_frame": 3.1410793315978505,
+    "plan_result_frame": 0.4487256187996929
+  },
+  "requests_during_observed_body_work_by_purpose": {
+    "running_frame": 119
+  },
+  "requests_during_observed_body_work_per_minute_by_purpose": {
+    "running_frame": 53.39834863716346
+  },
+  "rate_accounting": "Session-normalized rates include all requests. Total requests divided by observed work time measures overhead, not work cadence. The during-work rate restricts the numerator to requests inside observed native work intervals.",
+  "native_action_count": 33,
+  "observed_native_work_s": 133.71200013160706,
+  "idle_remainder_estimate_s": 339.73722863197327,
+  "supervised_body_call_s": 172.13599967956543,
+  "outside_supervised_body_calls_s": 301.3132290840149,
+  "supervised_call_timing_method": "Union of completed supervised-call intervals; includes tool execution and its settlement, not proof of physical movement. Native terminals missing elapsed_ms are excluded from native work time, never treated as proof that the Body was idle.",
+  "timing_method": "Union of native terminal elapsed_ms intervals, deduplicated by action_id; IPC receipt is the end timestamp. Idle remainder and no-question gap are estimates; missing native terminals are not counted as work.",
+  "longest_estimated_idle_without_any_question_s": 4.234788417816162,
+  "longest_idle_state_without_any_question_s": 4.234788417816162,
+  "idle_state_gap_method": "idle is the loop state, and may contain life movement. This measurement excludes dead/work intervals but includes session startup.",
+  "largest_request_gaps": [
+    {
+      "before_seq": 3327,
+      "after_seq": 3337,
+      "seconds": 4.480235576629639
+    },
+    {
+      "before_seq": 112,
+      "after_seq": 279,
+      "seconds": 4.234788417816162
+    },
+    {
+      "before_seq": 6433,
+      "after_seq": 6513,
+      "seconds": 3.897103786468506
+    },
+    {
+      "before_seq": 3799,
+      "after_seq": 3810,
+      "seconds": 3.545452356338501
+    },
+    {
+      "before_seq": 449,
+      "after_seq": 469,
+      "seconds": 3.4689838886260986
+    },
+    {
+      "before_seq": 1058,
+      "after_seq": 1087,
+      "seconds": 3.3695068359375
+    },
+    {
+      "before_seq": 1718,
+      "after_seq": 1732,
+      "seconds": 3.3612990379333496
+    },
+    {
+      "before_seq": 5419,
+      "after_seq": 5508,
+      "seconds": 3.2748568058013916
+    },
+    {
+      "before_seq": 7303,
+      "after_seq": 7308,
+      "seconds": 3.162140369415283
+    },
+    {
+      "before_seq": 421,
+      "after_seq": 449,
+      "seconds": 3.1466965675354004
+    }
+  ],
+  "default_actions_requested": {
+    "move_away": 2,
+    "surface": 5
+  },
+  "default_actions_finished": {
+    "engage": 1,
+    "move_away": 1,
+    "surface": 5
+  },
+  "action_accounting": "Answers are semantic selections, default_requested is an attempted action dispatch, and native_action_count is observed execution. They are not interchangeable.",
+  "answers": {
+    "stay": 214,
+    "unknown": 2,
+    "keep_going": 133,
+    "move_away": 3,
+    "engage": 1,
+    "call_agent": 7,
+    "resume": 1,
+    "next_step": 8,
+    "surface": 5,
+    "repeat": 1
+  },
+  "unknown_ratio": 0.005333333333333333,
+  "decision_ms_median": 136.36,
+  "agent_delivery_counts": {
+    "reflex_fact_wake": 6
+  },
+  "agent_deliveries": [
+    {
+      "seq": 486,
+      "event": "reflex_fact_wake",
+      "reason": null,
+      "status": "default_action_completed",
+      "kind": null,
+      "activity_id": null,
+      "body_event": null
+    },
+    {
+      "seq": 1218,
+      "event": "reflex_fact_wake",
+      "reason": null,
+      "status": "handoff_requested",
+      "kind": null,
+      "activity_id": null,
+      "body_event": null
+    },
+    {
+      "seq": 1741,
+      "event": "reflex_fact_wake",
+      "reason": null,
+      "status": "blocked",
+      "kind": null,
+      "activity_id": "activity-6264c635a0dd47bba9045427df857287",
+      "body_event": null
+    },
+    {
+      "seq": 1956,
+      "event": "reflex_fact_wake",
+      "reason": null,
+      "status": "cancelled",
+      "kind": null,
+      "activity_id": "activity-6264c635a0dd47bba9045427df857287",
+      "body_event": null
+    },
+    {
+      "seq": 3874,
+      "event": "reflex_fact_wake",
+      "reason": null,
+      "status": "blocked",
+      "kind": null,
+      "activity_id": "call_00_w13p3qghb41r4oh7lvris4gf",
+      "body_event": null
+    },
+    {
+      "seq": 6249,
+      "event": "reflex_fact_wake",
+      "reason": null,
+      "status": "completed",
+      "kind": null,
+      "activity_id": "call_00_hb3miror35hourzqvna1u69f",
+      "body_event": null
+    }
+  ],
+  "runtime_intent_wakes": [],
+  "wake_accounting": "reflex_death is a death observation, not a wake. agent_start counts launches/turn entries, not delivery events. Distinct deliveries can be coalesced into a model turn.",
+  "agent_start_count": 8,
+  "delegate_work": 1,
+  "read_reflex": 0,
+  "state_switches": 43,
+  "reaction_chains": [
+    {
+      "action_progress_monotonic_s": 11258.864241017,
+      "action_sampled_at_ms": 1792036348590,
+      "answer_monotonic_s": 11257.853718748,
+      "answer_to_action_s": 1.010522268999921,
+      "choice": "move_away",
+      "event": "reflex_reaction_chain",
+      "event_distance": 1.0,
+      "event_health": 20.0,
+      "event_monotonic_s": 11257.65136532,
+      "event_sampled_at_ms": null,
+      "event_to_request_s": 0.000432258000728325,
+      "first_native_progress": true,
+      "native_action_id": "30031b66-ceb3-473d-8a4f-a097ab2a4cab",
+      "request_monotonic_s": 11257.651797578,
+      "request_to_answer_s": 0.20192116999896825,
+      "seq": 438,
+      "session_id": "Step5Threat10Bot",
+      "target": "d7cb0167-c574-40cf-ab14-536fe41b0a7a",
+      "tool": "move_away",
+      "tool_call_id": "reflex-default-5e9c7e37-7ec1-4e40-b296-c4c92d3695a0",
+      "total_s": 1.2128756969996175,
+      "ts": 1792036348.591919
+    },
+    {
+      "action_progress_monotonic_s": 11261.216318539,
+      "action_sampled_at_ms": 1792036350942,
+      "answer_monotonic_s": 11260.926451741,
+      "answer_to_action_s": 0.28986679800073034,
+      "choice": "engage",
+      "event": "reflex_reaction_chain",
+      "event_distance": 1.0,
+      "event_health": 20.0,
+      "event_monotonic_s": 11257.65136532,
+      "event_sampled_at_ms": null,
+      "event_to_request_s": 3.1466546920000837,
+      "first_native_progress": true,
+      "native_action_id": "df91d10a-ea72-400b-9b74-4e4032eebed6",
+      "request_monotonic_s": 11260.798020012,
+      "request_to_answer_s": 0.1284317289992032,
+      "seq": 454,
+      "session_id": "Step5Threat10Bot",
+      "target": "d7cb0167-c574-40cf-ab14-536fe41b0a7a",
+      "tool": "engage_entity",
+      "tool_call_id": "reflex-default-5e9c7e37-7ec1-4e40-b296-c4c92d3695a0-1",
+      "total_s": 3.5649532190000173,
+      "ts": 1792036350.9440072
+    },
+    {
+      "action_progress_monotonic_s": 11305.763296189,
+      "action_sampled_at_ms": 1792036397358,
+      "answer_monotonic_s": 11304.904993288,
+      "answer_to_action_s": 0.8583029009987513,
+      "choice": "move_away",
+      "event": "reflex_reaction_chain",
+      "event_distance": 8.0,
+      "event_health": 6.0,
+      "event_monotonic_s": 11303.665502006,
+      "event_sampled_at_ms": null,
+      "event_to_request_s": 1.0326634729990474,
+      "first_native_progress": true,
+      "native_action_id": "5672c700-def3-4bdb-8d1a-e54812b71c01",
+      "request_monotonic_s": 11304.698165479,
+      "request_to_answer_s": 0.20682780900096986,
+      "seq": 1075,
+      "session_id": "Step5Threat10Bot",
+      "target": "8f465bca-376a-499c-826b-c15ed99a9c02",
+      "tool": "move_away",
+      "tool_call_id": "reflex-default-cf9536ed-16ee-4aa4-99c5-caf15dca132a",
+      "total_s": 2.0977941829987685,
+      "ts": 1792036397.3601656
+    },
+    {
+      "action_progress_monotonic_s": 11308.595809343,
+      "action_sampled_at_ms": 1792036400191,
+      "answer_monotonic_s": 11308.192821425,
+      "answer_to_action_s": 0.4029879179997806,
+      "choice": "move_away",
+      "event": "reflex_reaction_chain",
+      "event_distance": 8.0,
+      "event_health": 6.0,
+      "event_monotonic_s": 11303.665502006,
+      "event_sampled_at_ms": null,
+      "event_to_request_s": 4.401390357999844,
+      "first_native_progress": true,
+      "native_action_id": "5f1a0fe2-71d4-4ac6-9a7d-040c4be28504",
+      "request_monotonic_s": 11308.066892364,
+      "request_to_answer_s": 0.1259290609996242,
+      "seq": 1092,
+      "session_id": "Step5Threat10Bot",
+      "target": "8f465bca-376a-499c-826b-c15ed99a9c02",
+      "tool": "move_away",
+      "tool_call_id": "reflex-default-cf9536ed-16ee-4aa4-99c5-caf15dca132a-1",
+      "total_s": 4.930307336999249,
+      "ts": 1792036400.1923847
+    }
+  ],
+  "deaths": [],
+  "last_body": {
+    "seq": 7956,
+    "pos": [
+      180.3,
+      72.0,
+      146.71
+    ],
+    "health": 20.0,
+    "food": 20,
+    "oxygen": 300
+  }
+}

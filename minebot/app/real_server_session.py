@@ -16,7 +16,7 @@ import sys
 import threading
 import time
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from minebot.app.config import AppConfigError, agent_language_from_env, provider_registry_from_env
@@ -48,7 +48,7 @@ from minebot.app.runtime_identity import (
     runtime_scope_from_world_identity,
 )
 from minebot.app.runtime_state import DEFAULT_RUNTIME_STATE_DB, RuntimeStateError, RuntimeStateStore
-from minebot.app.runtime_state import TaskStatus
+from minebot.app.runtime_state import TaskStatus, CompletionAuthority
 from minebot.app.tasks import TaskWorkspace
 from minebot.app.work_queue import PersistentWorkIntentQueue
 from minebot.app.runner import RuntimeTrace
@@ -645,6 +645,7 @@ async def run_real_server_goal(
             return parts
 
         session = AgentSession(make_parts)
+        await session.enter_world()
         session.submit(SessionCommand.start(goal))
         try:
             def should_stop(step: SessionStep) -> bool:
@@ -660,8 +661,7 @@ async def run_real_server_goal(
             parts = getattr(session, "parts", None)
             runtime = getattr(parts, "runtime", None)
             if truth.satisfied and not bool(getattr(runtime, "native_responses", False)):
-                final = session.complete_current_goal("terminal_truth_satisfied")
-                truth = safe_evaluate_terminal_truth(body, terminal_goal, final, session=session)
+                final, truth = _complete_session_goal(session, body, truth, final)
             if parts is not None:
                 parts.runtime.trace.emit(
                     "session_terminal",
@@ -872,6 +872,7 @@ async def run_real_server_interactive(
                 progress_epoch_archive,
             ),
         )
+        await session.enter_world()
         if goal:
             if task_workspace.current_task is None:
                 session.submit(SessionCommand.start(goal))
@@ -1151,11 +1152,7 @@ async def _run_interactive_loop(
                 return last
             truth = safe_evaluate_terminal_truth(body, _session_goal(session, fallback_goal), last, session=session)
             if truth.satisfied:
-                parts = getattr(session, "parts", None)
-                runtime = getattr(parts, "runtime", None)
-                native_responses = bool(getattr(runtime, "native_responses", False))
-                completed = last if native_responses else session.complete_current_goal("terminal_truth_satisfied")
-                completed_truth = safe_evaluate_terminal_truth(body, truth.goal, completed, session=session)
+                completed, completed_truth = _complete_session_goal(session, body, truth, last)
                 _announce_interactive_terminal(body, completed_truth)
                 last = completed
             elif (
@@ -1908,7 +1905,27 @@ def safe_evaluate_terminal_truth(
                 satisfied=satisfied, status=final.status, lifecycle=final.lifecycle.value,
                 exit_code=0 if satisfied or final.status == "quit" else (8 if final.status == "failed" else 2),
                 facts={"completion_authority": "model", "outcome": outcome})
-        return evaluate_terminal_truth(body, goal, final)
+        truth = evaluate_terminal_truth(body, goal, final)
+        workspace = getattr(session, "task_workspace", None)
+        task = None if workspace is None else workspace.current_task
+        # The narrow Body benchmark checker has no verdict on an arbitrary
+        # Agent goal. Missing a checker is not contrary physical evidence.
+        # Only an explicit completion checkpoint
+        # has model authority; a normal assistant final does not finish a task.
+        if (
+            truth.target is None and final.status not in {"failed", "quit"}
+            and task is not None and task.goal_text == goal
+            and workspace.completion_requested
+        ):
+            checkpoint = workspace.store.get_latest_checkpoint(task.task_id)
+            return TerminalTruth(
+                goal=goal, target=None, inventory_count=None, satisfied=True,
+                status=final.status, lifecycle=final.lifecycle.value, exit_code=0,
+                facts={"completion_authority": "model", "task_id": task.task_id,
+                       "checkpoint_id": None if checkpoint is None else checkpoint.checkpoint_id,
+                       "evidence": [] if checkpoint is None else list(checkpoint.evidence)},
+            )
+        return truth
     except Exception as exc:
         parts = getattr(session, "parts", None) if session is not None else None
         if parts is not None:
@@ -1927,6 +1944,25 @@ def safe_evaluate_terminal_truth(
             lifecycle=final.lifecycle.value,
             exit_code=8,
         )
+
+
+def _complete_session_goal(
+    session: AgentSession, body: Body, truth: TerminalTruth, final: SessionStep,
+) -> tuple[SessionStep, TerminalTruth]:
+    """Consume completion with its actual authority in both launcher paths."""
+    runtime = getattr(getattr(session, "parts", None), "runtime", None)
+    if not truth.satisfied or bool(getattr(runtime, "native_responses", False)):
+        return final, truth
+    if truth.facts.get("completion_authority") == "model":
+        completed = session.complete_current_goal(
+            "model_completion_requested", authority=CompletionAuthority.MODEL,
+        )
+        # Completing removes the foreground task and consumes its checkpoint.
+        # Keep the resolved verdict rather than treating that removal as a new
+        # missing verifier and reversing the completion in the announcement.
+        return completed, replace(truth, status=completed.status, lifecycle=completed.lifecycle.value)
+    completed = session.complete_current_goal("terminal_truth_satisfied")
+    return completed, safe_evaluate_terminal_truth(body, truth.goal, completed, session=session)
 
 
 def _exit_code_for(final: SessionStep, *, satisfied: bool, has_target: bool) -> int:

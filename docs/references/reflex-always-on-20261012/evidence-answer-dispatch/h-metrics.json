@@ -1,0 +1,154 @@
+{
+  "source": "logs/reflex-always-on-20261014-step7-fixed-h/trace.jsonl",
+  "seq_end": 1696,
+  "elapsed_s": 170.26109290122986,
+  "requests_by_purpose": {
+    "idle_frame": 114,
+    "running_frame": 83
+  },
+  "requests_by_loop_state": {
+    "idle": 197
+  },
+  "requests_by_state_and_purpose": {
+    "idle / idle_frame": 114,
+    "idle / running_frame": 83
+  },
+  "requests_per_session_minute_by_loop_state": {
+    "idle": 69.42278942645399
+  },
+  "requests_per_minute_buckets": [
+    {
+      "minute_from_trace_start": 0,
+      "observed_seconds": 60,
+      "counts_by_state_and_purpose": {
+        "idle / idle_frame": 44,
+        "idle / running_frame": 16
+      }
+    },
+    {
+      "minute_from_trace_start": 1,
+      "observed_seconds": 60,
+      "counts_by_state_and_purpose": {
+        "idle / idle_frame": 39,
+        "idle / running_frame": 38
+      }
+    },
+    {
+      "minute_from_trace_start": 2,
+      "observed_seconds": 50.26109290122986,
+      "counts_by_state_and_purpose": {
+        "idle / idle_frame": 31,
+        "idle / running_frame": 29
+      }
+    }
+  ],
+  "loop_state_seconds": {
+    "idle": 170.26109290122986
+  },
+  "requests_per_session_minute_by_purpose": {
+    "idle_frame": 40.173593881298245,
+    "running_frame": 29.24919554515574
+  },
+  "requests_per_observed_body_work_minute_by_purpose": null,
+  "requests_during_observed_body_work_by_purpose": {},
+  "requests_during_observed_body_work_per_minute_by_purpose": null,
+  "rate_accounting": "Session-normalized rates include all requests. Total requests divided by observed work time measures overhead, not work cadence. The during-work rate restricts the numerator to requests inside observed native work intervals.",
+  "native_action_count": 0,
+  "observed_native_work_s": 0,
+  "idle_remainder_estimate_s": null,
+  "supervised_body_call_s": 23.155000686645508,
+  "outside_supervised_body_calls_s": 147.10609221458435,
+  "supervised_call_timing_method": "Union of completed supervised-call intervals; includes tool execution and its settlement, not proof of physical movement. Native terminals missing elapsed_ms are excluded from native work time, never treated as proof that the Body was idle.",
+  "timing_method": "Union of native terminal elapsed_ms intervals, deduplicated by action_id; IPC receipt is the end timestamp. Idle remainder and no-question gap are estimates; missing native terminals are not counted as work.",
+  "longest_estimated_idle_without_any_question_s": null,
+  "longest_idle_state_without_any_question_s": 3.1086535453796387,
+  "idle_state_gap_method": "idle is the loop state, and may contain life movement. This measurement excludes dead/work intervals but includes session startup.",
+  "largest_request_gaps": [
+    {
+      "before_seq": 1386,
+      "after_seq": 1393,
+      "seconds": 3.1086535453796387
+    },
+    {
+      "before_seq": 1379,
+      "after_seq": 1386,
+      "seconds": 3.095358371734619
+    },
+    {
+      "before_seq": 1124,
+      "after_seq": 1131,
+      "seconds": 3.0881764888763428
+    },
+    {
+      "before_seq": 146,
+      "after_seq": 244,
+      "seconds": 2.6806154251098633
+    },
+    {
+      "before_seq": 339,
+      "after_seq": 354,
+      "seconds": 1.3660480976104736
+    },
+    {
+      "before_seq": 1131,
+      "after_seq": 1137,
+      "seconds": 1.30281662940979
+    },
+    {
+      "before_seq": 6,
+      "after_seq": 11,
+      "seconds": 1.2839930057525635
+    },
+    {
+      "before_seq": 530,
+      "after_seq": 544,
+      "seconds": 1.273146152496338
+    },
+    {
+      "before_seq": 135,
+      "after_seq": 141,
+      "seconds": 1.2644941806793213
+    },
+    {
+      "before_seq": 1485,
+      "after_seq": 1495,
+      "seconds": 1.2626516819000244
+    }
+  ],
+  "default_actions_requested": {
+    "look_player": 84
+  },
+  "default_actions_finished": {
+    "look_player": 84
+  },
+  "action_accounting": "Answers are semantic selections, default_requested is an attempted action dispatch, and native_action_count is observed execution. They are not interchangeable.",
+  "answers": {
+    "stay": 27,
+    "look_player": 84,
+    "keep_going": 64,
+    "unknown": 4
+  },
+  "unknown_ratio": 0.0223463687150838,
+  "decision_ms_median": 138.952,
+  "agent_delivery_counts": {},
+  "agent_deliveries": [],
+  "runtime_intent_wakes": [],
+  "wake_accounting": "reflex_death is a death observation, not a wake. agent_start counts launches/turn entries, not delivery events. Distinct deliveries can be coalesced into a model turn.",
+  "agent_start_count": 1,
+  "delegate_work": 0,
+  "read_reflex": 0,
+  "state_switches": 0,
+  "reaction_chains": [],
+  "deaths": [],
+  "last_body": {
+    "seq": 1691,
+    "pos": [
+      152.75,
+      71.0,
+      162.35
+    ],
+    "health": 6.482089,
+    "food": 17,
+    "oxygen": 300
+  }
+}

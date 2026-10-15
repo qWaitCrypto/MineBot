@@ -54,6 +54,16 @@ class RealClientIpc:
         self._incoming = threading.Condition()
         self._messages: deque[dict[str, Any]] = deque()
         self._read_error: Exception | None = None
+        self._event_listener: Callable[[dict[str, Any]], None] | None = None
+
+    def set_event_listener(self, listener: Callable[[dict[str, Any]], None]) -> None:
+        """Deliver lifecycle events separately from correlated action replies."""
+        with self._incoming:
+            self._event_listener = listener
+            events = [item for item in self._messages if item.get("type") == "body_event"]
+            self._messages = deque(item for item in self._messages if item.get("type") != "body_event")
+        for event in events:
+            listener(event)
 
     def __enter__(self) -> "RealClientIpc":
         self.connect()
@@ -304,6 +314,10 @@ class RealClientIpc:
         try:
             while True:
                 message = self._read_frame(connection)
+                listener = self._event_listener
+                if message.get("type") == "body_event" and listener is not None:
+                    listener(message)
+                    continue
                 with self._incoming:
                     if self._socket is not connection:
                         return

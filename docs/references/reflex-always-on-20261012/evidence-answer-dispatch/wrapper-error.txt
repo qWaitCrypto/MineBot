@@ -1,0 +1,3 @@
+Recorded exec completion: exit_code=1
+bash: line 1: exit: : numeric argument required
+Pytest completed before the failing shell exit statement. Original exit-code.txt contains only a newline.

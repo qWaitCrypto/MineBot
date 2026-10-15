@@ -114,6 +114,10 @@ class ResponsesKernelTests(unittest.IsolatedAsyncioTestCase):
         from minebot.app.responses_observation import observe_http_request, observe_http_response
         # Real SDK and loopback SSE: MockTransport cannot enforce socket read
         # timeouts, and its event iterator cannot represent filtered comments.
+        # Keep the event gap longer than the read timeout, with room for WSL
+        # scheduling under the full suite. A 100ms deadline made this test
+        # occasionally measure host scheduling instead of SSE keepalives.
+        read_timeout_s, heartbeat_s, heartbeat_count = 0.5, 0.05, 20
         for mode in ("keepalive", "silent", "eof"):
             with self.subTest(mode=mode):
                 handlers, heartbeats = [], []
@@ -131,8 +135,8 @@ class ResponsesKernelTests(unittest.IsolatedAsyncioTestCase):
                         await send(created("loopback"))
                         if mode == "eof":
                             return
-                        for _ in range(10):
-                            await asyncio.sleep(0.025)
+                        for _ in range(heartbeat_count):
+                            await asyncio.sleep(heartbeat_s)
                             if mode == "keepalive":
                                 writer.write(b": keepalive\n\n")
                                 await writer.drain()
@@ -147,21 +151,21 @@ class ResponsesKernelTests(unittest.IsolatedAsyncioTestCase):
                 port = server.sockets[0].getsockname()[1]
                 observations = []
                 client = AsyncOpenAI(api_key="local-test", base_url=f"http://127.0.0.1:{port}/v1",
-                                      max_retries=0, timeout=httpx.Timeout(0.1, connect=1),
+                                      max_retries=0, timeout=httpx.Timeout(read_timeout_s, connect=1),
                                       http_client=httpx.AsyncClient(trust_env=False,
                                           event_hooks={"request": [observe_http_request], "response": [observe_http_response]}))
                 async def instructions(): return "Local stream test"
                 kernel = ResponsesKernel(client=client, model="test", tools=lambda: [],
                     instructions=instructions, invoke=None, emit=lambda event, **kw: observations.append((event, kw)),
-                    speak=lambda text: None, transport="http", request_timeout_s=0.1)
+                    speak=lambda text: None, transport="http", request_timeout_s=read_timeout_s)
                 try:
                     if mode == "keepalive":
                         result = await asyncio.wait_for(kernel.run("hello"), 3)
                         self.assertEqual(result.response_id, "loopback")
-                        self.assertEqual(len(heartbeats), 10)
+                        self.assertEqual(len(heartbeats), heartbeat_count)
                         await kernel._connection.request
                         summary = next(f for e, f in observations if e == "responses_stream_summary")
-                        self.assertEqual(summary["comment_count"], 10)
+                        self.assertEqual(summary["comment_count"], heartbeat_count)
                         self.assertTrue(any(e == "responses_http_phase" for e, f in observations))
                         self.assertNotIn("local-test", json.dumps(observations))
                     else:

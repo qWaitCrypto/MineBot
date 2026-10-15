@@ -32,6 +32,7 @@ import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.gui.screens.DeathScreen;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.world.item.ItemStack;
@@ -46,6 +47,7 @@ import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.EntityHitResult;
 import net.minecraft.world.phys.Vec3;
 import net.minecraft.core.Direction;
+import net.minecraft.tags.FluidTags;
 import net.minecraft.util.Mth;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EquipmentSlot;
@@ -105,11 +107,19 @@ public final class MineBotClientBody implements ClientModInitializer {
     private volatile boolean ready;
     private long readyAtMs;
     private final long loadedAt = System.nanoTime();
+    private DeathRespawnProgress lifecycle = new DeathRespawnProgress();
+    private final List<JsonObject> lifecycleEvents = new ArrayList<>();
+    private long lifecycleSeq;
+    private final String lifecycleEpoch = java.util.UUID.randomUUID().toString();
+    private JsonObject lastLivingState;
 
     @Override
     public void onInitializeClient() {
         instance = this;
         ClientPlayConnectionEvents.JOIN.register((handler, sender, client) -> {
+            lifecycle = new DeathRespawnProgress();
+            lifecycleEvents.clear();
+            lastLivingState = null;
             joinedTicks = 0;
             ready = false;
             baritone = BaritoneAPI.getProvider().getBaritoneForMinecraft(client);
@@ -119,6 +129,9 @@ public final class MineBotClientBody implements ClientModInitializer {
                     if (run != null) {
                         run.lastPathEvent = event.name();
                         run.pathEvents.merge(event.name(), 1, Integer::sum);
+                        if (run.swimRouteGoal != null && event == PathEvent.CALC_FAILED) {
+                            run.swimPathFailed = true;
+                        }
                         LOG.info("MINEBOT_PHASE_A path_event id={} event={}", run.id, event);
                     }
                 }
@@ -151,10 +164,11 @@ public final class MineBotClientBody implements ClientModInitializer {
             joinedTicks = 0;
             if (menuRead != null) finishMenuRead(client, "server_disconnected");
             confirmedResults.clear();
+            emitLifecycle(client, "world_disconnected", state(client));
         });
         ClientTickEvents.END_CLIENT_TICK.register(this::tick);
         Thread.ofPlatform().daemon().name("minebot-spike-ipc").start(this::serve);
-        LOG.info("MINEBOT_PHASE_A client_body_loaded minecraft=26.1.2 baritone=1.18.0+minebot.1");
+        LOG.info("MINEBOT_PHASE_A client_body_loaded minecraft=26.1.2 baritone=1.18.0+minebot.2");
     }
 
     private void serve() {
@@ -173,6 +187,7 @@ public final class MineBotClientBody implements ClientModInitializer {
                             response.addProperty("type", "ready");
                             response.addProperty("mod_to_ready_ms", readyAtMs);
                             connection.send(response);
+                            for (JsonObject event : lifecycleEvents) connection.send(event);
                         });
                     }
                     while (true) {
@@ -1006,6 +1021,7 @@ public final class MineBotClientBody implements ClientModInitializer {
             run.stopAt = System.nanoTime();
             baritone.getPathingBehavior().cancelEverything();
             baritone.getInputOverrideHandler().clearAllKeys();
+            restoreSwimSettings(run);
             if (run.structured && Minecraft.getInstance().player != null) {
                 Minecraft client = Minecraft.getInstance();
                 if (isVertical(run) && client.gameMode != null) client.gameMode.stopDestroyBlock();
@@ -1048,6 +1064,25 @@ public final class MineBotClientBody implements ClientModInitializer {
             return;
         }
         joinedTicks++;
+        boolean playerDead = client.player.isDeadOrDying();
+        var changes = lifecycle.observe(true, playerDead, client.screen instanceof DeathScreen,
+            client.level.hasChunkAt(client.player.blockPosition()));
+        if (changes.died()) {
+            JsonObject facts = state(client);
+            if (lastLivingState != null) facts.add("last_living_state", lastLivingState.deepCopy());
+            lifecycleEvents.clear();
+            emitLifecycle(client, "death", facts);
+            if (run != null) requestStop("failed", "death");
+        }
+        if (changes.requestRespawn()) client.player.respawn();
+        if (changes.respawned()) emitLifecycle(client, "respawned", state(client));
+        if (playerDead) {
+            if (run != null && !processActive() && !baritone.getPathingBehavior().isPathing())
+                terminal(client, "failed", "death");
+            return;
+        }
+        // These are native observations, not a second danger detector.
+        if (joinedTicks % 20 == 0) lastLivingState = state(client);
         if (menuRead != null) tickMenuRead(client);
         if (!ready && joinedTicks >= 20 && client.level.hasChunkAt(client.player.blockPosition()) && client.player.onGround()) {
             ready = true;
@@ -1057,8 +1092,10 @@ public final class MineBotClientBody implements ClientModInitializer {
             response.addProperty("mod_to_ready_ms", readyAtMs);
             if (peer != null) {
                 peer.send(response);
+                for (JsonObject event : lifecycleEvents) peer.send(event);
             }
             LOG.info("MINEBOT_PHASE_A ready {}", response);
+            emitLifecycle(client, "world_ready", state(client));
         }
         Run current = run;
         if (current == null) {
@@ -1143,6 +1180,19 @@ public final class MineBotClientBody implements ClientModInitializer {
                 terminal(client, current.stopStatus, current.stopReason);
             }
         }
+    }
+
+    private void emitLifecycle(Minecraft client, String name, JsonObject facts) {
+        JsonObject event = new JsonObject();
+        event.addProperty("type", "body_event");
+        event.addProperty("epoch", lifecycleEpoch);
+        event.addProperty("seq", ++lifecycleSeq);
+        event.addProperty("tick", client.level == null ? 0 : client.level.getGameTime());
+        event.addProperty("name", name);
+        event.add("data", facts);
+        lifecycleEvents.add(event);
+        if (peer != null) peer.send(event);
+        LOG.info("MINEBOT_LIFECYCLE {}", event);
     }
 
     private void tickBuilderFile(Minecraft client, Run current) {
@@ -1988,8 +2038,12 @@ public final class MineBotClientBody implements ClientModInitializer {
         if (current.phase == 1) {
             ItemStack result = confirmedResults.getOrDefault(menu.containerId, ItemStack.EMPTY);
             if (resultRevision <= current.resultRevision || result.isEmpty()) return;
-            if (!itemPath(result).equals(outputItem) || result.getCount() != current.craftUnitCount) {
-                requestStop("failed", "recipe_output_mismatch");
+            if (!CraftOutputProgress.matches(itemPath(result), result.getCount(), outputItem, current.craftUnitCount)) {
+                // The menu can publish an intermediate result while the placed inputs
+                // are still being resolved. A newer result revision is the evidence
+                // needed to decide; do not turn that transient state into a false
+                // terminal failure.
+                current.resultRevision = resultRevision;
                 return;
             }
             current.resultRevision = resultRevision;
@@ -2581,7 +2635,7 @@ public final class MineBotClientBody implements ClientModInitializer {
         }
     }
 
-    /** Swim vertically until the head is clear and the air supply has started recovering. */
+    /** Swim up, using upstream water pathing to go around a closed column. */
     private void tickSwimUp(Minecraft client, Run current) {
         if (current.phase == 0) {
             current.anchor = client.player.blockPosition();
@@ -2589,6 +2643,7 @@ public final class MineBotClientBody implements ClientModInitializer {
             current.swimmingUp = true;
             current.swimPreviousAir = client.player.getAirSupply();
             current.swimBestY = client.player.getY();
+            current.swimProgressPosition = client.player.position();
             current.phase = 1;
             current.phaseTick = current.ticks;
         }
@@ -2601,18 +2656,6 @@ public final class MineBotClientBody implements ClientModInitializer {
                 : "vertical_target_out_of_bounds");
             return;
         }
-        // Hold the jump key as a player does; the client rewrites the jumping
-        // flag from its keys every tick, so setting the flag does nothing.
-        client.options.keyJump.setDown(true);
-        double y = client.player.getY();
-        if (y > current.swimBestY + 0.05) {
-            current.swimBestY = y;
-            current.swimNoRiseTicks = 0;
-        } else if (SurfaceSwimProgress.blocked(++current.swimNoRiseTicks)) {
-            client.options.keyJump.setDown(false);
-            requestStop("failed", "swim_up_blocked");
-            return;
-        }
         int air = client.player.getAirSupply();
         boolean headOut = client.level.getFluidState(eye).isEmpty();
         if (SurfaceSwimProgress.completed(headOut, current.swimPreviousAir, air, client.player.getMaxAirSupply())) {
@@ -2621,10 +2664,124 @@ public final class MineBotClientBody implements ClientModInitializer {
             return;
         }
         current.swimPreviousAir = air;
+        if (current.swimPathFailed) {
+            // Upstream has already proved these goal cells unreachable. Try
+            // the next ring immediately rather than wait motionless for the
+            // ordinary physical stall detector to expire again.
+            if (!swimPathStartClear(client)) {
+                // The jump has pushed the player onto the next cell boundary
+                // under a ceiling. Let them sink into the clear cell before
+                // retrying these goals; this is not an unreachable exit.
+                current.swimRoutePending = true;
+                current.swimPathFailed = false;
+                baritone.getPathingBehavior().cancelEverything();
+                baritone.getInputOverrideHandler().clearAllKeys();
+            } else if (!routeSwimToAir(client, current)) {
+                requestStop("failed", "swim_surface_route_not_found");
+                return;
+            }
+            current.swimNoRiseTicks = 0;
+        }
+        if (current.swimRoutePending) {
+            client.options.keyJump.setDown(false);
+            if (!swimPathStartClear(client)) return;
+            current.swimRoutePending = false;
+            baritone.getCustomGoalProcess().setGoalAndPath(current.swimRouteGoal);
+        }
+        // During a detour upstream controls all movement, including jumping in
+        // water. Once it reaches the open column, jump through the final air
+        // boundary, which upstream's water-pillar movement does not support.
+        if (current.swimRouteGoal != null && current.swimRouteGoal.isInGoal(client.player.blockPosition())) {
+            baritone.getPathingBehavior().cancelEverything();
+            baritone.getInputOverrideHandler().clearAllKeys();
+            current.swimRouteGoal = null;
+            current.phase = 3;
+        }
+        client.options.keyJump.setDown(current.swimRouteGoal == null);
+        double y = client.player.getY();
+        boolean movedOnRoute = current.swimRouteGoal != null
+            && client.player.position().distanceToSqr(current.swimProgressPosition) > 0.01;
+        if (y > current.swimBestY + 0.05 || movedOnRoute) {
+            current.swimBestY = y;
+            current.swimProgressPosition = client.player.position();
+            current.swimNoRiseTicks = 0;
+        } else if (SurfaceSwimProgress.blocked(++current.swimNoRiseTicks)) {
+            client.options.keyJump.setDown(false);
+            if (!routeSwimToAir(client, current)) {
+                requestStop("failed", "swim_surface_route_not_found");
+                return;
+            }
+            current.swimNoRiseTicks = 0;
+            current.swimProgressPosition = client.player.position();
+        }
         if (client.player.getY() - current.anchor.getY() > current.verticalDistance) {
             client.options.keyJump.setDown(false);
             requestStop("failed", "vertical_target_out_of_bounds");
         }
+    }
+
+    private SurfaceSwimProgress.Space swimSpace(Minecraft client) {
+        return new SurfaceSwimProgress.Space() {
+            private boolean clear(BlockPos pos) {
+                return clientChunkLoaded(client, pos)
+                    && client.level.getBlockState(pos).getCollisionShape(client.level, pos).isEmpty();
+            }
+            public boolean water(int x, int y, int z) {
+                BlockPos pos = new BlockPos(x, y, z);
+                return clear(pos) && client.level.getFluidState(pos).is(FluidTags.WATER);
+            }
+            public boolean breathable(int x, int y, int z) {
+                BlockPos pos = new BlockPos(x, y, z);
+                return clear(pos) && client.level.getFluidState(pos).isEmpty();
+            }
+        };
+    }
+
+    private boolean routeSwimToAir(Minecraft client, Run current) {
+        SurfaceSwimProgress.Space space = swimSpace(client);
+        var anchor = new SurfaceSwimProgress.Cell(current.anchor.getX(), current.anchor.getY(), current.anchor.getZ());
+        var targets = SurfaceSwimProgress.routeTargets(space, anchor, client.level.getMinY(),
+            client.level.getMaxY(), current.verticalDistance, current.swimNextRing);
+        if (targets.isEmpty()) return false;
+        var settings = BaritoneAPI.getSettings();
+        if (current.swimPreviousAllowBreak == null) {
+            current.swimPreviousAllowBreak = settings.allowBreak.value;
+            current.swimPreviousAllowPlace = settings.allowPlace.value;
+            current.swimPreviousSubmergedNavigation = settings.allowSubmergedNavigation.value;
+        }
+        // An emergency detour must not dig through somebody's ceiling or place
+        // blocks. Restore the caller's settings on every stop path.
+        settings.allowBreak.value = false;
+        settings.allowPlace.value = false;
+        settings.allowSubmergedNavigation.value = true;
+        var first = targets.getFirst();
+        current.swimNextRing = Math.max(Math.abs(first.x() - anchor.x()), Math.abs(first.z() - anchor.z())) + 1;
+        current.swimRouteGoal = new GoalComposite(targets.stream()
+            .map(p -> (Goal) new GoalBlock(p.x(), p.y(), p.z())).toArray(Goal[]::new));
+        current.goal = current.swimRouteGoal;
+        current.swimPathFailed = false;
+        current.swimRoutePending = true;
+        current.phase = 2;
+        current.phaseTick = current.ticks;
+        baritone.getPathingBehavior().cancelEverything();
+        baritone.getInputOverrideHandler().clearAllKeys();
+        return true;
+    }
+
+    private boolean swimPathStartClear(Minecraft client) {
+        BlockPos feet = baritone.getPlayerContext().playerFeet();
+        return SurfaceSwimProgress.routeStartClear(swimSpace(client),
+            new SurfaceSwimProgress.Cell(feet.getX(), feet.getY(), feet.getZ()));
+    }
+
+    private static void restoreSwimSettings(Run current) {
+        if (current == null || current.swimPreviousAllowBreak == null) return;
+        BaritoneAPI.getSettings().allowBreak.value = current.swimPreviousAllowBreak;
+        BaritoneAPI.getSettings().allowPlace.value = current.swimPreviousAllowPlace;
+        BaritoneAPI.getSettings().allowSubmergedNavigation.value = current.swimPreviousSubmergedNavigation;
+        current.swimPreviousAllowBreak = null;
+        current.swimPreviousAllowPlace = null;
+        current.swimPreviousSubmergedNavigation = null;
     }
 
     private int findSurfaceY(Minecraft client, Run current) {
@@ -2921,6 +3078,7 @@ public final class MineBotClientBody implements ClientModInitializer {
             frame.addProperty("yaw", client.player.getYRot());
             frame.addProperty("pitch", client.player.getXRot());
             frame.addProperty("on_ground", client.player.onGround());
+            frame.addProperty("head_in_liquid", client.player.isEyeInFluid(FluidTags.WATER) || client.player.isEyeInFluid(FluidTags.LAVA));
             frame.addProperty("health", client.player.getHealth());
             frame.addProperty("food", client.player.getFoodData().getFoodLevel());
             frame.addProperty("oxygen", client.player.getAirSupply());
@@ -2981,6 +3139,7 @@ public final class MineBotClientBody implements ClientModInitializer {
             pos.add(client.player.getZ());
             state.add("position", pos);
             state.addProperty("on_ground", client.player.onGround());
+            state.addProperty("head_in_liquid", client.player.isEyeInFluid(FluidTags.WATER) || client.player.isEyeInFluid(FluidTags.LAVA));
             state.addProperty("creative", client.player.getAbilities().instabuild);
             state.addProperty("dimension", client.level.dimension().identifier().toString());
             state.addProperty("difficulty", client.level.getDifficulty().name().toLowerCase(java.util.Locale.ROOT));
@@ -3306,6 +3465,14 @@ public final class MineBotClientBody implements ClientModInitializer {
         int swimPreviousAir;
         double swimBestY;
         int swimNoRiseTicks;
+        Vec3 swimProgressPosition;
+        Goal swimRouteGoal;
+        volatile boolean swimPathFailed;
+        boolean swimRoutePending;
+        int swimNextRing = 1;
+        Boolean swimPreviousAllowBreak;
+        Boolean swimPreviousAllowPlace;
+        Boolean swimPreviousSubmergedNavigation;
         List<net.minecraft.world.item.Item> previousThrowawayItems;
         Integer previousFollowRadius;
         final Set<BlockPos> collectionTargets = new HashSet<>();

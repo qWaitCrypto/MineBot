@@ -1,0 +1,368 @@
+[
+  {
+    "arguments": {
+      "target": "e98a1fde-0143-4ec1-9901-5dee61b47629"
+    },
+    "choice": "engage",
+    "event": "call_supervision_default_requested",
+    "loop_state": "idle",
+    "seq": 29,
+    "session_id": "Step5NextBot",
+    "tool": "engage_entity",
+    "tool_call_id": "idle-loop",
+    "ts": 1791943106.977355
+  },
+  {
+    "action_progress_monotonic_s": 534342.696551995,
+    "action_sampled_at_ms": 1791943107343,
+    "answer_monotonic_s": 534342.329556664,
+    "answer_to_action_s": 0.36699533101636916,
+    "choice": "engage",
+    "event": "reflex_reaction_chain",
+    "event_distance": 1.0,
+    "event_health": 20.0,
+    "event_monotonic_s": 534342.134939827,
+    "event_sampled_at_ms": 1791943106772,
+    "event_to_request_s": 0.00011646596249192953,
+    "first_native_progress": true,
+    "native_action_id": "44ebbfd8-5fd1-4324-a2d8-0ea54e7af443",
+    "request_monotonic_s": 534342.135056293,
+    "request_to_answer_s": 0.19450037099886686,
+    "seq": 32,
+    "session_id": "Step5NextBot",
+    "target": "e98a1fde-0143-4ec1-9901-5dee61b47629",
+    "tool": "engage_entity",
+    "tool_call_id": "reflex-idle-5",
+    "total_s": 0.561612167977728,
+    "ts": 1791943107.3446383
+  },
+  {
+    "elapsed_s": 2.504,
+    "event": "call_supervision_finished",
+    "questions": 7,
+    "reads": 0,
+    "requests_per_min": 167.726,
+    "seq": 71,
+    "session_id": "Step5NextBot",
+    "tool": "engage_entity",
+    "tool_call_id": "reflex-idle-5",
+    "ts": 1791943109.4815996,
+    "unknown_answers": 0
+  },
+  {
+    "choice": "engage",
+    "event": "call_supervision_default_finished",
+    "result": {
+      "canRetry": false,
+      "reason": "killed",
+      "success": true
+    },
+    "seq": 72,
+    "session_id": "Step5NextBot",
+    "tool": "engage_entity",
+    "tool_call_id": "idle-loop",
+    "ts": 1791943109.4821134
+  },
+  {
+    "elapsed_s": 4.447,
+    "event": "call_supervision_finished",
+    "questions": 4,
+    "reads": 0,
+    "requests_per_min": 53.966,
+    "seq": 468,
+    "session_id": "Step5NextBot",
+    "tool": "move_to",
+    "tool_call_id": "plan-legacy:4a6fe6fd28224baa:0",
+    "ts": 1791943124.2917535,
+    "unknown_answers": 0
+  },
+  {
+    "arguments": {
+      "danger_pos": [
+        249.34130859375,
+        121.0,
+        223.1943359375
+      ],
+      "min_distance": 8.0
+    },
+    "choice": "move_away",
+    "event": "call_supervision_default_requested",
+    "facts": {
+      "body": {
+        "position": [
+          249.5,
+          121.0,
+          230.5
+        ]
+      },
+      "confirmed": false,
+      "decision": {
+        "choice": "move_away",
+        "evidence": {
+          "builder_paused": false,
+          "goal": "GoalNear{x=250, y=121, z=250, rangeSq=1}",
+          "navigation": {
+            "calculating": false,
+            "dest": [
+              "<bounded>",
+              "<bounded>",
+              "<bounded>"
+            ],
+            "path_position": 10,
+            "repeated_failures": 0
+          },
+          "pathing": true,
+          "position": [
+            249.5,
+            121.0,
+            230.5
+          ],
+          "processes": [
+            "goal"
+          ]
+        }
+      },
+      "plan": {
+        "goal": "按顺序巡视高台 5 个点位：[250,121,220] → [250,121,250] → [190,121,250] → [190,121,190] → [220,121,220]，全部到达后待命。不采集、不建造、不破坏方块。",
+        "intent_chain": [
+          "依次到达 5 个巡视点并结束巡视"
+        ],
+        "node_description": "到达目标位置 [250,121,250]"
+      },
+      "reason": "decision_default_tool",
+      "what": {
+        "elapsed_s": 2.5,
+        "last_progress_at": "2026-10-14T01:58:48Z",
+        "no_progress_s": 0.2,
+        "phase": "moving",
+        "progress_signal": "movement",
+        "tool": "move_to"
+      }
+    },
+    "seq": 503,
+    "session_id": "Step5NextBot",
+    "tool": "move_away",
+    "tool_call_id": "plan-legacy:af2ca0860bb2c62e:0",
+    "ts": 1791943128.555338
+  },
+  {
+    "elapsed_s": 0.123,
+    "event": "call_supervision_finished",
+    "questions": 0,
+    "reads": 0,
+    "requests_per_min": 0.0,
+    "seq": 513,
+    "session_id": "Step5NextBot",
+    "tool": "move_away",
+    "tool_call_id": "reflex-default-98fcd612-3f7b-4372-9637-8f34014d227f",
+    "ts": 1791943128.8999465,
+    "unknown_answers": 0
+  },
+  {
+    "answer_monotonic_s": 534363.906677683,
+    "choice": "move_away",
+    "event": "reflex_reaction_chain",
+    "event_distance": 5.917252941914449,
+    "event_health": 4.0,
+    "event_monotonic_s": 534363.445962663,
+    "event_sampled_at_ms": null,
+    "first_native_progress": false,
+    "request_monotonic_s": 534363.709828962,
+    "result": {
+      "canRetry": false,
+      "reason": "already_safe",
+      "success": true
+    },
+    "seq": 514,
+    "session_id": "Step5NextBot",
+    "target": "e40b43ee-29ea-4c39-95b8-2523c6651f10",
+    "tool": "move_away",
+    "tool_call_id": "reflex-default-98fcd612-3f7b-4372-9637-8f34014d227f",
+    "ts": 1791943128.900105
+  },
+  {
+    "choice": "move_away",
+    "event": "call_supervision_default_finished",
+    "facts": {
+      "body": {
+        "position": [
+          249.5,
+          121.0,
+          230.5
+        ]
+      },
+      "confirmed": false,
+      "decision": {
+        "choice": "repeat",
+        "evidence": {
+          "builder_paused": false,
+          "goal": "GoalNear{x=250, y=121, z=250, rangeSq=1}",
+          "navigation": {
+            "calculating": false,
+            "dest": [
+              "<bounded>",
+              "<bounded>",
+              "<bounded>"
+            ],
+            "path_position": 10,
+            "repeated_failures": 0
+          },
+          "pathing": true,
+          "position": [
+            249.5,
+            121.0,
+            230.5
+          ],
+          "processes": [
+            "goal"
+          ]
+        }
+      },
+      "default_action": {
+        "choice": "move_away",
+        "result": {
+          "canRetry": false,
+          "reason": "already_safe",
+          "success": true
+        },
+        "then": "resume",
+        "tool": "move_away"
+      },
+      "history": [
+        {
+          "body": {
+            "inventory": {},
+            "position": [
+              249.5,
+              121.0,
+              230.5
+            ]
+          },
+          "result": {
+            "canRetry": true,
+            "metrics": {
+              "direct_call_handoff": {
+                "facts": {
+                  "decision": {
+                    "choice": "move_away"
+                  },
+                  "default_action": {
+                    "choice": "move_away",
+                    "result": {
+                      "canRetry": false,
+                      "reason": "already_safe",
+                      "success": true
+                    },
+                    "tool": "move_away"
+                  },
+                  "reason": "decision_default_tool"
+                }
+              }
+            },
+            "reason": "preempted",
+            "success": false
+          }
+        }
+      ],
+      "history_earlier": 0,
+      "plan": {
+        "goal": "按顺序巡视高台 5 个点位：[250,121,220] → [250,121,250] → [190,121,250] → [190,121,190] → [220,121,220]，全部到达后待命。不采集、不建造、不破坏方块。",
+        "intent_chain": [
+          "依次到达 5 个巡视点并结束巡视"
+        ],
+        "node_description": "到达目标位置 [250,121,250]"
+      },
+      "reason": "decision_default_tool",
+      "settlement": {
+        "active_action_id": null,
+        "body_control": {
+          "claim_id": null,
+          "generation": 3,
+          "holder": "none",
+          "since_monotonic": 534364.128716602,
+          "stop_state": "settled"
+        },
+        "cancellation_scope_count": 1,
+        "control_unknown": false,
+        "execution_idle": true,
+        "interrupt_accepted": true,
+        "interrupt_complete": false,
+        "interrupt_ok": true,
+        "interrupt_requested": true,
+        "late_native_terminal": null,
+        "native_stopped": true,
+        "owner": null,
+        "owner_checks": 0,
+        "owner_observed": false,
+        "owner_wait_ms": 0.0,
+        "reason": "direct_call:decision_default_tool",
+        "sampled_at_ms": 1791943128773,
+        "settled": true
+      },
+      "what": {
+        "elapsed_s": 2.5,
+        "last_progress_at": "2026-10-14T01:58:48Z",
+        "no_progress_s": 0.2,
+        "phase": "moving",
+        "progress_signal": "movement",
+        "tool": "move_to"
+      }
+    },
+    "seq": 519,
+    "session_id": "Step5NextBot",
+    "tool_call_id": "plan-legacy:af2ca0860bb2c62e:0",
+    "ts": 1791943129.113652
+  },
+  {
+    "elapsed_s": 3.036,
+    "event": "call_supervision_finished",
+    "questions": 4,
+    "reads": 0,
+    "requests_per_min": 79.052,
+    "seq": 521,
+    "session_id": "Step5NextBot",
+    "tool": "move_to",
+    "tool_call_id": "plan-legacy:af2ca0860bb2c62e:0",
+    "ts": 1791943129.1141891,
+    "unknown_answers": 0
+  },
+  {
+    "elapsed_s": 3.358,
+    "event": "call_supervision_finished",
+    "questions": 3,
+    "reads": 0,
+    "requests_per_min": 53.6,
+    "seq": 554,
+    "session_id": "Step5NextBot",
+    "tool": "move_to",
+    "tool_call_id": "plan-legacy:af2ca0860bb2c62e:0__repeat_1",
+    "ts": 1791943133.1203806,
+    "unknown_answers": 0
+  },
+  {
+    "elapsed_s": 10.711,
+    "event": "call_supervision_finished",
+    "questions": 10,
+    "reads": 0,
+    "requests_per_min": 56.019,
+    "seq": 649,
+    "session_id": "Step5NextBot",
+    "tool": "move_to",
+    "tool_call_id": "plan-legacy:9a2a59cf23c879e8:0",
+    "ts": 1791943144.4392505,
+    "unknown_answers": 0
+  },
+  {
+    "elapsed_s": 10.671,
+    "event": "call_supervision_finished",
+    "questions": 9,
+    "reads": 0,
+    "requests_per_min": 50.606,
+    "seq": 740,
+    "session_id": "Step5NextBot",
+    "tool": "move_to",
+    "tool_call_id": "plan-legacy:4ceca1bb2f2b9939:0",
+    "ts": 1791943156.0194056,
+    "unknown_answers": 0
+  }
+]

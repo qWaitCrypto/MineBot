@@ -1,0 +1,21 @@
+{
+  "commit": "d454341591c7a78e45b3eb9418e506a98ed85ff7",
+  "test": "tests/unit/test_responses_kernel.py::ResponsesKernelTests::test_http_keepalive_survives_event_gap_but_idle_and_eof_fail",
+  "runs": [
+    {
+      "run": 1,
+      "exit_code": 0,
+      "elapsed_s": 5.077768665971234
+    },
+    {
+      "run": 2,
+      "exit_code": 0,
+      "elapsed_s": 2.7214254159480333
+    },
+    {
+      "run": 3,
+      "exit_code": 0,
+      "elapsed_s": 2.7711193449795246
+    }
+  ]
+}

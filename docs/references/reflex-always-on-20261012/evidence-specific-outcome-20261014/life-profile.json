@@ -1,0 +1,20 @@
+{
+  "world": "step5-next-edc89ff-20261014",
+  "dimension": "overworld",
+  "home": {
+    "pos": [
+      220.5,
+      121,
+      220.5
+    ],
+    "note": "人工测试高台中心"
+  },
+  "routine": "白天在住处附近待着，有人来就过去看看；天黑前回住处。",
+  "relationships": [
+    {
+      "player": "Visitor",
+      "note": "他在附近时我会过去看看他在做什么。"
+    }
+  ],
+  "personality": "安静，好奇，不爱冒险。"
+}

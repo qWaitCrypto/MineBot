@@ -1,0 +1,4495 @@
+{
+  "source": "/home/qwait/MineBot-reflex/logs/reflex-stage-20261012d/trace.jsonl",
+  "input_provenance": "Persisted node decision_facts, or temporal SQLite tool observations paired with native body_state; original plan argument order from SDK function_call.arguments and conversation archives; inventory order from complete hotbars with exactly equal counts. No prose parsing. Tracked fixture retains the result fields read by the compiler (success/reason/canRetry/complete/outcome/summary); complete original observations remain in the source DB and recovery artifact.",
+  "coverage": "All sixteen result frames; the 118 running frames remain unverified.",
+  "limitations": "Some inventory-order hotbar samples are later than the question. The historic history builder reads absent position/inventory aliases, reproduced without correcting the input.",
+  "cases": [
+    {
+      "seq": 596,
+      "node_id": "stone_pickaxe",
+      "provenance": {
+        "kind": "persisted_node",
+        "trace_seq": 598
+      },
+      "inventory_slot_source_seq": null,
+      "plan": {
+        "goal": "从空背包建立石镐，采集至少两块铁矿，准备熔炉和燃料，并把至少两块铁矿熔炼成铁锭；不传送、不使用外部物资。",
+        "language": "minebot-work/0.2",
+        "timeout_s": 600,
+        "work": {
+          "intent": "完成石镐制作、铁矿采集、熔炉准备和至少两个铁锭的熔炼",
+          "kind": "sequence",
+          "steps": [
+            {
+              "arguments": {
+                "intent": "获得并装备一把石镐",
+                "resource": "stone_pickaxe"
+              },
+              "id": "stone_pickaxe",
+              "kind": "call",
+              "tool": "ensure_tool_for"
+            },
+            {
+              "arguments": {
+                "count": 2,
+                "intent": "采集并在库存中拥有至少两块铁矿",
+                "item": "iron_ore"
+              },
+              "id": "iron_ore",
+              "kind": "call",
+              "tool": "collect_resource"
+            },
+            {
+              "arguments": {
+                "count": 8,
+                "intent": "采集足够圆石以制作熔炉",
+                "item": "cobblestone"
+              },
+              "id": "furnace_cobble",
+              "kind": "call",
+              "tool": "collect_resource"
+            },
+            {
+              "arguments": {
+                "count": 1,
+                "intent": "采集至少一块煤炭作为熔炼燃料",
+                "item": "coal"
+              },
+              "id": "fuel_coal",
+              "kind": "call",
+              "tool": "collect_resource"
+            },
+            {
+              "arguments": {
+                "count": 1,
+                "intent": "制作一座熔炉",
+                "item": "furnace"
+              },
+              "id": "craft_furnace",
+              "kind": "call",
+              "tool": "craft_item"
+            },
+            {
+              "arguments": {
+                "count": 2,
+                "input_item": "iron_ore",
+                "intent": "将至少两块铁矿熔炼成至少两个铁锭"
+              },
+              "id": "smelt_iron",
+              "kind": "call",
+              "tool": "smelt_item"
+            }
+          ]
+        }
+      },
+      "node": {
+        "arguments": {
+          "intent": "获得并装备一把石镐",
+          "resource": "stone_pickaxe"
+        },
+        "id": "stone_pickaxe",
+        "kind": "call",
+        "tool": "ensure_tool_for",
+        "next_call": "collect_resource(count=2, item=\"iron_ore\")"
+      },
+      "intents": [
+        "完成石镐制作、铁矿采集、熔炉准备和至少两个铁锭的熔炼"
+      ],
+      "raw_decision_facts": {
+        "body_state": {
+          "body_owner": "ReflexStageBot",
+          "bot": "ReflexStageBot",
+          "complete": true,
+          "dimension": "minecraft:overworld",
+          "food": 20,
+          "hazard_unresolved": null,
+          "health": 20.0,
+          "inventory_complete": true,
+          "inventory_counts": {},
+          "inventory_hash": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          "inventory_includes_selected": true,
+          "offhand_item": null,
+          "oxygen": 300,
+          "pending_action_count": 0,
+          "pitch": 0.0,
+          "pos": [
+            10.5,
+            78.0,
+            -50.5
+          ],
+          "selected_item": null,
+          "selected_item_known": true,
+          "selected_slot": 0,
+          "yaw": 0.0
+        },
+        "execution": {},
+        "history": [
+          {
+            "reason": "unplannable",
+            "result": {
+              "success": false,
+              "reason": "unplannable",
+              "canRetry": false,
+              "complete": true,
+              "summary": {
+                "completed_step_count": 0,
+                "completed_steps": [],
+                "error": {
+                  "chain": [],
+                  "count": 1,
+                  "detail": {
+                    "missing_recipe": "stone_pickaxe",
+                    "recipe_source": "unlocked_recipe_book"
+                  },
+                  "item": "stone_pickaxe",
+                  "reason": "unplannable"
+                },
+                "failed_step": {
+                  "phase": "planning"
+                },
+                "item": "stone_pickaxe",
+                "plan": [],
+                "plan_step_count": 0,
+                "resume_hint": "reinvoke_ensure",
+                "target_count": 1
+              }
+            },
+            "body": {
+              "position": null,
+              "inventory": null
+            }
+          }
+        ],
+        "history_count": 1,
+        "history_earlier": 0,
+        "reads": [],
+        "tool_arguments": {
+          "intent": "获得并装备一把石镐",
+          "resource": "stone_pickaxe"
+        },
+        "tool_result": {
+          "success": false,
+          "reason": "unplannable",
+          "canRetry": false,
+          "complete": true,
+          "summary": {
+            "completed_step_count": 0,
+            "completed_steps": [],
+            "error": {
+              "chain": [],
+              "count": 1,
+              "detail": {
+                "missing_recipe": "stone_pickaxe",
+                "recipe_source": "unlocked_recipe_book"
+              },
+              "item": "stone_pickaxe",
+              "reason": "unplannable"
+            },
+            "failed_step": {
+              "phase": "planning"
+            },
+            "item": "stone_pickaxe",
+            "plan": [],
+            "plan_step_count": 0,
+            "resume_hint": "reinvoke_ensure",
+            "target_count": 1
+          }
+        }
+      },
+      "expected_request": {
+        "state": {
+          "task": "从空背包建立石镐，采集至少两块铁矿，准备熔炉和燃料，并把至少两块铁矿熔炼成铁锭；不传送、不使用外部物资。",
+          "agent_intent": "完成石镐制作、铁矿采集、熔炉准备和至少两个铁锭的熔炼",
+          "inventory": "empty",
+          "body": "Health is 20 of 20. Hunger is 20 of 20. Air supply is full.",
+          "threats": "No hostile mob is in view.",
+          "finished_call": "ensure_tool_for(resource=\"stone_pickaxe\") has ended. It reported failure: unplannable.",
+          "position": "now at [10.5, 78.0, -50.5].",
+          "request_chars": 574
+        },
+        "questions": {
+          "q": {
+            "type": "choice",
+            "instructions": "Choose what the Body does next.",
+            "criteria": {
+              "call_agent": "Do not repeat it and hand control back to the Agent for a new plan."
+            }
+          }
+        }
+      }
+    },
+    {
+      "seq": 1511,
+      "node_id": "planks",
+      "provenance": {
+        "kind": "temporal_observation_and_state",
+        "observation_id": "observation-1a23afdfe42944aeb0c855c4d8927832",
+        "observation_ts": 1791804680.407,
+        "body_state_seq": 1507
+      },
+      "inventory_slot_source_seq": 1504,
+      "plan": {
+        "language": "minebot-work/0.2",
+        "goal": "从已有橡木原木制作并装备石镐",
+        "timeout_s": 300,
+        "work": {
+          "kind": "sequence",
+          "intent": "用现有木材和自然石头制作并装备一把石镐",
+          "steps": [
+            {
+              "kind": "call",
+              "id": "planks",
+              "tool": "craft_item",
+              "arguments": {
+                "item": "oak_planks",
+                "count": 12,
+                "intent": "把橡木原木加工成至少12块橡木木板"
+              }
+            },
+            {
+              "kind": "call",
+              "id": "table",
+              "tool": "craft_item",
+              "arguments": {
+                "item": "crafting_table",
+                "count": 1,
+                "intent": "制作一张工作台"
+              }
+            },
+            {
+              "kind": "call",
+              "id": "sticks",
+              "tool": "craft_item",
+              "arguments": {
+                "item": "stick",
+                "count": 4,
+                "intent": "制作至少4根木棍"
+              }
+            },
+            {
+              "kind": "call",
+              "id": "stone",
+              "tool": "collect_resource",
+              "arguments": {
+                "item": "cobblestone",
+                "count": 3,
+                "intent": "采集至少3块圆石用于石镐"
+              }
+            },
+            {
+              "kind": "call",
+              "id": "pick",
+              "tool": "craft_item",
+              "arguments": {
+                "item": "stone_pickaxe",
+                "count": 1,
+                "auto_equip": true,
+                "intent": "制作并装备一把石镐"
+              }
+            }
+          ]
+        }
+      },
+      "node": {
+        "kind": "call",
+        "id": "planks",
+        "tool": "craft_item",
+        "arguments": {
+          "item": "oak_planks",
+          "count": 12,
+          "intent": "把橡木原木加工成至少12块橡木木板"
+        },
+        "next_call": "craft_item(item=\"crafting_table\", count=1)"
+      },
+      "intents": [
+        "用现有木材和自然石头制作并装备一把石镐"
+      ],
+      "raw_decision_facts": {
+        "tool_result": {
+          "success": true,
+          "reason": "completed",
+          "canRetry": false
+        },
+        "tool_arguments": {
+          "item": "oak_planks",
+          "count": 12,
+          "intent": "把橡木原木加工成至少12块橡木木板"
+        },
+        "body_state": {
+          "body_owner": "ReflexStageBot",
+          "bot": "ReflexStageBot",
+          "complete": true,
+          "dimension": "minecraft:overworld",
+          "food": 20,
+          "hazard_unresolved": null,
+          "health": 20.0,
+          "inventory_counts": {
+            "oak_log": 3,
+            "oak_planks": 12
+          },
+          "inventory_hash": "1ba3fb5d6568735121497ec10ae51dd13d545f980db0fcc31366f27438979d8c",
+          "offhand_item": null,
+          "oxygen": 300,
+          "pending_action_count": 0,
+          "pitch": 47.84999,
+          "pos": [
+            10.588425541939793,
+            71.0,
+            -50.621618934717766
+          ],
+          "selected_item": "oak_log",
+          "selected_slot": 0,
+          "yaw": 436.05008
+        },
+        "execution": {
+          "delivered": true,
+          "normal_work": "The Body normally finds or creates the crafting context, performs complete recipe batches, and verifies the inventory result.",
+          "tool": "craft_item"
+        },
+        "reads": [],
+        "history": [
+          {
+            "reason": "completed",
+            "result": {
+              "success": true,
+              "reason": "completed",
+              "canRetry": false
+            },
+            "body": {
+              "position": null,
+              "inventory": null
+            }
+          }
+        ],
+        "history_count": 1,
+        "history_earlier": 0
+      },
+      "expected_request": {
+        "state": {
+          "task": "从已有橡木原木制作并装备石镐",
+          "agent_intent": "用现有木材和自然石头制作并装备一把石镐",
+          "inventory": "oak_log 3, oak_planks 12",
+          "body": "Health is 20 of 20. Hunger is 20 of 20. Air supply is full.",
+          "threats": "No hostile mob is in view.",
+          "finished_call": "craft_item(item=\"oak_planks\", count=12) has ended normally.",
+          "position": "now at [10.6, 71.0, -50.6].",
+          "request_chars": 714
+        },
+        "questions": {
+          "q": {
+            "type": "choice",
+            "instructions": "Choose what the Body does next.",
+            "criteria": {
+              "repeat": "Run the same call again: craft_item(item=\"oak_planks\", count=12).",
+              "next_step": "Do not repeat it and start the next step of the plan: craft_item(item=\"crafting_table\", count=1).",
+              "call_agent": "Do not repeat it and hand control back to the Agent for a new plan."
+            }
+          }
+        }
+      }
+    },
+    {
+      "seq": 1523,
+      "node_id": "table",
+      "provenance": {
+        "kind": "temporal_observation_and_state",
+        "observation_id": "observation-f7ff28d5a0334eb2889e48b940ce4d31",
+        "observation_ts": 1791804681.602,
+        "body_state_seq": 1521
+      },
+      "inventory_slot_source_seq": 1527,
+      "plan": {
+        "language": "minebot-work/0.2",
+        "goal": "从已有橡木原木制作并装备石镐",
+        "timeout_s": 300,
+        "work": {
+          "kind": "sequence",
+          "intent": "用现有木材和自然石头制作并装备一把石镐",
+          "steps": [
+            {
+              "kind": "call",
+              "id": "planks",
+              "tool": "craft_item",
+              "arguments": {
+                "item": "oak_planks",
+                "count": 12,
+                "intent": "把橡木原木加工成至少12块橡木木板"
+              }
+            },
+            {
+              "kind": "call",
+              "id": "table",
+              "tool": "craft_item",
+              "arguments": {
+                "item": "crafting_table",
+                "count": 1,
+                "intent": "制作一张工作台"
+              }
+            },
+            {
+              "kind": "call",
+              "id": "sticks",
+              "tool": "craft_item",
+              "arguments": {
+                "item": "stick",
+                "count": 4,
+                "intent": "制作至少4根木棍"
+              }
+            },
+            {
+              "kind": "call",
+              "id": "stone",
+              "tool": "collect_resource",
+              "arguments": {
+                "item": "cobblestone",
+                "count": 3,
+                "intent": "采集至少3块圆石用于石镐"
+              }
+            },
+            {
+              "kind": "call",
+              "id": "pick",
+              "tool": "craft_item",
+              "arguments": {
+                "item": "stone_pickaxe",
+                "count": 1,
+                "auto_equip": true,
+                "intent": "制作并装备一把石镐"
+              }
+            }
+          ]
+        }
+      },
+      "node": {
+        "kind": "call",
+        "id": "table",
+        "tool": "craft_item",
+        "arguments": {
+          "item": "crafting_table",
+          "count": 1,
+          "intent": "制作一张工作台"
+        },
+        "next_call": "craft_item(item=\"stick\", count=4)"
+      },
+      "intents": [
+        "用现有木材和自然石头制作并装备一把石镐"
+      ],
+      "raw_decision_facts": {
+        "tool_result": {
+          "success": false,
+          "reason": "craft_recipe_failed:recipe_output_mismatch",
+          "canRetry": true
+        },
+        "tool_arguments": {
+          "item": "crafting_table",
+          "count": 1,
+          "intent": "制作一张工作台"
+        },
+        "body_state": {
+          "body_owner": "ReflexStageBot",
+          "bot": "ReflexStageBot",
+          "complete": true,
+          "dimension": "minecraft:overworld",
+          "food": 20,
+          "hazard_unresolved": null,
+          "health": 20.0,
+          "inventory_counts": {
+            "oak_log": 3,
+            "oak_planks": 12
+          },
+          "inventory_hash": "1ba3fb5d6568735121497ec10ae51dd13d545f980db0fcc31366f27438979d8c",
+          "offhand_item": null,
+          "oxygen": 300,
+          "pending_action_count": 0,
+          "pitch": 47.84999,
+          "pos": [
+            10.588425541939793,
+            71.0,
+            -50.621618934717766
+          ],
+          "selected_item": "oak_log",
+          "selected_slot": 0,
+          "yaw": 436.05008
+        },
+        "execution": {},
+        "reads": [],
+        "history": [
+          {
+            "reason": "craft_recipe_failed:recipe_output_mismatch",
+            "result": {
+              "success": false,
+              "reason": "craft_recipe_failed:recipe_output_mismatch",
+              "canRetry": true
+            },
+            "body": {
+              "position": null,
+              "inventory": null
+            }
+          }
+        ],
+        "history_count": 1,
+        "history_earlier": 0
+      },
+      "expected_request": {
+        "state": {
+          "task": "从已有橡木原木制作并装备石镐",
+          "agent_intent": "用现有木材和自然石头制作并装备一把石镐",
+          "inventory": "oak_log 3, oak_planks 12",
+          "body": "Health is 20 of 20. Hunger is 20 of 20. Air supply is full.",
+          "threats": "No hostile mob is in view.",
+          "finished_call": "craft_item(item=\"crafting_table\", count=1) has ended. It reported failure: craft_recipe_failed:recipe_output_mismatch.",
+          "position": "now at [10.6, 71.0, -50.6].",
+          "request_chars": 662
+        },
+        "questions": {
+          "q": {
+            "type": "choice",
+            "instructions": "Choose what the Body does next.",
+            "criteria": {
+              "repeat": "Run the same call again: craft_item(item=\"crafting_table\", count=1).",
+              "call_agent": "Do not repeat it and hand control back to the Agent for a new plan."
+            }
+          }
+        }
+      }
+    },
+    {
+      "seq": 1538,
+      "node_id": "table__repeat_1",
+      "provenance": {
+        "kind": "temporal_observation_and_state",
+        "observation_id": "observation-960d543174a34c3481786afb520cb393",
+        "observation_ts": 1791804683.601,
+        "body_state_seq": 1536
+      },
+      "inventory_slot_source_seq": 1534,
+      "plan": {
+        "language": "minebot-work/0.2",
+        "goal": "从已有橡木原木制作并装备石镐",
+        "timeout_s": 300,
+        "work": {
+          "kind": "sequence",
+          "intent": "用现有木材和自然石头制作并装备一把石镐",
+          "steps": [
+            {
+              "kind": "call",
+              "id": "planks",
+              "tool": "craft_item",
+              "arguments": {
+                "item": "oak_planks",
+                "count": 12,
+                "intent": "把橡木原木加工成至少12块橡木木板"
+              }
+            },
+            {
+              "kind": "call",
+              "id": "table",
+              "tool": "craft_item",
+              "arguments": {
+                "item": "crafting_table",
+                "count": 1,
+                "intent": "制作一张工作台"
+              }
+            },
+            {
+              "kind": "call",
+              "id": "sticks",
+              "tool": "craft_item",
+              "arguments": {
+                "item": "stick",
+                "count": 4,
+                "intent": "制作至少4根木棍"
+              }
+            },
+            {
+              "kind": "call",
+              "id": "stone",
+              "tool": "collect_resource",
+              "arguments": {
+                "item": "cobblestone",
+                "count": 3,
+                "intent": "采集至少3块圆石用于石镐"
+              }
+            },
+            {
+              "kind": "call",
+              "id": "pick",
+              "tool": "craft_item",
+              "arguments": {
+                "item": "stone_pickaxe",
+                "count": 1,
+                "auto_equip": true,
+                "intent": "制作并装备一把石镐"
+              }
+            }
+          ]
+        }
+      },
+      "node": {
+        "kind": "call",
+        "id": "table",
+        "tool": "craft_item",
+        "arguments": {
+          "item": "crafting_table",
+          "count": 1,
+          "intent": "制作一张工作台"
+        },
+        "next_call": "craft_item(item=\"stick\", count=4)"
+      },
+      "intents": [
+        "用现有木材和自然石头制作并装备一把石镐"
+      ],
+      "raw_decision_facts": {
+        "tool_result": {
+          "success": true,
+          "reason": "completed",
+          "canRetry": false
+        },
+        "tool_arguments": {
+          "item": "crafting_table",
+          "count": 1,
+          "intent": "制作一张工作台"
+        },
+        "body_state": {
+          "body_owner": "ReflexStageBot",
+          "bot": "ReflexStageBot",
+          "complete": true,
+          "dimension": "minecraft:overworld",
+          "food": 20,
+          "hazard_unresolved": null,
+          "health": 20.0,
+          "inventory_counts": {
+            "oak_log": 3,
+            "oak_planks": 8,
+            "crafting_table": 1
+          },
+          "inventory_hash": "7f6682e4b2fc8dee230b1513f94efed6b8445a70edf7f3a5e11505fd5b2ccfc1",
+          "offhand_item": null,
+          "oxygen": 300,
+          "pending_action_count": 0,
+          "pitch": 47.84999,
+          "pos": [
+            10.588425541939793,
+            71.0,
+            -50.621618934717766
+          ],
+          "selected_item": "oak_log",
+          "selected_slot": 0,
+          "yaw": 436.05008
+        },
+        "execution": {
+          "delivered": true,
+          "normal_work": "The Body normally finds or creates the crafting context, performs complete recipe batches, and verifies the inventory result.",
+          "tool": "craft_item"
+        },
+        "reads": [],
+        "history": [
+          {
+            "reason": "craft_recipe_failed:recipe_output_mismatch",
+            "result": {
+              "success": false,
+              "reason": "craft_recipe_failed:recipe_output_mismatch",
+              "canRetry": true
+            },
+            "body": {
+              "position": null,
+              "inventory": null
+            }
+          },
+          {
+            "reason": "completed",
+            "result": {
+              "success": true,
+              "reason": "completed",
+              "canRetry": false
+            },
+            "body": {
+              "position": null,
+              "inventory": null
+            }
+          }
+        ],
+        "history_count": 2,
+        "history_earlier": 0
+      },
+      "expected_request": {
+        "state": {
+          "task": "从已有橡木原木制作并装备石镐",
+          "agent_intent": "用现有木材和自然石头制作并装备一把石镐",
+          "inventory": "oak_log 3, oak_planks 8, crafting_table 1",
+          "body": "Health is 20 of 20. Hunger is 20 of 20. Air supply is full.",
+          "threats": "No hostile mob is in view.",
+          "finished_call": "craft_item(item=\"crafting_table\", count=1) has ended normally.",
+          "earlier_attempts_of_this_call": [
+            "Attempt 1: failure: craft_recipe_failed:recipe_output_mismatch; inventory and position unchanged."
+          ],
+          "position": "now at [10.6, 71.0, -50.6].",
+          "request_chars": 862
+        },
+        "questions": {
+          "q": {
+            "type": "choice",
+            "instructions": "Choose what the Body does next.",
+            "criteria": {
+              "repeat": "Run the same call again: craft_item(item=\"crafting_table\", count=1).",
+              "next_step": "Do not repeat it and start the next step of the plan: craft_item(item=\"stick\", count=4).",
+              "call_agent": "Do not repeat it and hand control back to the Agent for a new plan."
+            }
+          }
+        }
+      }
+    },
+    {
+      "seq": 1552,
+      "node_id": "sticks",
+      "provenance": {
+        "kind": "temporal_observation_and_state",
+        "observation_id": "observation-d92017a735474e638d613f3239bde9cc",
+        "observation_ts": 1791804685.402,
+        "body_state_seq": 1550
+      },
+      "inventory_slot_source_seq": 1554,
+      "plan": {
+        "language": "minebot-work/0.2",
+        "goal": "从已有橡木原木制作并装备石镐",
+        "timeout_s": 300,
+        "work": {
+          "kind": "sequence",
+          "intent": "用现有木材和自然石头制作并装备一把石镐",
+          "steps": [
+            {
+              "kind": "call",
+              "id": "planks",
+              "tool": "craft_item",
+              "arguments": {
+                "item": "oak_planks",
+                "count": 12,
+                "intent": "把橡木原木加工成至少12块橡木木板"
+              }
+            },
+            {
+              "kind": "call",
+              "id": "table",
+              "tool": "craft_item",
+              "arguments": {
+                "item": "crafting_table",
+                "count": 1,
+                "intent": "制作一张工作台"
+              }
+            },
+            {
+              "kind": "call",
+              "id": "sticks",
+              "tool": "craft_item",
+              "arguments": {
+                "item": "stick",
+                "count": 4,
+                "intent": "制作至少4根木棍"
+              }
+            },
+            {
+              "kind": "call",
+              "id": "stone",
+              "tool": "collect_resource",
+              "arguments": {
+                "item": "cobblestone",
+                "count": 3,
+                "intent": "采集至少3块圆石用于石镐"
+              }
+            },
+            {
+              "kind": "call",
+              "id": "pick",
+              "tool": "craft_item",
+              "arguments": {
+                "item": "stone_pickaxe",
+                "count": 1,
+                "auto_equip": true,
+                "intent": "制作并装备一把石镐"
+              }
+            }
+          ]
+        }
+      },
+      "node": {
+        "kind": "call",
+        "id": "sticks",
+        "tool": "craft_item",
+        "arguments": {
+          "item": "stick",
+          "count": 4,
+          "intent": "制作至少4根木棍"
+        },
+        "next_call": "collect_resource(item=\"cobblestone\", count=3)"
+      },
+      "intents": [
+        "用现有木材和自然石头制作并装备一把石镐"
+      ],
+      "raw_decision_facts": {
+        "tool_result": {
+          "success": true,
+          "reason": "completed",
+          "canRetry": false
+        },
+        "tool_arguments": {
+          "item": "stick",
+          "count": 4,
+          "intent": "制作至少4根木棍"
+        },
+        "body_state": {
+          "body_owner": "ReflexStageBot",
+          "bot": "ReflexStageBot",
+          "complete": true,
+          "dimension": "minecraft:overworld",
+          "food": 20,
+          "hazard_unresolved": null,
+          "health": 20.0,
+          "inventory_counts": {
+            "oak_log": 3,
+            "oak_planks": 6,
+            "crafting_table": 1,
+            "stick": 4
+          },
+          "inventory_hash": "42a58eeffaaf4fbfc3970423e0b698c2b2112832b784f43b2b93a24aee68f81e",
+          "offhand_item": null,
+          "oxygen": 300,
+          "pending_action_count": 0,
+          "pitch": 47.84999,
+          "pos": [
+            10.588425541939793,
+            71.0,
+            -50.621618934717766
+          ],
+          "selected_item": "oak_log",
+          "selected_slot": 0,
+          "yaw": 436.05008
+        },
+        "execution": {
+          "delivered": true,
+          "normal_work": "The Body normally finds or creates the crafting context, performs complete recipe batches, and verifies the inventory result.",
+          "tool": "craft_item"
+        },
+        "reads": [],
+        "history": [
+          {
+            "reason": "completed",
+            "result": {
+              "success": true,
+              "reason": "completed",
+              "canRetry": false
+            },
+            "body": {
+              "position": null,
+              "inventory": null
+            }
+          }
+        ],
+        "history_count": 1,
+        "history_earlier": 0
+      },
+      "expected_request": {
+        "state": {
+          "task": "从已有橡木原木制作并装备石镐",
+          "agent_intent": "用现有木材和自然石头制作并装备一把石镐",
+          "inventory": "oak_log 3, oak_planks 6, crafting_table 1, stick 4",
+          "body": "Health is 20 of 20. Hunger is 20 of 20. Air supply is full.",
+          "threats": "No hostile mob is in view.",
+          "finished_call": "craft_item(item=\"stick\", count=4) has ended normally.",
+          "position": "now at [10.6, 71.0, -50.6].",
+          "request_chars": 731
+        },
+        "questions": {
+          "q": {
+            "type": "choice",
+            "instructions": "Choose what the Body does next.",
+            "criteria": {
+              "repeat": "Run the same call again: craft_item(item=\"stick\", count=4).",
+              "next_step": "Do not repeat it and start the next step of the plan: collect_resource(item=\"cobblestone\", count=3).",
+              "call_agent": "Do not repeat it and hand control back to the Agent for a new plan."
+            }
+          }
+        }
+      }
+    },
+    {
+      "seq": 2450,
+      "node_id": "sticks",
+      "provenance": {
+        "kind": "persisted_node",
+        "trace_seq": 2724
+      },
+      "inventory_slot_source_seq": 2452,
+      "plan": {
+        "language": "minebot-work/0.2",
+        "goal": "从当前背包制作并装备石镐",
+        "timeout_s": 300,
+        "work": {
+          "kind": "sequence",
+          "intent": "补齐木棍和圆石并制作装备石镐",
+          "steps": [
+            {
+              "kind": "call",
+              "id": "sticks",
+              "tool": "craft_item",
+              "arguments": {
+                "item": "stick",
+                "count": 4,
+                "intent": "把现有木板制作成至少4根木棍"
+              }
+            },
+            {
+              "kind": "call",
+              "id": "cobble",
+              "tool": "collect_resource",
+              "arguments": {
+                "item": "cobblestone",
+                "count": 3,
+                "intent": "用木镐采集至少3块圆石"
+              }
+            },
+            {
+              "kind": "call",
+              "id": "pick",
+              "tool": "craft_item",
+              "arguments": {
+                "item": "stone_pickaxe",
+                "count": 1,
+                "auto_equip": true,
+                "intent": "制作并装备一把石镐"
+              }
+            }
+          ]
+        }
+      },
+      "node": {
+        "kind": "call",
+        "id": "sticks",
+        "tool": "craft_item",
+        "arguments": {
+          "item": "stick",
+          "count": 4,
+          "intent": "把现有木板制作成至少4根木棍"
+        },
+        "next_call": "collect_resource(item=\"cobblestone\", count=3)"
+      },
+      "intents": [
+        "补齐木棍和圆石并制作装备石镐"
+      ],
+      "raw_decision_facts": {
+        "body_state": {
+          "body_owner": "ReflexStageBot",
+          "bot": "ReflexStageBot",
+          "dimension": "minecraft:overworld",
+          "food": 20,
+          "hazard_unresolved": null,
+          "health": 20.0,
+          "inventory_complete": true,
+          "inventory_counts": {
+            "oak_log": 3,
+            "oak_planks": 1,
+            "stick": 6,
+            "wooden_pickaxe": 1
+          },
+          "inventory_hash": "64eac59fe430b4a9ba650251090941f35ac7f36d5c89fba94ec9d59a3482cd94",
+          "inventory_includes_selected": true,
+          "offhand_item": null,
+          "oxygen": 300,
+          "pending_action_count": 0,
+          "pitch": 47.420883,
+          "pos": [
+            9.442827505363889,
+            71.0,
+            -51.50974155415864
+          ],
+          "selected_item": null,
+          "selected_item_known": true,
+          "selected_slot": 2,
+          "yaw": -176.69571
+        },
+        "execution": {
+          "delivered": true,
+          "normal_work": "The Body normally finds or creates the crafting context, performs complete recipe batches, and verifies the inventory result.",
+          "tool": "craft_item"
+        },
+        "history": [
+          {
+            "reason": "completed",
+            "result": {
+              "success": true,
+              "reason": "completed",
+              "canRetry": false,
+              "complete": true,
+              "summary": {
+                "cleanup_after": {
+                  "canRetry": false,
+                  "metrics": {
+                    "destination_slots": [
+                      0,
+                      1,
+                      2,
+                      3,
+                      4,
+                      5,
+                      6,
+                      7,
+                      8,
+                      9,
+                      10,
+                      11,
+                      12,
+                      13,
+                      14,
+                      15,
+                      16,
+                      17,
+                      18,
+                      19,
+                      20,
+                      21,
+                      22,
+                      23,
+                      24,
+                      25,
+                      26,
+                      27,
+                      28,
+                      29,
+                      30,
+                      31,
+                      32,
+                      33,
+                      34,
+                      35
+                    ],
+                    "executed": [],
+                    "residue_slots": [
+                      41,
+                      42,
+                      43,
+                      44
+                    ]
+                  },
+                  "nextSuggestion": null,
+                  "reason": "already_clean",
+                  "success": true
+                },
+                "cleanup_before": {
+                  "canRetry": false,
+                  "metrics": {
+                    "destination_slots": [
+                      0,
+                      1,
+                      2,
+                      3,
+                      4,
+                      5,
+                      6,
+                      7,
+                      8,
+                      9,
+                      10,
+                      11,
+                      12,
+                      13,
+                      14,
+                      15,
+                      16,
+                      17,
+                      18,
+                      19,
+                      20,
+                      21,
+                      22,
+                      23,
+                      24,
+                      25,
+                      26,
+                      27,
+                      28,
+                      29,
+                      30,
+                      31,
+                      32,
+                      33,
+                      34,
+                      35
+                    ],
+                    "executed": [],
+                    "residue_slots": [
+                      41,
+                      42,
+                      43,
+                      44
+                    ]
+                  },
+                  "nextSuggestion": null,
+                  "reason": "already_clean",
+                  "success": true
+                },
+                "craft_plan": {
+                  "crafted_count": 4,
+                  "inputs": [
+                    {
+                      "count": 2,
+                      "item": "minecraft:oak_planks",
+                      "slot": 1
+                    }
+                  ],
+                  "item": "minecraft:stick",
+                  "output_slot": 3,
+                  "recipe": {
+                    "height": 2,
+                    "ingredient_groups": [
+                      [
+                        "<bounded>",
+                        "<bounded>",
+                        "<bounded>",
+                        "<bounded>",
+                        "<bounded>",
+                        "<bounded>",
+                        "<bounded>",
+                        "<bounded>",
+                        "<bounded>",
+                        "<bounded>",
+                        "<bounded>",
+                        "<bounded>"
+                      ],
+                      [
+                        "<bounded>",
+                        "<bounded>",
+                        "<bounded>",
+                        "<bounded>",
+                        "<bounded>",
+                        "<bounded>",
+                        "<bounded>",
+                        "<bounded>",
+                        "<bounded>",
+                        "<bounded>",
+                        "<bounded>",
+                        "<bounded>"
+                      ]
+                    ],
+                    "kind": "shaped",
+                    "requires_table": false,
+                    "width": 1
+                  },
+                  "remainders": [],
+                  "requested_count": 4,
+                  "variant_index": 0
+                },
+                "crafted_count": 4,
+                "item": "stick",
+                "requested_count": 4
+              }
+            },
+            "body": {
+              "position": null,
+              "inventory": null
+            }
+          }
+        ],
+        "history_count": 1,
+        "history_earlier": 0,
+        "reads": [],
+        "tool_arguments": {
+          "item": "stick",
+          "count": 4,
+          "intent": "把现有木板制作成至少4根木棍"
+        },
+        "tool_result": {
+          "success": true,
+          "reason": "completed",
+          "canRetry": false,
+          "complete": true,
+          "summary": {
+            "cleanup_after": {
+              "canRetry": false,
+              "metrics": {
+                "destination_slots": [
+                  0,
+                  1,
+                  2,
+                  3,
+                  4,
+                  5,
+                  6,
+                  7,
+                  8,
+                  9,
+                  10,
+                  11,
+                  12,
+                  13,
+                  14,
+                  15,
+                  16,
+                  17,
+                  18,
+                  19,
+                  20,
+                  21,
+                  22,
+                  23,
+                  24,
+                  25,
+                  26,
+                  27,
+                  28,
+                  29,
+                  30,
+                  31,
+                  32,
+                  33,
+                  34,
+                  35
+                ],
+                "executed": [],
+                "residue_slots": [
+                  41,
+                  42,
+                  43,
+                  44
+                ]
+              },
+              "nextSuggestion": null,
+              "reason": "already_clean",
+              "success": true
+            },
+            "cleanup_before": {
+              "canRetry": false,
+              "metrics": {
+                "destination_slots": [
+                  0,
+                  1,
+                  2,
+                  3,
+                  4,
+                  5,
+                  6,
+                  7,
+                  8,
+                  9,
+                  10,
+                  11,
+                  12,
+                  13,
+                  14,
+                  15,
+                  16,
+                  17,
+                  18,
+                  19,
+                  20,
+                  21,
+                  22,
+                  23,
+                  24,
+                  25,
+                  26,
+                  27,
+                  28,
+                  29,
+                  30,
+                  31,
+                  32,
+                  33,
+                  34,
+                  35
+                ],
+                "executed": [],
+                "residue_slots": [
+                  41,
+                  42,
+                  43,
+                  44
+                ]
+              },
+              "nextSuggestion": null,
+              "reason": "already_clean",
+              "success": true
+            },
+            "craft_plan": {
+              "crafted_count": 4,
+              "inputs": [
+                {
+                  "count": 2,
+                  "item": "minecraft:oak_planks",
+                  "slot": 1
+                }
+              ],
+              "item": "minecraft:stick",
+              "output_slot": 3,
+              "recipe": {
+                "height": 2,
+                "ingredient_groups": [
+                  [
+                    "<bounded>",
+                    "<bounded>",
+                    "<bounded>",
+                    "<bounded>",
+                    "<bounded>",
+                    "<bounded>",
+                    "<bounded>",
+                    "<bounded>",
+                    "<bounded>",
+                    "<bounded>",
+                    "<bounded>",
+                    "<bounded>"
+                  ],
+                  [
+                    "<bounded>",
+                    "<bounded>",
+                    "<bounded>",
+                    "<bounded>",
+                    "<bounded>",
+                    "<bounded>",
+                    "<bounded>",
+                    "<bounded>",
+                    "<bounded>",
+                    "<bounded>",
+                    "<bounded>",
+                    "<bounded>"
+                  ]
+                ],
+                "kind": "shaped",
+                "requires_table": false,
+                "width": 1
+              },
+              "remainders": [],
+              "requested_count": 4,
+              "variant_index": 0
+            },
+            "crafted_count": 4,
+            "item": "stick",
+            "requested_count": 4
+          }
+        }
+      },
+      "expected_request": {
+        "state": {
+          "task": "从当前背包制作并装备石镐",
+          "agent_intent": "补齐木棍和圆石并制作装备石镐",
+          "inventory": "oak_log 3, oak_planks 1, stick 6, wooden_pickaxe 1",
+          "body": "Health is 20 of 20. Hunger is 20 of 20. Air supply is full.",
+          "threats": "No hostile mob is in view.",
+          "finished_call": "craft_item(item=\"stick\", count=4) has ended normally.",
+          "position": "now at [9.4, 71.0, -51.5].",
+          "request_chars": 723
+        },
+        "questions": {
+          "q": {
+            "type": "choice",
+            "instructions": "Choose what the Body does next.",
+            "criteria": {
+              "repeat": "Run the same call again: craft_item(item=\"stick\", count=4).",
+              "next_step": "Do not repeat it and start the next step of the plan: collect_resource(item=\"cobblestone\", count=3).",
+              "call_agent": "Do not repeat it and hand control back to the Agent for a new plan."
+            }
+          }
+        }
+      }
+    },
+    {
+      "seq": 2562,
+      "node_id": "cobble",
+      "provenance": {
+        "kind": "persisted_node",
+        "trace_seq": 2724
+      },
+      "inventory_slot_source_seq": 2642,
+      "plan": {
+        "language": "minebot-work/0.2",
+        "goal": "从当前背包制作并装备石镐",
+        "timeout_s": 300,
+        "work": {
+          "kind": "sequence",
+          "intent": "补齐木棍和圆石并制作装备石镐",
+          "steps": [
+            {
+              "kind": "call",
+              "id": "sticks",
+              "tool": "craft_item",
+              "arguments": {
+                "item": "stick",
+                "count": 4,
+                "intent": "把现有木板制作成至少4根木棍"
+              }
+            },
+            {
+              "kind": "call",
+              "id": "cobble",
+              "tool": "collect_resource",
+              "arguments": {
+                "item": "cobblestone",
+                "count": 3,
+                "intent": "用木镐采集至少3块圆石"
+              }
+            },
+            {
+              "kind": "call",
+              "id": "pick",
+              "tool": "craft_item",
+              "arguments": {
+                "item": "stone_pickaxe",
+                "count": 1,
+                "auto_equip": true,
+                "intent": "制作并装备一把石镐"
+              }
+            }
+          ]
+        }
+      },
+      "node": {
+        "kind": "call",
+        "id": "cobble",
+        "tool": "collect_resource",
+        "arguments": {
+          "item": "cobblestone",
+          "count": 3,
+          "intent": "用木镐采集至少3块圆石"
+        },
+        "next_call": "craft_item(item=\"stone_pickaxe\", count=1, auto_equip=true)"
+      },
+      "intents": [
+        "补齐木棍和圆石并制作装备石镐"
+      ],
+      "raw_decision_facts": {
+        "body_state": {
+          "body_owner": "ReflexStageBot",
+          "bot": "ReflexStageBot",
+          "dimension": "minecraft:overworld",
+          "food": 20,
+          "hazard_unresolved": null,
+          "health": 20.0,
+          "inventory_complete": true,
+          "inventory_counts": {
+            "oak_log": 3,
+            "oak_planks": 1,
+            "leaf_litter": 3,
+            "stick": 6,
+            "wooden_pickaxe": 1,
+            "dirt": 4,
+            "cobblestone": 3
+          },
+          "inventory_hash": "3802536cee98972ac874f976657374c21c312bf9aaa680cc3714a9cbe1035e23",
+          "inventory_includes_selected": true,
+          "offhand_item": null,
+          "oxygen": 300,
+          "pending_action_count": 0,
+          "pitch": 8.549953,
+          "pos": [
+            12.699999988079071,
+            64.0,
+            -59.52073924108017
+          ],
+          "selected_item": "wooden_pickaxe",
+          "selected_item_known": true,
+          "selected_slot": 4,
+          "yaw": -88.495674
+        },
+        "execution": {
+          "delivered": true,
+          "normal_work": "The Body normally carries out the declared physical action through its native process, reports real progress and phase changes, and returns one authoritative terminal result.",
+          "tool": "collect_block_domain"
+        },
+        "history": [
+          {
+            "reason": "collected",
+            "result": {
+              "success": true,
+              "reason": "collected",
+              "canRetry": false,
+              "complete": true,
+              "summary": {
+                "after_count": 3,
+                "attempt_count": 1,
+                "before_count": 0,
+                "block_types": [
+                  "stone",
+                  "cobblestone"
+                ],
+                "body_process": {
+                  "canRetry": false,
+                  "metrics": {
+                    "attempts": [
+                      {
+                        "action": "<bounded>",
+                        "mine": "<bounded>",
+                        "target": "<bounded>",
+                        "targets": "<bounded>"
+                      }
+                    ],
+                    "collected": 3,
+                    "collection_strategy": "native_resource_collection",
+                    "remaining_count": 0,
+                    "requested_count": 3
+                  },
+                  "nextSuggestion": null,
+                  "reason": "resource_collected",
+                  "success": true
+                },
+                "budget": {
+                  "max_candidates": 96,
+                  "max_mutating_calls": 96,
+                  "max_wall_s": 900.0
+                },
+                "candidates_tried": 1,
+                "collected_delta": 3,
+                "complete": true,
+                "expected_drops": [
+                  "cobblestone"
+                ],
+                "item": "cobblestone",
+                "remaining_count": 0,
+                "requested_item": "cobblestone",
+                "resume_hint": "complete",
+                "skipped": [],
+                "skipped_count": 0,
+                "skipped_reasons": [],
+                "target_count": 3
+              }
+            },
+            "body": {
+              "position": null,
+              "inventory": null
+            }
+          }
+        ],
+        "history_count": 1,
+        "history_earlier": 0,
+        "reads": [],
+        "tool_arguments": {
+          "item": "cobblestone",
+          "count": 3,
+          "intent": "用木镐采集至少3块圆石"
+        },
+        "tool_result": {
+          "success": true,
+          "reason": "collected",
+          "canRetry": false,
+          "complete": true,
+          "summary": {
+            "after_count": 3,
+            "attempt_count": 1,
+            "before_count": 0,
+            "block_types": [
+              "stone",
+              "cobblestone"
+            ],
+            "body_process": {
+              "canRetry": false,
+              "metrics": {
+                "attempts": [
+                  {
+                    "action": "<bounded>",
+                    "mine": "<bounded>",
+                    "target": "<bounded>",
+                    "targets": "<bounded>"
+                  }
+                ],
+                "collected": 3,
+                "collection_strategy": "native_resource_collection",
+                "remaining_count": 0,
+                "requested_count": 3
+              },
+              "nextSuggestion": null,
+              "reason": "resource_collected",
+              "success": true
+            },
+            "budget": {
+              "max_candidates": 96,
+              "max_mutating_calls": 96,
+              "max_wall_s": 900.0
+            },
+            "candidates_tried": 1,
+            "collected_delta": 3,
+            "complete": true,
+            "expected_drops": [
+              "cobblestone"
+            ],
+            "item": "cobblestone",
+            "remaining_count": 0,
+            "requested_item": "cobblestone",
+            "resume_hint": "complete",
+            "skipped": [],
+            "skipped_count": 0,
+            "skipped_reasons": [],
+            "target_count": 3
+          }
+        }
+      },
+      "expected_request": {
+        "state": {
+          "task": "从当前背包制作并装备石镐",
+          "agent_intent": "补齐木棍和圆石并制作装备石镐",
+          "inventory": "oak_log 3, oak_planks 1, leaf_litter 3, stick 6, wooden_pickaxe 1, dirt 4, cobblestone 3",
+          "body": "Health is 20 of 20. Hunger is 20 of 20. Air supply is full.",
+          "threats": "No hostile mob is in view.",
+          "finished_call": "collect_resource(item=\"cobblestone\", count=3) has ended normally.",
+          "position": "now at [12.7, 64.0, -59.5].",
+          "request_chars": 799
+        },
+        "questions": {
+          "q": {
+            "type": "choice",
+            "instructions": "Choose what the Body does next.",
+            "criteria": {
+              "repeat": "Run the same call again: collect_resource(item=\"cobblestone\", count=3).",
+              "next_step": "Do not repeat it and start the next step of the plan: craft_item(item=\"stone_pickaxe\", count=1, auto_equip=true).",
+              "call_agent": "Do not repeat it and hand control back to the Agent for a new plan."
+            }
+          }
+        }
+      }
+    },
+    {
+      "seq": 2712,
+      "node_id": "pick",
+      "provenance": {
+        "kind": "persisted_node",
+        "trace_seq": 2724
+      },
+      "inventory_slot_source_seq": 2716,
+      "plan": {
+        "language": "minebot-work/0.2",
+        "goal": "从当前背包制作并装备石镐",
+        "timeout_s": 300,
+        "work": {
+          "kind": "sequence",
+          "intent": "补齐木棍和圆石并制作装备石镐",
+          "steps": [
+            {
+              "kind": "call",
+              "id": "sticks",
+              "tool": "craft_item",
+              "arguments": {
+                "item": "stick",
+                "count": 4,
+                "intent": "把现有木板制作成至少4根木棍"
+              }
+            },
+            {
+              "kind": "call",
+              "id": "cobble",
+              "tool": "collect_resource",
+              "arguments": {
+                "item": "cobblestone",
+                "count": 3,
+                "intent": "用木镐采集至少3块圆石"
+              }
+            },
+            {
+              "kind": "call",
+              "id": "pick",
+              "tool": "craft_item",
+              "arguments": {
+                "item": "stone_pickaxe",
+                "count": 1,
+                "auto_equip": true,
+                "intent": "制作并装备一把石镐"
+              }
+            }
+          ]
+        }
+      },
+      "node": {
+        "kind": "call",
+        "id": "pick",
+        "tool": "craft_item",
+        "arguments": {
+          "item": "stone_pickaxe",
+          "count": 1,
+          "auto_equip": true,
+          "intent": "制作并装备一把石镐"
+        }
+      },
+      "intents": [
+        "补齐木棍和圆石并制作装备石镐"
+      ],
+      "raw_decision_facts": {
+        "body_state": {
+          "body_owner": "ReflexStageBot",
+          "bot": "ReflexStageBot",
+          "dimension": "minecraft:overworld",
+          "food": 20,
+          "hazard_unresolved": null,
+          "health": 20.0,
+          "inventory_complete": true,
+          "inventory_counts": {
+            "oak_log": 3,
+            "oak_planks": 1,
+            "leaf_litter": 3,
+            "stick": 6,
+            "wooden_pickaxe": 1,
+            "dirt": 1,
+            "cobblestone": 2
+          },
+          "inventory_hash": "73c62ccfb9d462d2541eebf29dfe62659d2d5b53d6e9d315c2f92cc521cdf9d1",
+          "inventory_includes_selected": true,
+          "offhand_item": null,
+          "oxygen": 300,
+          "pending_action_count": 0,
+          "pitch": 40.412136,
+          "pos": [
+            10.748470289142444,
+            71.0,
+            -52.71948634322439
+          ],
+          "selected_item": "oak_log",
+          "selected_item_known": true,
+          "selected_slot": 0,
+          "yaw": 80.02905
+        },
+        "execution": {},
+        "history": [
+          {
+            "reason": "craft_recipe_failed:craft_input_mismatch",
+            "result": {
+              "success": false,
+              "reason": "craft_recipe_failed:craft_input_mismatch",
+              "canRetry": true,
+              "complete": true,
+              "summary": {
+                "cleanup_after": {
+                  "canRetry": false,
+                  "metrics": {
+                    "destination_slots": [
+                      0,
+                      1,
+                      2,
+                      3,
+                      4,
+                      5,
+                      6,
+                      7,
+                      8,
+                      9,
+                      10,
+                      11,
+                      12,
+                      13,
+                      14,
+                      15,
+                      16,
+                      17,
+                      18,
+                      19,
+                      20,
+                      21,
+                      22,
+                      23,
+                      24,
+                      25,
+                      26,
+                      27,
+                      28,
+                      29,
+                      30,
+                      31,
+                      32,
+                      33,
+                      34,
+                      35
+                    ],
+                    "executed": [],
+                    "residue_slots": [
+                      41,
+                      42,
+                      43,
+                      44
+                    ]
+                  },
+                  "nextSuggestion": null,
+                  "reason": "already_clean",
+                  "success": true
+                },
+                "cleanup_before": {
+                  "canRetry": false,
+                  "metrics": {
+                    "destination_slots": [
+                      0,
+                      1,
+                      2,
+                      3,
+                      4,
+                      5,
+                      6,
+                      7,
+                      8,
+                      9,
+                      10,
+                      11,
+                      12,
+                      13,
+                      14,
+                      15,
+                      16,
+                      17,
+                      18,
+                      19,
+                      20,
+                      21,
+                      22,
+                      23,
+                      24,
+                      25,
+                      26,
+                      27,
+                      28,
+                      29,
+                      30,
+                      31,
+                      32,
+                      33,
+                      34,
+                      35
+                    ],
+                    "executed": [],
+                    "residue_slots": [
+                      41,
+                      42,
+                      43,
+                      44
+                    ]
+                  },
+                  "nextSuggestion": null,
+                  "reason": "already_clean",
+                  "success": true
+                },
+                "craft_plan": {
+                  "crafted_count": 1,
+                  "inputs": [
+                    {
+                      "count": 2,
+                      "item": "minecraft:stick",
+                      "slot": 3
+                    },
+                    {
+                      "count": 3,
+                      "item": "minecraft:cobblestone",
+                      "slot": 6
+                    }
+                  ],
+                  "item": "minecraft:stone_pickaxe",
+                  "output_slot": 7,
+                  "recipe": {
+                    "height": 3,
+                    "ingredient_groups": [
+                      [
+                        "<bounded>",
+                        "<bounded>",
+                        "<bounded>"
+                      ],
+                      [
+                        "<bounded>",
+                        "<bounded>",
+                        "<bounded>"
+                      ],
+                      [
+                        "<bounded>",
+                        "<bounded>",
+                        "<bounded>"
+                      ],
+                      [],
+                      [
+                        "<bounded>"
+                      ],
+                      [],
+                      [],
+                      [
+                        "<bounded>"
+                      ],
+                      []
+                    ],
+                    "kind": "shaped",
+                    "requires_table": true,
+                    "width": 3
+                  },
+                  "remainders": [],
+                  "requested_count": 1,
+                  "variant_index": 0
+                },
+                "crafted_count": 0,
+                "item": "stone_pickaxe",
+                "requested_count": 1
+              }
+            },
+            "body": {
+              "position": null,
+              "inventory": null
+            }
+          }
+        ],
+        "history_count": 1,
+        "history_earlier": 0,
+        "reads": [],
+        "tool_arguments": {
+          "item": "stone_pickaxe",
+          "count": 1,
+          "auto_equip": true,
+          "intent": "制作并装备一把石镐"
+        },
+        "tool_result": {
+          "success": false,
+          "reason": "craft_recipe_failed:craft_input_mismatch",
+          "canRetry": true,
+          "complete": true,
+          "summary": {
+            "cleanup_after": {
+              "canRetry": false,
+              "metrics": {
+                "destination_slots": [
+                  0,
+                  1,
+                  2,
+                  3,
+                  4,
+                  5,
+                  6,
+                  7,
+                  8,
+                  9,
+                  10,
+                  11,
+                  12,
+                  13,
+                  14,
+                  15,
+                  16,
+                  17,
+                  18,
+                  19,
+                  20,
+                  21,
+                  22,
+                  23,
+                  24,
+                  25,
+                  26,
+                  27,
+                  28,
+                  29,
+                  30,
+                  31,
+                  32,
+                  33,
+                  34,
+                  35
+                ],
+                "executed": [],
+                "residue_slots": [
+                  41,
+                  42,
+                  43,
+                  44
+                ]
+              },
+              "nextSuggestion": null,
+              "reason": "already_clean",
+              "success": true
+            },
+            "cleanup_before": {
+              "canRetry": false,
+              "metrics": {
+                "destination_slots": [
+                  0,
+                  1,
+                  2,
+                  3,
+                  4,
+                  5,
+                  6,
+                  7,
+                  8,
+                  9,
+                  10,
+                  11,
+                  12,
+                  13,
+                  14,
+                  15,
+                  16,
+                  17,
+                  18,
+                  19,
+                  20,
+                  21,
+                  22,
+                  23,
+                  24,
+                  25,
+                  26,
+                  27,
+                  28,
+                  29,
+                  30,
+                  31,
+                  32,
+                  33,
+                  34,
+                  35
+                ],
+                "executed": [],
+                "residue_slots": [
+                  41,
+                  42,
+                  43,
+                  44
+                ]
+              },
+              "nextSuggestion": null,
+              "reason": "already_clean",
+              "success": true
+            },
+            "craft_plan": {
+              "crafted_count": 1,
+              "inputs": [
+                {
+                  "count": 2,
+                  "item": "minecraft:stick",
+                  "slot": 3
+                },
+                {
+                  "count": 3,
+                  "item": "minecraft:cobblestone",
+                  "slot": 6
+                }
+              ],
+              "item": "minecraft:stone_pickaxe",
+              "output_slot": 7,
+              "recipe": {
+                "height": 3,
+                "ingredient_groups": [
+                  [
+                    "<bounded>",
+                    "<bounded>",
+                    "<bounded>"
+                  ],
+                  [
+                    "<bounded>",
+                    "<bounded>",
+                    "<bounded>"
+                  ],
+                  [
+                    "<bounded>",
+                    "<bounded>",
+                    "<bounded>"
+                  ],
+                  [],
+                  [
+                    "<bounded>"
+                  ],
+                  [],
+                  [],
+                  [
+                    "<bounded>"
+                  ],
+                  []
+                ],
+                "kind": "shaped",
+                "requires_table": true,
+                "width": 3
+              },
+              "remainders": [],
+              "requested_count": 1,
+              "variant_index": 0
+            },
+            "crafted_count": 0,
+            "item": "stone_pickaxe",
+            "requested_count": 1
+          }
+        }
+      },
+      "expected_request": {
+        "state": {
+          "task": "从当前背包制作并装备石镐",
+          "agent_intent": "补齐木棍和圆石并制作装备石镐",
+          "inventory": "oak_log 3, oak_planks 1, leaf_litter 3, stick 6, wooden_pickaxe 1, dirt 1, cobblestone 2",
+          "body": "Health is 20 of 20. Hunger is 20 of 20. Air supply is full.",
+          "threats": "No hostile mob is in view.",
+          "finished_call": "craft_item(item=\"stone_pickaxe\", count=1, auto_equip=true) has ended. It reported failure: craft_recipe_failed:craft_input_mismatch.",
+          "position": "now at [10.7, 71.0, -52.7].",
+          "request_chars": 749
+        },
+        "questions": {
+          "q": {
+            "type": "choice",
+            "instructions": "Choose what the Body does next.",
+            "criteria": {
+              "repeat": "Run the same call again: craft_item(item=\"stone_pickaxe\", count=1, auto_equip=true).",
+              "call_agent": "Do not repeat it and hand control back to the Agent for a new plan."
+            }
+          }
+        }
+      }
+    },
+    {
+      "seq": 2720,
+      "node_id": "pick__repeat_1",
+      "provenance": {
+        "kind": "temporal_observation_and_state",
+        "observation_id": "observation-f2d9c1f8f39f43678c8db8ed3daddbdb",
+        "observation_ts": 1791804893.81,
+        "body_state_seq": 2718
+      },
+      "inventory_slot_source_seq": 2716,
+      "plan": {
+        "language": "minebot-work/0.2",
+        "goal": "从当前背包制作并装备石镐",
+        "timeout_s": 300,
+        "work": {
+          "kind": "sequence",
+          "intent": "补齐木棍和圆石并制作装备石镐",
+          "steps": [
+            {
+              "kind": "call",
+              "id": "sticks",
+              "tool": "craft_item",
+              "arguments": {
+                "item": "stick",
+                "count": 4,
+                "intent": "把现有木板制作成至少4根木棍"
+              }
+            },
+            {
+              "kind": "call",
+              "id": "cobble",
+              "tool": "collect_resource",
+              "arguments": {
+                "item": "cobblestone",
+                "count": 3,
+                "intent": "用木镐采集至少3块圆石"
+              }
+            },
+            {
+              "kind": "call",
+              "id": "pick",
+              "tool": "craft_item",
+              "arguments": {
+                "item": "stone_pickaxe",
+                "count": 1,
+                "auto_equip": true,
+                "intent": "制作并装备一把石镐"
+              }
+            }
+          ]
+        }
+      },
+      "node": {
+        "kind": "call",
+        "id": "pick",
+        "tool": "craft_item",
+        "arguments": {
+          "item": "stone_pickaxe",
+          "count": 1,
+          "auto_equip": true,
+          "intent": "制作并装备一把石镐"
+        }
+      },
+      "intents": [
+        "补齐木棍和圆石并制作装备石镐"
+      ],
+      "raw_decision_facts": {
+        "tool_result": {
+          "success": false,
+          "reason": "craft_plan_not_available",
+          "canRetry": true
+        },
+        "tool_arguments": {
+          "item": "stone_pickaxe",
+          "count": 1,
+          "auto_equip": true,
+          "intent": "制作并装备一把石镐"
+        },
+        "body_state": {
+          "body_owner": "ReflexStageBot",
+          "bot": "ReflexStageBot",
+          "complete": true,
+          "dimension": "minecraft:overworld",
+          "food": 20,
+          "hazard_unresolved": null,
+          "health": 20.0,
+          "inventory_counts": {
+            "oak_log": 3,
+            "oak_planks": 1,
+            "leaf_litter": 3,
+            "stick": 6,
+            "wooden_pickaxe": 1,
+            "dirt": 1,
+            "cobblestone": 2
+          },
+          "inventory_hash": "73c62ccfb9d462d2541eebf29dfe62659d2d5b53d6e9d315c2f92cc521cdf9d1",
+          "offhand_item": null,
+          "oxygen": 300,
+          "pending_action_count": 0,
+          "pitch": 40.412136,
+          "pos": [
+            10.748470289142444,
+            71.0,
+            -52.71948634322439
+          ],
+          "selected_item": "oak_log",
+          "selected_slot": 0,
+          "yaw": 80.02905
+        },
+        "execution": {},
+        "reads": [],
+        "history": [
+          {
+            "reason": "craft_recipe_failed:craft_input_mismatch",
+            "result": {
+              "success": false,
+              "reason": "craft_recipe_failed:craft_input_mismatch",
+              "canRetry": true,
+              "complete": true,
+              "summary": {
+                "cleanup_after": {
+                  "canRetry": false,
+                  "metrics": {
+                    "destination_slots": [
+                      0,
+                      1,
+                      2,
+                      3,
+                      4,
+                      5,
+                      6,
+                      7,
+                      8,
+                      9,
+                      10,
+                      11,
+                      12,
+                      13,
+                      14,
+                      15,
+                      16,
+                      17,
+                      18,
+                      19,
+                      20,
+                      21,
+                      22,
+                      23,
+                      24,
+                      25,
+                      26,
+                      27,
+                      28,
+                      29,
+                      30,
+                      31,
+                      32,
+                      33,
+                      34,
+                      35
+                    ],
+                    "executed": [],
+                    "residue_slots": [
+                      41,
+                      42,
+                      43,
+                      44
+                    ]
+                  },
+                  "nextSuggestion": null,
+                  "reason": "already_clean",
+                  "success": true
+                },
+                "cleanup_before": {
+                  "canRetry": false,
+                  "metrics": {
+                    "destination_slots": [
+                      0,
+                      1,
+                      2,
+                      3,
+                      4,
+                      5,
+                      6,
+                      7,
+                      8,
+                      9,
+                      10,
+                      11,
+                      12,
+                      13,
+                      14,
+                      15,
+                      16,
+                      17,
+                      18,
+                      19,
+                      20,
+                      21,
+                      22,
+                      23,
+                      24,
+                      25,
+                      26,
+                      27,
+                      28,
+                      29,
+                      30,
+                      31,
+                      32,
+                      33,
+                      34,
+                      35
+                    ],
+                    "executed": [],
+                    "residue_slots": [
+                      41,
+                      42,
+                      43,
+                      44
+                    ]
+                  },
+                  "nextSuggestion": null,
+                  "reason": "already_clean",
+                  "success": true
+                },
+                "craft_plan": {
+                  "crafted_count": 1,
+                  "inputs": [
+                    {
+                      "count": 2,
+                      "item": "minecraft:stick",
+                      "slot": 3
+                    },
+                    {
+                      "count": 3,
+                      "item": "minecraft:cobblestone",
+                      "slot": 6
+                    }
+                  ],
+                  "item": "minecraft:stone_pickaxe",
+                  "output_slot": 7,
+                  "recipe": {
+                    "height": 3,
+                    "ingredient_groups": [
+                      [
+                        "<bounded>",
+                        "<bounded>",
+                        "<bounded>"
+                      ],
+                      [
+                        "<bounded>",
+                        "<bounded>",
+                        "<bounded>"
+                      ],
+                      [
+                        "<bounded>",
+                        "<bounded>",
+                        "<bounded>"
+                      ],
+                      [],
+                      [
+                        "<bounded>"
+                      ],
+                      [],
+                      [],
+                      [
+                        "<bounded>"
+                      ],
+                      []
+                    ],
+                    "kind": "shaped",
+                    "requires_table": true,
+                    "width": 3
+                  },
+                  "remainders": [],
+                  "requested_count": 1,
+                  "variant_index": 0
+                },
+                "crafted_count": 0,
+                "item": "stone_pickaxe",
+                "requested_count": 1
+              }
+            },
+            "body": {
+              "position": null,
+              "inventory": null
+            }
+          },
+          {
+            "reason": "craft_plan_not_available",
+            "result": {
+              "success": false,
+              "reason": "craft_plan_not_available",
+              "canRetry": true
+            },
+            "body": {
+              "position": null,
+              "inventory": null
+            }
+          }
+        ],
+        "history_count": 2,
+        "history_earlier": 0
+      },
+      "expected_request": {
+        "state": {
+          "task": "从当前背包制作并装备石镐",
+          "agent_intent": "补齐木棍和圆石并制作装备石镐",
+          "inventory": "oak_log 3, oak_planks 1, leaf_litter 3, stick 6, wooden_pickaxe 1, dirt 1, cobblestone 2",
+          "body": "Health is 20 of 20. Hunger is 20 of 20. Air supply is full.",
+          "threats": "No hostile mob is in view.",
+          "finished_call": "craft_item(item=\"stone_pickaxe\", count=1, auto_equip=true) has ended. It reported failure: craft_plan_not_available.",
+          "earlier_attempts_of_this_call": [
+            "Attempt 1: failure: craft_recipe_failed:craft_input_mismatch; inventory and position unchanged."
+          ],
+          "position": "now at [10.7, 71.0, -52.7].",
+          "request_chars": 865
+        },
+        "questions": {
+          "q": {
+            "type": "choice",
+            "instructions": "Choose what the Body does next.",
+            "criteria": {
+              "repeat": "Run the same call again: craft_item(item=\"stone_pickaxe\", count=1, auto_equip=true).",
+              "call_agent": "Do not repeat it and hand control back to the Agent for a new plan."
+            }
+          }
+        }
+      }
+    },
+    {
+      "seq": 3009,
+      "node_id": "planks",
+      "provenance": {
+        "kind": "persisted_node",
+        "trace_seq": 3252
+      },
+      "inventory_slot_source_seq": 3013,
+      "plan": {
+        "language": "minebot-work/0.2",
+        "goal": "制作并装备石镐",
+        "timeout_s": 300,
+        "work": {
+          "kind": "sequence",
+          "intent": "制作工作台并补足材料后装备石镐",
+          "steps": [
+            {
+              "kind": "call",
+              "id": "planks",
+              "tool": "craft_item",
+              "arguments": {
+                "item": "oak_planks",
+                "count": 12,
+                "intent": "把现有橡木原木加工成木板"
+              }
+            },
+            {
+              "kind": "call",
+              "id": "table",
+              "tool": "craft_item",
+              "arguments": {
+                "item": "crafting_table",
+                "count": 1,
+                "intent": "制作一张工作台"
+              }
+            },
+            {
+              "kind": "call",
+              "id": "cobble",
+              "tool": "collect_resource",
+              "arguments": {
+                "item": "cobblestone",
+                "count": 3,
+                "intent": "补足至至少3块圆石"
+              }
+            },
+            {
+              "kind": "call",
+              "id": "pick",
+              "tool": "craft_item",
+              "arguments": {
+                "item": "stone_pickaxe",
+                "count": 1,
+                "auto_equip": true,
+                "intent": "制作并装备一把石镐"
+              }
+            }
+          ]
+        }
+      },
+      "node": {
+        "kind": "call",
+        "id": "planks",
+        "tool": "craft_item",
+        "arguments": {
+          "item": "oak_planks",
+          "count": 12,
+          "intent": "把现有橡木原木加工成木板"
+        },
+        "next_call": "craft_item(item=\"crafting_table\", count=1)"
+      },
+      "intents": [
+        "制作工作台并补足材料后装备石镐"
+      ],
+      "raw_decision_facts": {
+        "body_state": {
+          "body_owner": "ReflexStageBot",
+          "bot": "ReflexStageBot",
+          "dimension": "minecraft:overworld",
+          "food": 20,
+          "hazard_unresolved": null,
+          "health": 20.0,
+          "inventory_complete": true,
+          "inventory_counts": {
+            "oak_planks": 13,
+            "leaf_litter": 3,
+            "stick": 6,
+            "wooden_pickaxe": 1,
+            "dirt": 1,
+            "cobblestone": 2
+          },
+          "inventory_hash": "3fbae19541bc1f35e0eeaaf7a0d8326555af9f572aca80d196c9708fbd68836e",
+          "inventory_includes_selected": true,
+          "offhand_item": null,
+          "oxygen": 300,
+          "pending_action_count": 0,
+          "pitch": 40.412136,
+          "pos": [
+            10.748470289142444,
+            71.0,
+            -52.71948634322439
+          ],
+          "selected_item": null,
+          "selected_item_known": true,
+          "selected_slot": 0,
+          "yaw": 80.02905
+        },
+        "execution": {
+          "delivered": true,
+          "normal_work": "The Body normally finds or creates the crafting context, performs complete recipe batches, and verifies the inventory result.",
+          "tool": "craft_item"
+        },
+        "history": [
+          {
+            "reason": "completed",
+            "result": {
+              "success": true,
+              "reason": "completed",
+              "canRetry": false,
+              "complete": true,
+              "summary": {
+                "cleanup_after": {
+                  "canRetry": false,
+                  "metrics": {
+                    "destination_slots": [
+                      0,
+                      1,
+                      2,
+                      3,
+                      4,
+                      5,
+                      6,
+                      7,
+                      8,
+                      9,
+                      10,
+                      11,
+                      12,
+                      13,
+                      14,
+                      15,
+                      16,
+                      17,
+                      18,
+                      19,
+                      20,
+                      21,
+                      22,
+                      23,
+                      24,
+                      25,
+                      26,
+                      27,
+                      28,
+                      29,
+                      30,
+                      31,
+                      32,
+                      33,
+                      34,
+                      35
+                    ],
+                    "executed": [],
+                    "residue_slots": [
+                      41,
+                      42,
+                      43,
+                      44
+                    ]
+                  },
+                  "nextSuggestion": null,
+                  "reason": "already_clean",
+                  "success": true
+                },
+                "cleanup_before": {
+                  "canRetry": false,
+                  "metrics": {
+                    "destination_slots": [
+                      0,
+                      1,
+                      2,
+                      3,
+                      4,
+                      5,
+                      6,
+                      7,
+                      8,
+                      9,
+                      10,
+                      11,
+                      12,
+                      13,
+                      14,
+                      15,
+                      16,
+                      17,
+                      18,
+                      19,
+                      20,
+                      21,
+                      22,
+                      23,
+                      24,
+                      25,
+                      26,
+                      27,
+                      28,
+                      29,
+                      30,
+                      31,
+                      32,
+                      33,
+                      34,
+                      35
+                    ],
+                    "executed": [],
+                    "residue_slots": [
+                      41,
+                      42,
+                      43,
+                      44
+                    ]
+                  },
+                  "nextSuggestion": null,
+                  "reason": "already_clean",
+                  "success": true
+                },
+                "craft_plan": {
+                  "crafted_count": 12,
+                  "inputs": [
+                    {
+                      "count": 3,
+                      "item": "minecraft:oak_log",
+                      "slot": 0
+                    }
+                  ],
+                  "item": "minecraft:oak_planks",
+                  "output_slot": 1,
+                  "recipe": {
+                    "height": 0,
+                    "ingredient_groups": [
+                      [
+                        "<bounded>",
+                        "<bounded>",
+                        "<bounded>",
+                        "<bounded>"
+                      ]
+                    ],
+                    "kind": "shapeless",
+                    "requires_table": false,
+                    "width": 0
+                  },
+                  "remainders": [],
+                  "requested_count": 12,
+                  "variant_index": 0
+                },
+                "crafted_count": 12,
+                "item": "oak_planks",
+                "requested_count": 12
+              }
+            },
+            "body": {
+              "position": null,
+              "inventory": null
+            }
+          }
+        ],
+        "history_count": 1,
+        "history_earlier": 0,
+        "reads": [],
+        "tool_arguments": {
+          "item": "oak_planks",
+          "count": 12,
+          "intent": "把现有橡木原木加工成木板"
+        },
+        "tool_result": {
+          "success": true,
+          "reason": "completed",
+          "canRetry": false,
+          "complete": true,
+          "summary": {
+            "cleanup_after": {
+              "canRetry": false,
+              "metrics": {
+                "destination_slots": [
+                  0,
+                  1,
+                  2,
+                  3,
+                  4,
+                  5,
+                  6,
+                  7,
+                  8,
+                  9,
+                  10,
+                  11,
+                  12,
+                  13,
+                  14,
+                  15,
+                  16,
+                  17,
+                  18,
+                  19,
+                  20,
+                  21,
+                  22,
+                  23,
+                  24,
+                  25,
+                  26,
+                  27,
+                  28,
+                  29,
+                  30,
+                  31,
+                  32,
+                  33,
+                  34,
+                  35
+                ],
+                "executed": [],
+                "residue_slots": [
+                  41,
+                  42,
+                  43,
+                  44
+                ]
+              },
+              "nextSuggestion": null,
+              "reason": "already_clean",
+              "success": true
+            },
+            "cleanup_before": {
+              "canRetry": false,
+              "metrics": {
+                "destination_slots": [
+                  0,
+                  1,
+                  2,
+                  3,
+                  4,
+                  5,
+                  6,
+                  7,
+                  8,
+                  9,
+                  10,
+                  11,
+                  12,
+                  13,
+                  14,
+                  15,
+                  16,
+                  17,
+                  18,
+                  19,
+                  20,
+                  21,
+                  22,
+                  23,
+                  24,
+                  25,
+                  26,
+                  27,
+                  28,
+                  29,
+                  30,
+                  31,
+                  32,
+                  33,
+                  34,
+                  35
+                ],
+                "executed": [],
+                "residue_slots": [
+                  41,
+                  42,
+                  43,
+                  44
+                ]
+              },
+              "nextSuggestion": null,
+              "reason": "already_clean",
+              "success": true
+            },
+            "craft_plan": {
+              "crafted_count": 12,
+              "inputs": [
+                {
+                  "count": 3,
+                  "item": "minecraft:oak_log",
+                  "slot": 0
+                }
+              ],
+              "item": "minecraft:oak_planks",
+              "output_slot": 1,
+              "recipe": {
+                "height": 0,
+                "ingredient_groups": [
+                  [
+                    "<bounded>",
+                    "<bounded>",
+                    "<bounded>",
+                    "<bounded>"
+                  ]
+                ],
+                "kind": "shapeless",
+                "requires_table": false,
+                "width": 0
+              },
+              "remainders": [],
+              "requested_count": 12,
+              "variant_index": 0
+            },
+            "crafted_count": 12,
+            "item": "oak_planks",
+            "requested_count": 12
+          }
+        }
+      },
+      "expected_request": {
+        "state": {
+          "task": "制作并装备石镐",
+          "agent_intent": "制作工作台并补足材料后装备石镐",
+          "inventory": "oak_planks 13, leaf_litter 3, stick 6, wooden_pickaxe 1, dirt 1, cobblestone 2",
+          "body": "Health is 20 of 20. Hunger is 20 of 20. Air supply is full.",
+          "threats": "No hostile mob is in view.",
+          "finished_call": "craft_item(item=\"oak_planks\", count=12) has ended normally.",
+          "position": "now at [10.7, 71.0, -52.7].",
+          "request_chars": 757
+        },
+        "questions": {
+          "q": {
+            "type": "choice",
+            "instructions": "Choose what the Body does next.",
+            "criteria": {
+              "repeat": "Run the same call again: craft_item(item=\"oak_planks\", count=12).",
+              "next_step": "Do not repeat it and start the next step of the plan: craft_item(item=\"crafting_table\", count=1).",
+              "call_agent": "Do not repeat it and hand control back to the Agent for a new plan."
+            }
+          }
+        }
+      }
+    },
+    {
+      "seq": 3024,
+      "node_id": "table",
+      "provenance": {
+        "kind": "persisted_node",
+        "trace_seq": 3252
+      },
+      "inventory_slot_source_seq": 3026,
+      "plan": {
+        "language": "minebot-work/0.2",
+        "goal": "制作并装备石镐",
+        "timeout_s": 300,
+        "work": {
+          "kind": "sequence",
+          "intent": "制作工作台并补足材料后装备石镐",
+          "steps": [
+            {
+              "kind": "call",
+              "id": "planks",
+              "tool": "craft_item",
+              "arguments": {
+                "item": "oak_planks",
+                "count": 12,
+                "intent": "把现有橡木原木加工成木板"
+              }
+            },
+            {
+              "kind": "call",
+              "id": "table",
+              "tool": "craft_item",
+              "arguments": {
+                "item": "crafting_table",
+                "count": 1,
+                "intent": "制作一张工作台"
+              }
+            },
+            {
+              "kind": "call",
+              "id": "cobble",
+              "tool": "collect_resource",
+              "arguments": {
+                "item": "cobblestone",
+                "count": 3,
+                "intent": "补足至至少3块圆石"
+              }
+            },
+            {
+              "kind": "call",
+              "id": "pick",
+              "tool": "craft_item",
+              "arguments": {
+                "item": "stone_pickaxe",
+                "count": 1,
+                "auto_equip": true,
+                "intent": "制作并装备一把石镐"
+              }
+            }
+          ]
+        }
+      },
+      "node": {
+        "kind": "call",
+        "id": "table",
+        "tool": "craft_item",
+        "arguments": {
+          "item": "crafting_table",
+          "count": 1,
+          "intent": "制作一张工作台"
+        },
+        "next_call": "collect_resource(item=\"cobblestone\", count=3)"
+      },
+      "intents": [
+        "制作工作台并补足材料后装备石镐"
+      ],
+      "raw_decision_facts": {
+        "body_state": {
+          "body_owner": "ReflexStageBot",
+          "bot": "ReflexStageBot",
+          "dimension": "minecraft:overworld",
+          "food": 20,
+          "hazard_unresolved": null,
+          "health": 20.0,
+          "inventory_complete": true,
+          "inventory_counts": {
+            "crafting_table": 1,
+            "oak_planks": 9,
+            "leaf_litter": 3,
+            "stick": 6,
+            "wooden_pickaxe": 1,
+            "dirt": 1,
+            "cobblestone": 2
+          },
+          "inventory_hash": "94caaa3b3a3de693bb52f232ccef2827a31ec4d43553e39ae16e70a18e4341a6",
+          "inventory_includes_selected": true,
+          "offhand_item": null,
+          "oxygen": 300,
+          "pending_action_count": 0,
+          "pitch": 40.412136,
+          "pos": [
+            10.748470289142444,
+            71.0,
+            -52.71948634322439
+          ],
+          "selected_item": "crafting_table",
+          "selected_item_known": true,
+          "selected_slot": 0,
+          "yaw": 80.02905
+        },
+        "execution": {
+          "delivered": true,
+          "normal_work": "The Body normally finds or creates the crafting context, performs complete recipe batches, and verifies the inventory result.",
+          "tool": "craft_item"
+        },
+        "history": [
+          {
+            "reason": "completed",
+            "result": {
+              "success": true,
+              "reason": "completed",
+              "canRetry": false,
+              "complete": true,
+              "summary": {
+                "cleanup_after": {
+                  "canRetry": false,
+                  "metrics": {
+                    "destination_slots": [
+                      0,
+                      1,
+                      2,
+                      3,
+                      4,
+                      5,
+                      6,
+                      7,
+                      8,
+                      9,
+                      10,
+                      11,
+                      12,
+                      13,
+                      14,
+                      15,
+                      16,
+                      17,
+                      18,
+                      19,
+                      20,
+                      21,
+                      22,
+                      23,
+                      24,
+                      25,
+                      26,
+                      27,
+                      28,
+                      29,
+                      30,
+                      31,
+                      32,
+                      33,
+                      34,
+                      35
+                    ],
+                    "executed": [],
+                    "residue_slots": [
+                      41,
+                      42,
+                      43,
+                      44
+                    ]
+                  },
+                  "nextSuggestion": null,
+                  "reason": "already_clean",
+                  "success": true
+                },
+                "cleanup_before": {
+                  "canRetry": false,
+                  "metrics": {
+                    "destination_slots": [
+                      0,
+                      1,
+                      2,
+                      3,
+                      4,
+                      5,
+                      6,
+                      7,
+                      8,
+                      9,
+                      10,
+                      11,
+                      12,
+                      13,
+                      14,
+                      15,
+                      16,
+                      17,
+                      18,
+                      19,
+                      20,
+                      21,
+                      22,
+                      23,
+                      24,
+                      25,
+                      26,
+                      27,
+                      28,
+                      29,
+                      30,
+                      31,
+                      32,
+                      33,
+                      34,
+                      35
+                    ],
+                    "executed": [],
+                    "residue_slots": [
+                      41,
+                      42,
+                      43,
+                      44
+                    ]
+                  },
+                  "nextSuggestion": null,
+                  "reason": "already_clean",
+                  "success": true
+                },
+                "crafted_count": 1,
+                "item": "crafting_table",
+                "requested_count": 1
+              }
+            },
+            "body": {
+              "position": null,
+              "inventory": null
+            }
+          }
+        ],
+        "history_count": 1,
+        "history_earlier": 0,
+        "reads": [],
+        "tool_arguments": {
+          "item": "crafting_table",
+          "count": 1,
+          "intent": "制作一张工作台"
+        },
+        "tool_result": {
+          "success": true,
+          "reason": "completed",
+          "canRetry": false,
+          "complete": true,
+          "summary": {
+            "cleanup_after": {
+              "canRetry": false,
+              "metrics": {
+                "destination_slots": [
+                  0,
+                  1,
+                  2,
+                  3,
+                  4,
+                  5,
+                  6,
+                  7,
+                  8,
+                  9,
+                  10,
+                  11,
+                  12,
+                  13,
+                  14,
+                  15,
+                  16,
+                  17,
+                  18,
+                  19,
+                  20,
+                  21,
+                  22,
+                  23,
+                  24,
+                  25,
+                  26,
+                  27,
+                  28,
+                  29,
+                  30,
+                  31,
+                  32,
+                  33,
+                  34,
+                  35
+                ],
+                "executed": [],
+                "residue_slots": [
+                  41,
+                  42,
+                  43,
+                  44
+                ]
+              },
+              "nextSuggestion": null,
+              "reason": "already_clean",
+              "success": true
+            },
+            "cleanup_before": {
+              "canRetry": false,
+              "metrics": {
+                "destination_slots": [
+                  0,
+                  1,
+                  2,
+                  3,
+                  4,
+                  5,
+                  6,
+                  7,
+                  8,
+                  9,
+                  10,
+                  11,
+                  12,
+                  13,
+                  14,
+                  15,
+                  16,
+                  17,
+                  18,
+                  19,
+                  20,
+                  21,
+                  22,
+                  23,
+                  24,
+                  25,
+                  26,
+                  27,
+                  28,
+                  29,
+                  30,
+                  31,
+                  32,
+                  33,
+                  34,
+                  35
+                ],
+                "executed": [],
+                "residue_slots": [
+                  41,
+                  42,
+                  43,
+                  44
+                ]
+              },
+              "nextSuggestion": null,
+              "reason": "already_clean",
+              "success": true
+            },
+            "crafted_count": 1,
+            "item": "crafting_table",
+            "requested_count": 1
+          }
+        }
+      },
+      "expected_request": {
+        "state": {
+          "task": "制作并装备石镐",
+          "agent_intent": "制作工作台并补足材料后装备石镐",
+          "inventory": "crafting_table 1, oak_planks 9, leaf_litter 3, stick 6, wooden_pickaxe 1, dirt 1, cobblestone 2",
+          "body": "Health is 20 of 20. Hunger is 20 of 20. Air supply is full.",
+          "threats": "No hostile mob is in view.",
+          "finished_call": "craft_item(item=\"crafting_table\", count=1) has ended normally.",
+          "position": "now at [10.7, 71.0, -52.7].",
+          "request_chars": 783
+        },
+        "questions": {
+          "q": {
+            "type": "choice",
+            "instructions": "Choose what the Body does next.",
+            "criteria": {
+              "repeat": "Run the same call again: craft_item(item=\"crafting_table\", count=1).",
+              "next_step": "Do not repeat it and start the next step of the plan: collect_resource(item=\"cobblestone\", count=3).",
+              "call_agent": "Do not repeat it and hand control back to the Agent for a new plan."
+            }
+          }
+        }
+      }
+    },
+    {
+      "seq": 3112,
+      "node_id": "cobble",
+      "provenance": {
+        "kind": "persisted_node",
+        "trace_seq": 3252
+      },
+      "inventory_slot_source_seq": 3116,
+      "plan": {
+        "language": "minebot-work/0.2",
+        "goal": "制作并装备石镐",
+        "timeout_s": 300,
+        "work": {
+          "kind": "sequence",
+          "intent": "制作工作台并补足材料后装备石镐",
+          "steps": [
+            {
+              "kind": "call",
+              "id": "planks",
+              "tool": "craft_item",
+              "arguments": {
+                "item": "oak_planks",
+                "count": 12,
+                "intent": "把现有橡木原木加工成木板"
+              }
+            },
+            {
+              "kind": "call",
+              "id": "table",
+              "tool": "craft_item",
+              "arguments": {
+                "item": "crafting_table",
+                "count": 1,
+                "intent": "制作一张工作台"
+              }
+            },
+            {
+              "kind": "call",
+              "id": "cobble",
+              "tool": "collect_resource",
+              "arguments": {
+                "item": "cobblestone",
+                "count": 3,
+                "intent": "补足至至少3块圆石"
+              }
+            },
+            {
+              "kind": "call",
+              "id": "pick",
+              "tool": "craft_item",
+              "arguments": {
+                "item": "stone_pickaxe",
+                "count": 1,
+                "auto_equip": true,
+                "intent": "制作并装备一把石镐"
+              }
+            }
+          ]
+        }
+      },
+      "node": {
+        "kind": "call",
+        "id": "cobble",
+        "tool": "collect_resource",
+        "arguments": {
+          "item": "cobblestone",
+          "count": 3,
+          "intent": "补足至至少3块圆石"
+        },
+        "next_call": "craft_item(item=\"stone_pickaxe\", count=1, auto_equip=true)"
+      },
+      "intents": [
+        "制作工作台并补足材料后装备石镐"
+      ],
+      "raw_decision_facts": {
+        "body_state": {
+          "body_owner": "ReflexStageBot",
+          "bot": "ReflexStageBot",
+          "dimension": "minecraft:overworld",
+          "food": 20,
+          "hazard_unresolved": null,
+          "health": 20.0,
+          "inventory_complete": true,
+          "inventory_counts": {
+            "crafting_table": 1,
+            "oak_planks": 9,
+            "leaf_litter": 5,
+            "stick": 6,
+            "wooden_pickaxe": 1,
+            "dirt": 5,
+            "cobblestone": 3
+          },
+          "inventory_hash": "85e223d2b305ae820495c7066bb96cb9edda604a1b3dbd0f010b9271de0a9313",
+          "inventory_includes_selected": true,
+          "offhand_item": null,
+          "oxygen": 300,
+          "pending_action_count": 0,
+          "pitch": 87.96213,
+          "pos": [
+            13.554601088985619,
+            66.0,
+            -59.445977803423546
+          ],
+          "selected_item": "wooden_pickaxe",
+          "selected_item_known": true,
+          "selected_slot": 4,
+          "yaw": 134.62906
+        },
+        "execution": {
+          "delivered": true,
+          "normal_work": "The Body normally carries out the declared physical action through its native process, reports real progress and phase changes, and returns one authoritative terminal result.",
+          "tool": "collect_block_domain"
+        },
+        "history": [
+          {
+            "reason": "collected",
+            "result": {
+              "success": true,
+              "reason": "collected",
+              "canRetry": false,
+              "complete": true,
+              "summary": {
+                "after_count": 3,
+                "attempt_count": 1,
+                "before_count": 2,
+                "block_types": [
+                  "stone",
+                  "cobblestone"
+                ],
+                "body_process": {
+                  "canRetry": false,
+                  "metrics": {
+                    "attempts": [
+                      {
+                        "action": "<bounded>",
+                        "mine": "<bounded>",
+                        "target": "<bounded>",
+                        "targets": "<bounded>"
+                      }
+                    ],
+                    "collected": 1,
+                    "collection_strategy": "native_resource_collection",
+                    "remaining_count": 0,
+                    "requested_count": 1
+                  },
+                  "nextSuggestion": null,
+                  "reason": "resource_collected",
+                  "success": true
+                },
+                "budget": {
+                  "max_candidates": 96,
+                  "max_mutating_calls": 96,
+                  "max_wall_s": 900.0
+                },
+                "candidates_tried": 1,
+                "collected_delta": 1,
+                "complete": true,
+                "expected_drops": [
+                  "cobblestone"
+                ],
+                "item": "cobblestone",
+                "remaining_count": 0,
+                "requested_item": "cobblestone",
+                "resume_hint": "complete",
+                "skipped": [],
+                "skipped_count": 0,
+                "skipped_reasons": [],
+                "target_count": 3
+              }
+            },
+            "body": {
+              "position": null,
+              "inventory": null
+            }
+          }
+        ],
+        "history_count": 1,
+        "history_earlier": 0,
+        "reads": [],
+        "tool_arguments": {
+          "item": "cobblestone",
+          "count": 3,
+          "intent": "补足至至少3块圆石"
+        },
+        "tool_result": {
+          "success": true,
+          "reason": "collected",
+          "canRetry": false,
+          "complete": true,
+          "summary": {
+            "after_count": 3,
+            "attempt_count": 1,
+            "before_count": 2,
+            "block_types": [
+              "stone",
+              "cobblestone"
+            ],
+            "body_process": {
+              "canRetry": false,
+              "metrics": {
+                "attempts": [
+                  {
+                    "action": "<bounded>",
+                    "mine": "<bounded>",
+                    "target": "<bounded>",
+                    "targets": "<bounded>"
+                  }
+                ],
+                "collected": 1,
+                "collection_strategy": "native_resource_collection",
+                "remaining_count": 0,
+                "requested_count": 1
+              },
+              "nextSuggestion": null,
+              "reason": "resource_collected",
+              "success": true
+            },
+            "budget": {
+              "max_candidates": 96,
+              "max_mutating_calls": 96,
+              "max_wall_s": 900.0
+            },
+            "candidates_tried": 1,
+            "collected_delta": 1,
+            "complete": true,
+            "expected_drops": [
+              "cobblestone"
+            ],
+            "item": "cobblestone",
+            "remaining_count": 0,
+            "requested_item": "cobblestone",
+            "resume_hint": "complete",
+            "skipped": [],
+            "skipped_count": 0,
+            "skipped_reasons": [],
+            "target_count": 3
+          }
+        }
+      },
+      "expected_request": {
+        "state": {
+          "task": "制作并装备石镐",
+          "agent_intent": "制作工作台并补足材料后装备石镐",
+          "inventory": "crafting_table 1, oak_planks 9, leaf_litter 5, stick 6, wooden_pickaxe 1, dirt 5, cobblestone 3",
+          "body": "Health is 20 of 20. Hunger is 20 of 20. Air supply is full.",
+          "threats": "No hostile mob is in view.",
+          "finished_call": "collect_resource(item=\"cobblestone\", count=3) has ended normally.",
+          "position": "now at [13.6, 66.0, -59.4].",
+          "request_chars": 802
+        },
+        "questions": {
+          "q": {
+            "type": "choice",
+            "instructions": "Choose what the Body does next.",
+            "criteria": {
+              "repeat": "Run the same call again: collect_resource(item=\"cobblestone\", count=3).",
+              "next_step": "Do not repeat it and start the next step of the plan: craft_item(item=\"stone_pickaxe\", count=1, auto_equip=true).",
+              "call_agent": "Do not repeat it and hand control back to the Agent for a new plan."
+            }
+          }
+        }
+      }
+    },
+    {
+      "seq": 3785,
+      "node_id": "iron",
+      "provenance": {
+        "kind": "persisted_node",
+        "trace_seq": 3849
+      },
+      "inventory_slot_source_seq": 3787,
+      "plan": {
+        "language": "minebot-work/0.2",
+        "goal": "采集至少两块铁矿并熔炼成至少两个铁锭",
+        "timeout_s": 600,
+        "work": {
+          "kind": "sequence",
+          "intent": "使用石镐采铁、制作熔炉并熔炼至少两个铁锭",
+          "steps": [
+            {
+              "kind": "call",
+              "id": "iron",
+              "tool": "collect_resource",
+              "arguments": {
+                "item": "iron_ore",
+                "count": 2,
+                "intent": "采集并在库存中拥有至少两块铁矿"
+              }
+            },
+            {
+              "kind": "call",
+              "id": "cobble",
+              "tool": "collect_resource",
+              "arguments": {
+                "item": "cobblestone",
+                "count": 8,
+                "intent": "采集至少8块圆石制作熔炉"
+              }
+            },
+            {
+              "kind": "call",
+              "id": "coal",
+              "tool": "collect_resource",
+              "arguments": {
+                "item": "coal",
+                "count": 1,
+                "intent": "采集至少一块煤炭作为熔炼燃料"
+              }
+            },
+            {
+              "kind": "call",
+              "id": "furnace",
+              "tool": "craft_item",
+              "arguments": {
+                "item": "furnace",
+                "count": 1,
+                "intent": "制作一座熔炉"
+              }
+            },
+            {
+              "kind": "call",
+              "id": "smelt",
+              "tool": "smelt_item",
+              "arguments": {
+                "input_item": "iron_ore",
+                "count": 2,
+                "intent": "将至少两块铁矿熔炼成至少两个铁锭"
+              }
+            }
+          ]
+        }
+      },
+      "node": {
+        "kind": "call",
+        "id": "iron",
+        "tool": "collect_resource",
+        "arguments": {
+          "item": "iron_ore",
+          "count": 2,
+          "intent": "采集并在库存中拥有至少两块铁矿"
+        },
+        "next_call": "collect_resource(item=\"cobblestone\", count=8)"
+      },
+      "intents": [
+        "使用石镐采铁、制作熔炉并熔炼至少两个铁锭"
+      ],
+      "raw_decision_facts": {
+        "body_state": {
+          "body_owner": "ReflexStageBot",
+          "bot": "ReflexStageBot",
+          "dimension": "minecraft:overworld",
+          "food": 20,
+          "hazard_unresolved": null,
+          "health": 20.0,
+          "inventory_complete": true,
+          "inventory_counts": {
+            "crafting_table": 1,
+            "oak_planks": 9,
+            "leaf_litter": 5,
+            "stick": 4,
+            "wooden_pickaxe": 1,
+            "dirt": 6,
+            "raw_iron": 2,
+            "stone_pickaxe": 1
+          },
+          "inventory_hash": "ca668f77efd6e397c566bd2d466ccead8abbf992c981e2464bfeff498cb9e7a2",
+          "inventory_includes_selected": true,
+          "offhand_item": null,
+          "oxygen": 300,
+          "pending_action_count": 0,
+          "pitch": 89.99075,
+          "pos": [
+            15.500505397892953,
+            66.0,
+            -54.50092964030471
+          ],
+          "selected_item": "stone_pickaxe",
+          "selected_item_known": true,
+          "selected_slot": 7,
+          "yaw": 28.567505
+        },
+        "execution": {},
+        "history": [
+          {
+            "reason": "baritone_stopped_without_result",
+            "result": {
+              "success": false,
+              "reason": "baritone_stopped_without_result",
+              "canRetry": true,
+              "complete": false,
+              "summary": {
+                "after_count": 0,
+                "attempt_count": 1,
+                "before_count": 0,
+                "block_types": [
+                  "iron_ore"
+                ],
+                "budget": {
+                  "max_candidates": 96,
+                  "max_mutating_calls": 96,
+                  "max_wall_s": 900.0
+                },
+                "candidates_tried": 1,
+                "collected_delta": 0,
+                "complete": false,
+                "expected_drops": [
+                  "iron_ore"
+                ],
+                "item": "iron_ore",
+                "last_failure": {
+                  "phase": "collect_domain",
+                  "reason": "baritone_stopped_without_result",
+                  "reason_chain": [
+                    "baritone_stopped_without_result"
+                  ]
+                },
+                "remaining_count": 2,
+                "requested_item": "iron_ore",
+                "resume_hint": "body_terminal",
+                "skipped": [],
+                "skipped_count": 0,
+                "skipped_reasons": [],
+                "target_count": 2
+              }
+            },
+            "body": {
+              "position": null,
+              "inventory": null
+            }
+          }
+        ],
+        "history_count": 1,
+        "history_earlier": 0,
+        "reads": [],
+        "tool_arguments": {
+          "item": "iron_ore",
+          "count": 2,
+          "intent": "采集并在库存中拥有至少两块铁矿"
+        },
+        "tool_result": {
+          "success": false,
+          "reason": "baritone_stopped_without_result",
+          "canRetry": true,
+          "complete": false,
+          "summary": {
+            "after_count": 0,
+            "attempt_count": 1,
+            "before_count": 0,
+            "block_types": [
+              "iron_ore"
+            ],
+            "budget": {
+              "max_candidates": 96,
+              "max_mutating_calls": 96,
+              "max_wall_s": 900.0
+            },
+            "candidates_tried": 1,
+            "collected_delta": 0,
+            "complete": false,
+            "expected_drops": [
+              "iron_ore"
+            ],
+            "item": "iron_ore",
+            "last_failure": {
+              "phase": "collect_domain",
+              "reason": "baritone_stopped_without_result",
+              "reason_chain": [
+                "baritone_stopped_without_result"
+              ]
+            },
+            "remaining_count": 2,
+            "requested_item": "iron_ore",
+            "resume_hint": "body_terminal",
+            "skipped": [],
+            "skipped_count": 0,
+            "skipped_reasons": [],
+            "target_count": 2
+          }
+        }
+      },
+      "expected_request": {
+        "state": {
+          "task": "采集至少两块铁矿并熔炼成至少两个铁锭",
+          "agent_intent": "使用石镐采铁、制作熔炉并熔炼至少两个铁锭",
+          "inventory": "crafting_table 1, oak_planks 9, leaf_litter 5, stick 4, wooden_pickaxe 1, dirt 6, raw_iron 2, stone_pickaxe 1",
+          "body": "Health is 20 of 20. Hunger is 20 of 20. Air supply is full.",
+          "threats": "No hostile mob is in view.",
+          "finished_call": "collect_resource(item=\"iron_ore\", count=2) has ended. It reported failure: baritone_stopped_without_result.",
+          "position": "now at [15.5, 66.0, -54.5].",
+          "request_chars": 741
+        },
+        "questions": {
+          "q": {
+            "type": "choice",
+            "instructions": "Choose what the Body does next.",
+            "criteria": {
+              "repeat": "Run the same call again: collect_resource(item=\"iron_ore\", count=2).",
+              "call_agent": "Do not repeat it and hand control back to the Agent for a new plan."
+            }
+          }
+        }
+      }
+    },
+    {
+      "seq": 3805,
+      "node_id": "iron__repeat_1",
+      "provenance": {
+        "kind": "temporal_observation_and_state",
+        "observation_id": "observation-e035711bd07b4619812721bf6353f876",
+        "observation_ts": 1791805006.561,
+        "body_state_seq": 3800
+      },
+      "inventory_slot_source_seq": 3809,
+      "plan": {
+        "language": "minebot-work/0.2",
+        "goal": "采集至少两块铁矿并熔炼成至少两个铁锭",
+        "timeout_s": 600,
+        "work": {
+          "kind": "sequence",
+          "intent": "使用石镐采铁、制作熔炉并熔炼至少两个铁锭",
+          "steps": [
+            {
+              "kind": "call",
+              "id": "iron",
+              "tool": "collect_resource",
+              "arguments": {
+                "item": "iron_ore",
+                "count": 2,
+                "intent": "采集并在库存中拥有至少两块铁矿"
+              }
+            },
+            {
+              "kind": "call",
+              "id": "cobble",
+              "tool": "collect_resource",
+              "arguments": {
+                "item": "cobblestone",
+                "count": 8,
+                "intent": "采集至少8块圆石制作熔炉"
+              }
+            },
+            {
+              "kind": "call",
+              "id": "coal",
+              "tool": "collect_resource",
+              "arguments": {
+                "item": "coal",
+                "count": 1,
+                "intent": "采集至少一块煤炭作为熔炼燃料"
+              }
+            },
+            {
+              "kind": "call",
+              "id": "furnace",
+              "tool": "craft_item",
+              "arguments": {
+                "item": "furnace",
+                "count": 1,
+                "intent": "制作一座熔炉"
+              }
+            },
+            {
+              "kind": "call",
+              "id": "smelt",
+              "tool": "smelt_item",
+              "arguments": {
+                "input_item": "iron_ore",
+                "count": 2,
+                "intent": "将至少两块铁矿熔炼成至少两个铁锭"
+              }
+            }
+          ]
+        }
+      },
+      "node": {
+        "kind": "call",
+        "id": "iron",
+        "tool": "collect_resource",
+        "arguments": {
+          "item": "iron_ore",
+          "count": 2,
+          "intent": "采集并在库存中拥有至少两块铁矿"
+        },
+        "next_call": "collect_resource(item=\"cobblestone\", count=8)"
+      },
+      "intents": [
+        "使用石镐采铁、制作熔炉并熔炼至少两个铁锭"
+      ],
+      "raw_decision_facts": {
+        "tool_result": {
+          "success": false,
+          "reason": "baritone_stopped_without_result",
+          "canRetry": true
+        },
+        "tool_arguments": {
+          "item": "iron_ore",
+          "count": 2,
+          "intent": "采集并在库存中拥有至少两块铁矿"
+        },
+        "body_state": {
+          "body_owner": "ReflexStageBot",
+          "bot": "ReflexStageBot",
+          "complete": true,
+          "dimension": "minecraft:overworld",
+          "food": 20,
+          "hazard_unresolved": null,
+          "health": 20.0,
+          "inventory_counts": {
+            "crafting_table": 1,
+            "oak_planks": 9,
+            "leaf_litter": 5,
+            "stick": 4,
+            "wooden_pickaxe": 1,
+            "dirt": 6,
+            "raw_iron": 2,
+            "stone_pickaxe": 1
+          },
+          "inventory_hash": "ca668f77efd6e397c566bd2d466ccead8abbf992c981e2464bfeff498cb9e7a2",
+          "offhand_item": null,
+          "oxygen": 300,
+          "pending_action_count": 0,
+          "pitch": 89.99075,
+          "pos": [
+            15.500505397892953,
+            66.0,
+            -54.50092964030471
+          ],
+          "selected_item": "stone_pickaxe",
+          "selected_slot": 7,
+          "yaw": 28.567505
+        },
+        "execution": {},
+        "reads": [],
+        "history": [
+          {
+            "reason": "baritone_stopped_without_result",
+            "result": {
+              "success": false,
+              "reason": "baritone_stopped_without_result",
+              "canRetry": true,
+              "complete": false,
+              "summary": {
+                "after_count": 0,
+                "attempt_count": 1,
+                "before_count": 0,
+                "block_types": [
+                  "iron_ore"
+                ],
+                "budget": {
+                  "max_candidates": 96,
+                  "max_mutating_calls": 96,
+                  "max_wall_s": 900.0
+                },
+                "candidates_tried": 1,
+                "collected_delta": 0,
+                "complete": false,
+                "expected_drops": [
+                  "iron_ore"
+                ],
+                "item": "iron_ore",
+                "last_failure": {
+                  "phase": "collect_domain",
+                  "reason": "baritone_stopped_without_result",
+                  "reason_chain": [
+                    "baritone_stopped_without_result"
+                  ]
+                },
+                "remaining_count": 2,
+                "requested_item": "iron_ore",
+                "resume_hint": "body_terminal",
+                "skipped": [],
+                "skipped_count": 0,
+                "skipped_reasons": [],
+                "target_count": 2
+              }
+            },
+            "body": {
+              "position": null,
+              "inventory": null
+            }
+          },
+          {
+            "reason": "baritone_stopped_without_result",
+            "result": {
+              "success": false,
+              "reason": "baritone_stopped_without_result",
+              "canRetry": true
+            },
+            "body": {
+              "position": null,
+              "inventory": null
+            }
+          }
+        ],
+        "history_count": 2,
+        "history_earlier": 0
+      },
+      "expected_request": {
+        "state": {
+          "task": "采集至少两块铁矿并熔炼成至少两个铁锭",
+          "agent_intent": "使用石镐采铁、制作熔炉并熔炼至少两个铁锭",
+          "inventory": "crafting_table 1, oak_planks 9, leaf_litter 5, stick 4, wooden_pickaxe 1, dirt 6, raw_iron 2, stone_pickaxe 1",
+          "body": "Health is 20 of 20. Hunger is 20 of 20. Air supply is full.",
+          "threats": "No hostile mob is in view.",
+          "finished_call": "collect_resource(item=\"iron_ore\", count=2) has ended. It reported failure: baritone_stopped_without_result.",
+          "earlier_attempts_of_this_call": [
+            "Attempt 1: failure: baritone_stopped_without_result; inventory and position unchanged."
+          ],
+          "position": "now at [15.5, 66.0, -54.5].",
+          "request_chars": 864
+        },
+        "questions": {
+          "q": {
+            "type": "choice",
+            "instructions": "Choose what the Body does next.",
+            "criteria": {
+              "repeat": "Run the same call again: collect_resource(item=\"iron_ore\", count=2).",
+              "call_agent": "Do not repeat it and hand control back to the Agent for a new plan."
+            }
+          }
+        }
+      }
+    },
+    {
+      "seq": 3825,
+      "node_id": "iron__repeat_2",
+      "provenance": {
+        "kind": "temporal_observation_and_state",
+        "observation_id": "observation-1c856c461e414f3e86a7fbbbea50802a",
+        "observation_ts": 1791805008.554,
+        "body_state_seq": 3820
+      },
+      "inventory_slot_source_seq": 3829,
+      "plan": {
+        "language": "minebot-work/0.2",
+        "goal": "采集至少两块铁矿并熔炼成至少两个铁锭",
+        "timeout_s": 600,
+        "work": {
+          "kind": "sequence",
+          "intent": "使用石镐采铁、制作熔炉并熔炼至少两个铁锭",
+          "steps": [
+            {
+              "kind": "call",
+              "id": "iron",
+              "tool": "collect_resource",
+              "arguments": {
+                "item": "iron_ore",
+                "count": 2,
+                "intent": "采集并在库存中拥有至少两块铁矿"
+              }
+            },
+            {
+              "kind": "call",
+              "id": "cobble",
+              "tool": "collect_resource",
+              "arguments": {
+                "item": "cobblestone",
+                "count": 8,
+                "intent": "采集至少8块圆石制作熔炉"
+              }
+            },
+            {
+              "kind": "call",
+              "id": "coal",
+              "tool": "collect_resource",
+              "arguments": {
+                "item": "coal",
+                "count": 1,
+                "intent": "采集至少一块煤炭作为熔炼燃料"
+              }
+            },
+            {
+              "kind": "call",
+              "id": "furnace",
+              "tool": "craft_item",
+              "arguments": {
+                "item": "furnace",
+                "count": 1,
+                "intent": "制作一座熔炉"
+              }
+            },
+            {
+              "kind": "call",
+              "id": "smelt",
+              "tool": "smelt_item",
+              "arguments": {
+                "input_item": "iron_ore",
+                "count": 2,
+                "intent": "将至少两块铁矿熔炼成至少两个铁锭"
+              }
+            }
+          ]
+        }
+      },
+      "node": {
+        "kind": "call",
+        "id": "iron",
+        "tool": "collect_resource",
+        "arguments": {
+          "item": "iron_ore",
+          "count": 2,
+          "intent": "采集并在库存中拥有至少两块铁矿"
+        },
+        "next_call": "collect_resource(item=\"cobblestone\", count=8)"
+      },
+      "intents": [
+        "使用石镐采铁、制作熔炉并熔炼至少两个铁锭"
+      ],
+      "raw_decision_facts": {
+        "tool_result": {
+          "success": false,
+          "reason": "baritone_stopped_without_result",
+          "canRetry": true
+        },
+        "tool_arguments": {
+          "item": "iron_ore",
+          "count": 2,
+          "intent": "采集并在库存中拥有至少两块铁矿"
+        },
+        "body_state": {
+          "body_owner": "ReflexStageBot",
+          "bot": "ReflexStageBot",
+          "complete": true,
+          "dimension": "minecraft:overworld",
+          "food": 20,
+          "hazard_unresolved": null,
+          "health": 20.0,
+          "inventory_counts": {
+            "crafting_table": 1,
+            "oak_planks": 9,
+            "leaf_litter": 5,
+            "stick": 4,
+            "wooden_pickaxe": 1,
+            "dirt": 6,
+            "raw_iron": 2,
+            "stone_pickaxe": 1
+          },
+          "inventory_hash": "ca668f77efd6e397c566bd2d466ccead8abbf992c981e2464bfeff498cb9e7a2",
+          "offhand_item": null,
+          "oxygen": 300,
+          "pending_action_count": 0,
+          "pitch": 89.99075,
+          "pos": [
+            15.500505397892953,
+            66.0,
+            -54.50092964030471
+          ],
+          "selected_item": "stone_pickaxe",
+          "selected_slot": 7,
+          "yaw": 28.567505
+        },
+        "execution": {},
+        "reads": [],
+        "history": [
+          {
+            "reason": "baritone_stopped_without_result",
+            "result": {
+              "success": false,
+              "reason": "baritone_stopped_without_result",
+              "canRetry": true,
+              "complete": false,
+              "summary": {
+                "after_count": 0,
+                "attempt_count": 1,
+                "before_count": 0,
+                "block_types": [
+                  "iron_ore"
+                ],
+                "budget": {
+                  "max_candidates": 96,
+                  "max_mutating_calls": 96,
+                  "max_wall_s": 900.0
+                },
+                "candidates_tried": 1,
+                "collected_delta": 0,
+                "complete": false,
+                "expected_drops": [
+                  "iron_ore"
+                ],
+                "item": "iron_ore",
+                "last_failure": {
+                  "phase": "collect_domain",
+                  "reason": "baritone_stopped_without_result",
+                  "reason_chain": [
+                    "baritone_stopped_without_result"
+                  ]
+                },
+                "remaining_count": 2,
+                "requested_item": "iron_ore",
+                "resume_hint": "body_terminal",
+                "skipped": [],
+                "skipped_count": 0,
+                "skipped_reasons": [],
+                "target_count": 2
+              }
+            },
+            "body": {
+              "position": null,
+              "inventory": null
+            }
+          },
+          {
+            "reason": "baritone_stopped_without_result",
+            "result": {
+              "success": false,
+              "reason": "baritone_stopped_without_result",
+              "canRetry": true
+            },
+            "body": {
+              "position": null,
+              "inventory": null
+            }
+          },
+          {
+            "reason": "baritone_stopped_without_result",
+            "result": {
+              "success": false,
+              "reason": "baritone_stopped_without_result",
+              "canRetry": true
+            },
+            "body": {
+              "position": null,
+              "inventory": null
+            }
+          }
+        ],
+        "history_count": 3,
+        "history_earlier": 0
+      },
+      "expected_request": {
+        "state": {
+          "task": "采集至少两块铁矿并熔炼成至少两个铁锭",
+          "agent_intent": "使用石镐采铁、制作熔炉并熔炼至少两个铁锭",
+          "inventory": "crafting_table 1, oak_planks 9, leaf_litter 5, stick 4, wooden_pickaxe 1, dirt 6, raw_iron 2, stone_pickaxe 1",
+          "body": "Health is 20 of 20. Hunger is 20 of 20. Air supply is full.",
+          "threats": "No hostile mob is in view.",
+          "finished_call": "collect_resource(item=\"iron_ore\", count=2) has ended. It reported failure: baritone_stopped_without_result.",
+          "earlier_attempts_of_this_call": [
+            "Attempt 1: failure: baritone_stopped_without_result; inventory and position unchanged.",
+            "Attempt 2: failure: baritone_stopped_without_result; inventory and position unchanged."
+          ],
+          "position": "now at [15.5, 66.0, -54.5].",
+          "request_chars": 953
+        },
+        "questions": {
+          "q": {
+            "type": "choice",
+            "instructions": "Choose what the Body does next.",
+            "criteria": {
+              "repeat": "Run the same call again: collect_resource(item=\"iron_ore\", count=2).",
+              "call_agent": "Do not repeat it and hand control back to the Agent for a new plan."
+            }
+          }
+        }
+      }
+    },
+    {
+      "seq": 3845,
+      "node_id": "iron__repeat_3",
+      "provenance": {
+        "kind": "temporal_observation_and_state",
+        "observation_id": "observation-e0dd8da2e72e41a5ac8d39d46249c87c",
+        "observation_ts": 1791805010.578,
+        "body_state_seq": 3840
+      },
+      "inventory_slot_source_seq": 3851,
+      "plan": {
+        "language": "minebot-work/0.2",
+        "goal": "采集至少两块铁矿并熔炼成至少两个铁锭",
+        "timeout_s": 600,
+        "work": {
+          "kind": "sequence",
+          "intent": "使用石镐采铁、制作熔炉并熔炼至少两个铁锭",
+          "steps": [
+            {
+              "kind": "call",
+              "id": "iron",
+              "tool": "collect_resource",
+              "arguments": {
+                "item": "iron_ore",
+                "count": 2,
+                "intent": "采集并在库存中拥有至少两块铁矿"
+              }
+            },
+            {
+              "kind": "call",
+              "id": "cobble",
+              "tool": "collect_resource",
+              "arguments": {
+                "item": "cobblestone",
+                "count": 8,
+                "intent": "采集至少8块圆石制作熔炉"
+              }
+            },
+            {
+              "kind": "call",
+              "id": "coal",
+              "tool": "collect_resource",
+              "arguments": {
+                "item": "coal",
+                "count": 1,
+                "intent": "采集至少一块煤炭作为熔炼燃料"
+              }
+            },
+            {
+              "kind": "call",
+              "id": "furnace",
+              "tool": "craft_item",
+              "arguments": {
+                "item": "furnace",
+                "count": 1,
+                "intent": "制作一座熔炉"
+              }
+            },
+            {
+              "kind": "call",
+              "id": "smelt",
+              "tool": "smelt_item",
+              "arguments": {
+                "input_item": "iron_ore",
+                "count": 2,
+                "intent": "将至少两块铁矿熔炼成至少两个铁锭"
+              }
+            }
+          ]
+        }
+      },
+      "node": {
+        "kind": "call",
+        "id": "iron",
+        "tool": "collect_resource",
+        "arguments": {
+          "item": "iron_ore",
+          "count": 2,
+          "intent": "采集并在库存中拥有至少两块铁矿"
+        },
+        "next_call": "collect_resource(item=\"cobblestone\", count=8)"
+      },
+      "intents": [
+        "使用石镐采铁、制作熔炉并熔炼至少两个铁锭"
+      ],
+      "raw_decision_facts": {
+        "tool_result": {
+          "success": false,
+          "reason": "baritone_stopped_without_result",
+          "canRetry": true
+        },
+        "tool_arguments": {
+          "item": "iron_ore",
+          "count": 2,
+          "intent": "采集并在库存中拥有至少两块铁矿"
+        },
+        "body_state": {
+          "body_owner": "ReflexStageBot",
+          "bot": "ReflexStageBot",
+          "complete": true,
+          "dimension": "minecraft:overworld",
+          "food": 20,
+          "hazard_unresolved": null,
+          "health": 20.0,
+          "inventory_counts": {
+            "crafting_table": 1,
+            "oak_planks": 9,
+            "leaf_litter": 5,
+            "stick": 4,
+            "wooden_pickaxe": 1,
+            "dirt": 6,
+            "raw_iron": 2,
+            "stone_pickaxe": 1
+          },
+          "inventory_hash": "ca668f77efd6e397c566bd2d466ccead8abbf992c981e2464bfeff498cb9e7a2",
+          "offhand_item": null,
+          "oxygen": 300,
+          "pending_action_count": 0,
+          "pitch": 89.99075,
+          "pos": [
+            15.500505397892953,
+            66.0,
+            -54.50092964030471
+          ],
+          "selected_item": "stone_pickaxe",
+          "selected_slot": 7,
+          "yaw": 28.567505
+        },
+        "execution": {},
+        "reads": [],
+        "history": [
+          {
+            "reason": "baritone_stopped_without_result",
+            "result": {
+              "success": false,
+              "reason": "baritone_stopped_without_result",
+              "canRetry": true,
+              "complete": false,
+              "summary": {
+                "after_count": 0,
+                "attempt_count": 1,
+                "before_count": 0,
+                "block_types": [
+                  "iron_ore"
+                ],
+                "budget": {
+                  "max_candidates": 96,
+                  "max_mutating_calls": 96,
+                  "max_wall_s": 900.0
+                },
+                "candidates_tried": 1,
+                "collected_delta": 0,
+                "complete": false,
+                "expected_drops": [
+                  "iron_ore"
+                ],
+                "item": "iron_ore",
+                "last_failure": {
+                  "phase": "collect_domain",
+                  "reason": "baritone_stopped_without_result",
+                  "reason_chain": [
+                    "baritone_stopped_without_result"
+                  ]
+                },
+                "remaining_count": 2,
+                "requested_item": "iron_ore",
+                "resume_hint": "body_terminal",
+                "skipped": [],
+                "skipped_count": 0,
+                "skipped_reasons": [],
+                "target_count": 2
+              }
+            },
+            "body": {
+              "position": null,
+              "inventory": null
+            }
+          },
+          {
+            "reason": "baritone_stopped_without_result",
+            "result": {
+              "success": false,
+              "reason": "baritone_stopped_without_result",
+              "canRetry": true
+            },
+            "body": {
+              "position": null,
+              "inventory": null
+            }
+          },
+          {
+            "reason": "baritone_stopped_without_result",
+            "result": {
+              "success": false,
+              "reason": "baritone_stopped_without_result",
+              "canRetry": true
+            },
+            "body": {
+              "position": null,
+              "inventory": null
+            }
+          },
+          {
+            "reason": "baritone_stopped_without_result",
+            "result": {
+              "success": false,
+              "reason": "baritone_stopped_without_result",
+              "canRetry": true
+            },
+            "body": {
+              "position": null,
+              "inventory": null
+            }
+          }
+        ],
+        "history_count": 4,
+        "history_earlier": 0
+      },
+      "expected_request": {
+        "state": {
+          "task": "采集至少两块铁矿并熔炼成至少两个铁锭",
+          "agent_intent": "使用石镐采铁、制作熔炉并熔炼至少两个铁锭",
+          "inventory": "crafting_table 1, oak_planks 9, leaf_litter 5, stick 4, wooden_pickaxe 1, dirt 6, raw_iron 2, stone_pickaxe 1",
+          "body": "Health is 20 of 20. Hunger is 20 of 20. Air supply is full.",
+          "threats": "No hostile mob is in view.",
+          "finished_call": "collect_resource(item=\"iron_ore\", count=2) has ended. It reported failure: baritone_stopped_without_result.",
+          "earlier_attempts_of_this_call": [
+            "Attempt 1: failure: baritone_stopped_without_result; inventory and position unchanged.",
+            "Attempt 2: failure: baritone_stopped_without_result; inventory and position unchanged.",
+            "Attempt 3: failure: baritone_stopped_without_result; inventory and position unchanged."
+          ],
+          "position": "now at [15.5, 66.0, -54.5].",
+          "request_chars": 1042
+        },
+        "questions": {
+          "q": {
+            "type": "choice",
+            "instructions": "Choose what the Body does next.",
+            "criteria": {
+              "repeat": "Run the same call again: collect_resource(item=\"iron_ore\", count=2).",
+              "call_agent": "Do not repeat it and hand control back to the Agent for a new plan."
+            }
+          }
+        }
+      }
+    }
+  ]
+}

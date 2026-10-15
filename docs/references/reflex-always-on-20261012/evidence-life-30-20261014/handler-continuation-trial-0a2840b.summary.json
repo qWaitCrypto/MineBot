@@ -1,0 +1,18 @@
+{
+  "source_seq": 718,
+  "original_call": "move_to(pos=[190, 121, 220])",
+  "candidate_only": true,
+  "baseline": "call_agent",
+  "recorded": "call_agent",
+  "candidates": {
+    "continuation_option": {
+      "next_step": 12
+    },
+    "suspended_context": {
+      "call_agent": 12
+    },
+    "both": {
+      "next_step": 12
+    }
+  }
+}

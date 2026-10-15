@@ -55,6 +55,36 @@ TASK_TERMINAL_BODY_EVENTS = {
 MATERIAL_BODY_EVENTS = ALWAYS_MATERIAL_BODY_EVENTS | TASK_TERMINAL_BODY_EVENTS
 
 
+def agent_event_data(event: Event) -> dict[str, object]:
+    """Project native lifecycle facts before context input length limits apply.
+
+    The native event/trace retains the full state. Process settings, inventory
+    slots and distant passive entities do not belong in a death notification.
+    No cause is inferred here.
+    """
+    if event.name not in {"death", "respawned"}:
+        return dict(event.data)
+    keys = ("position", "dimension", "sampled_at_ms", "health", "oxygen",
+            "food", "head_in_liquid", "on_ground")
+    data = {key: event.data[key] for key in keys if key in event.data}
+    if event.name == "death":
+        previous = event.data.get("last_living_state")
+        if isinstance(previous, dict):
+            data["last_living_state"] = {key: previous[key] for key in keys if key in previous}
+        if "vital_samples" in event.data:
+            data["vital_samples"] = event.data["vital_samples"]
+        hostiles = [entity for entity in event.data.get("entities", [])
+                    if isinstance(entity, dict) and entity.get("hostile")]
+        nearest = min(hostiles, key=lambda entity: entity.get("dist2", float("inf")), default=None)
+        data["nearby_hostiles"] = event.data.get("nearby_hostiles") or {
+            "count": len(hostiles),
+            "nearest": None if nearest is None else {
+                key: nearest[key] for key in ("id", "type", "pos", "dist2") if key in nearest
+            },
+        }
+    return data
+
+
 class EventBody(Protocol):
     last_seq: int
     last_chat_seq: int

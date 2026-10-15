@@ -1,0 +1,21 @@
+[
+  {
+    "name": "broken-tool-frame-v3",
+    "recorded": "equip:stone_sword",
+    "baseline": "equip:stone_sword",
+    "source": "native-only capture, not Agent evidence",
+    "choices": {
+      "equip:stone_sword": 12
+    }
+  },
+  {
+    "name": "unrelated-frame",
+    "recorded": "equip:stone_sword",
+    "baseline": "equip:stone_sword",
+    "source": "native-only capture, not Agent evidence",
+    "choices": {
+      "call_agent": 6,
+      "equip:stone_sword": 6
+    }
+  }
+]

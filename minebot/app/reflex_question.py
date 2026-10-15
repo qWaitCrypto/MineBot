@@ -14,12 +14,28 @@ from typing import Any
 
 # Options that protect the Body.  They are asked in a separate question and
 # only used when Decision says the Body is in danger.
-PROTECTIVE = ("surface", "move_away", "retreat_safe")
+PROTECTIVE = ("surface", "engage", "ranged", "move_away", "retreat_safe")
 # A hostile mob farther than this cannot be escaped by one short move.
 HOSTILE_REACH = 16.0
 AIR_FULL = 300
+DEFAULT_ACTION_INTENTS = {
+    "surface": "Swim up to air.",
+    "retreat_safe": "Go back to the last place where the Body stood safely.",
+    "eat": "Eat food from the inventory.",
+    "move_away": "Move away from the nearby hostile mob.",
+    "engage": "Fight back against the selected hostile mob.",
+    "ranged": "Shoot the selected hostile mob.",
+    "go_home": "Walk to the home position.",
+    "approach_player": "Walk to the nearby player.",
+    "follow_player": "Follow the nearby player.",
+    "look_player": "Look toward the nearby player.",
+    "seek_player": "Find the player named in the life profile.",
+}
 # A health change smaller than this is regeneration noise, not an injury.
 HURT_MARGIN = 0.4
+# Within this many blocks of a place the Body is at it (the task book's
+# "beside the player" / "at home"): an option to go there is not offered.
+AT_PLACE_BLOCKS = 2
 VITAL_BASELINE_S = (3.0, 8.0)
 
 _ARGS_NOT_SHOWN = {"timeout_s", "segment_timeout_s", "max_segments", "intent"}
@@ -58,7 +74,36 @@ class VitalWindow:
         if sample:
             self._samples.append((now, sample))
         self._samples = [(stamp, values) for stamp, values in self._samples if now - stamp <= oldest]
+        if "oxygen" in sample:
+            # The current uninterrupted direction of air change, rather than
+            # a net change across an earlier breath followed by another dive.
+            air = sample["oxygen"]
+            direction = 0
+            baseline = None
+            for stamp, values in reversed(self._samples[:-1]):
+                if "oxygen" not in values:
+                    continue
+                previous = values["oxygen"]
+                change = (air > previous) - (air < previous)
+                if change and direction and change != direction:
+                    break
+                if change:
+                    direction = change
+                baseline = (stamp, previous)
+                air = previous
+            before.pop("oxygen_before", None)
+            if baseline is not None:
+                before["oxygen_before"] = baseline[1]
+                before["oxygen_age_s"] = now - baseline[0]
         return before
+
+
+def protection_experience(stamp: float, tool: str, params: Mapping[str, Any],
+                          result: Mapping[str, Any], facts: Mapping[str, Any]) -> str:
+    from datetime import datetime, timezone
+    when = datetime.fromtimestamp(stamp, timezone.utc).isoformat(timespec="seconds")
+    position = _position(facts.get("position", facts.get("pos")))
+    return f"At {when}, {result_sentence(call_text(tool, params), result)} Now at {position or 'an unrecorded position'}."
 
 
 def hostiles(facts: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -73,12 +118,19 @@ def hostiles(facts: Mapping[str, Any]) -> list[dict[str, Any]]:
         for item in items:
             if not isinstance(item, Mapping) or not item.get("hostile"):
                 continue
+            # Native entities can remain visible during their death animation.
+            # Observed zero health is a terminal game fact, not a live target
+            # or a judgement about whether the Agent's intention is complete.
+            health = item.get("health")
+            if isinstance(health, (int, float)) and health <= 0:
+                continue
             dist = item.get("dist", item.get("distance"))
             if dist is None and isinstance(item.get("dist2"), (int, float)):
                 dist = float(item["dist2"]) ** 0.5
             if not isinstance(dist, (int, float)):
                 continue
             found.append({
+                "id": item.get("id", item.get("uuid")),
                 "name": str(item.get("name") or item.get("type") or "hostile mob"),
                 "dist": float(dist),
                 "pos": item.get("pos", item.get("position")),
@@ -94,9 +146,12 @@ def just_hurt(facts: Mapping[str, Any]) -> bool:
             and health < before - HURT_MARGIN)
 
 
-def _ago(facts: Mapping[str, Any]) -> str:
-    age = facts.get("vital_age_s")
-    return f"{age:.0f} seconds" if isinstance(age, (int, float)) else "a few seconds"
+def _ago(facts: Mapping[str, Any], key: str = "vital_age_s") -> str:
+    age = facts.get(key, facts.get("vital_age_s"))
+    if not isinstance(age, (int, float)):
+        return "a few seconds"
+    rounded = round(age)
+    return f"{rounded} second" + ("" if rounded == 1 else "s")
 
 
 def _inventory(facts: Mapping[str, Any]) -> Mapping[str, Any] | None:
@@ -109,9 +164,6 @@ def _inventory(facts: Mapping[str, Any]) -> Mapping[str, Any] | None:
 def dead(facts: Mapping[str, Any]) -> bool:
     health = facts.get("health")
     return isinstance(health, (int, float)) and health <= 0
-
-
-_DEAD_OPTIONS = {"call_agent": "The Body has died. Hand control back to the Agent."}
 
 
 def _body_sentence(facts: Mapping[str, Any]) -> str:
@@ -127,17 +179,25 @@ def _body_sentence(facts: Mapping[str, Any]) -> str:
         air_before = facts.get("oxygen_before")
         if air >= AIR_FULL:
             parts.append("Air supply is full.")
+        elif facts.get("head_in_liquid") is False:
+            if isinstance(air_before, (int, float)) and air > air_before:
+                parts.append(
+                    f"The Body is breathing again: air supply was {air_before:.0f} {_ago(facts, 'oxygen_age_s')} ago "
+                    f"and is {air:.0f} of {AIR_FULL} now."
+                )
+            else:
+                parts.append(f"The head is out of liquid; air supply is {air:.0f} of {AIR_FULL} now.")
         elif air <= 0:
             parts.append("Air supply is empty; the Body is under water and is drowning.")
-        elif isinstance(air_before, (int, float)) and air > air_before:
+        elif facts.get("head_in_liquid") is not True and isinstance(air_before, (int, float)) and air > air_before:
             parts.append(
-                f"The Body is breathing again: air supply was {air_before:.0f} {_ago(facts)} ago "
+                f"The Body is breathing again: air supply was {air_before:.0f} {_ago(facts, 'oxygen_age_s')} ago "
                 f"and is {air:.0f} of {AIR_FULL} now."
             )
         elif isinstance(air_before, (int, float)):
             parts.append(
                 "The head is under water and the Body cannot breathe: air supply was "
-                f"{air_before:.0f} {_ago(facts)} ago and is {air:.0f} of {AIR_FULL} now."
+                f"{air_before:.0f} {_ago(facts, 'oxygen_age_s')} ago and is {air:.0f} of {AIR_FULL} now."
             )
         else:
             parts.append(
@@ -150,6 +210,16 @@ def _body_sentence(facts: Mapping[str, Any]) -> str:
             f"to {health:.0f} in the last {_ago(facts)}."
         )
     return " ".join(parts)
+
+
+def _main_hand(facts: Mapping[str, Any]) -> str | None:
+    """The observed main-hand item, said beside the inventory.  Said inside
+    the body sentence it was overlooked when an intent named both an item and
+    holding it.  An unobserved hand is left out, never written as empty."""
+    selected = facts.get("selected_item")
+    if dead(facts) or facts.get("selected_item_known") is False or not isinstance(selected, str):
+        return None
+    return selected or "nothing"
 
 
 def _threat_sentence(facts: Mapping[str, Any]) -> str:
@@ -174,7 +244,18 @@ def result_sentence(call: str, result: Mapping[str, Any] | None) -> str:
     result = result if isinstance(result, Mapping) else {}
     if result.get("success") is True:
         return f"{call} has ended normally."
-    return f"{call} has ended. It reported failure: {result.get('reason') or 'no reason given'}."
+    sentence = f"{call} has ended. It reported failure: {result.get('reason') or 'no reason given'}."
+    # The native perception result already records its scope and observation
+    # count. Preserve that fact after the Agent projector moves it to summary;
+    # it does not establish that the target is absent from the whole world.
+    for field in ("summary", "metrics"):
+        details = result.get(field)
+        if not isinstance(details, Mapping):
+            continue
+        count, radius = details.get("entities_observed"), details.get("search_radius")
+        if type(count) is int and type(radius) in (int, float):
+            return sentence + f" The tool observed {count} entities within {radius:g} blocks."
+    return sentence
 
 
 def attempt_lines(history: list[Mapping[str, Any]], earlier: int = 0) -> list[str]:
@@ -189,6 +270,10 @@ def attempt_lines(history: list[Mapping[str, Any]], earlier: int = 0) -> list[st
     lines = [f"There were {earlier} earlier attempts before these."] if earlier else []
     for index, attempt in enumerate(history[:-1], start=earlier + 1):
         result = attempt.get("result") if isinstance(attempt.get("result"), Mapping) else {}
+        interruption = _interruption(result)
+        if interruption:
+            lines.extend(interruption_lines([attempt], earlier=index - 1, include_count=False))
+            continue
         if result.get("success") is True:
             lines.append(f"Attempt {index}: ended normally.")
             continue
@@ -200,19 +285,73 @@ def attempt_lines(history: list[Mapping[str, Any]], earlier: int = 0) -> list[st
     return lines
 
 
+def _interruption(result: Mapping[str, Any]) -> Mapping[str, Any]:
+    metrics = result.get("metrics")
+    handoff = metrics.get("direct_call_handoff") if isinstance(metrics, Mapping) else None
+    if not isinstance(handoff, Mapping):
+        handoff = result.get("supervision")
+    facts = handoff.get("facts") if isinstance(handoff, Mapping) else None
+    return facts if isinstance(facts, Mapping) and facts.get("default_action") else {}
+
+
+def interruption_lines(history: list[Mapping[str, Any]], earlier: int = 0, *,
+                       style: str = "attempts", include_count: bool = True) -> list[str]:
+    """All attempts of the suspended work, including the one just stopped.
+
+    Its current attempt is distinct from the protective call's current result.
+    No judgement about whether another attempt is worthwhile is added.
+    The alternate styles are for the required offline wording comparison.
+    """
+    lines = [f"There were {earlier} earlier attempts before these."] if earlier and include_count else []
+    for index, attempt in enumerate(history, start=earlier + 1):
+        result = attempt.get("result") if isinstance(attempt.get("result"), Mapping) else {}
+        facts = _interruption(result)
+        default = facts.get("default_action") or {}
+        tool = default.get("tool")
+        if not tool:
+            lines.append(f"Attempt {index}: {result_sentence('the original call', result)}")
+            continue
+        body = attempt.get("body") or {}
+        position = _position(body.get("position", body.get("pos")))
+        inventory = _inventory(body)
+        values = (", ".join(f"{k} {v}" for k, v in inventory.items()) or "empty") if inventory is not None else "not recorded"
+        protective_result = default.get("result")
+        protective_result = protective_result if isinstance(protective_result, Mapping) else {}
+        reason = result.get("reason") or "no reason given"
+        if style == "events":
+            prefix = f"On attempt {index}, Decision stopped the original work ({reason}) and the Body ran {tool}()."
+        elif style == "outcomes":
+            prefix = f"Attempt {index} of the original work returned {reason}; the Body switched to {tool}()."
+        else:
+            prefix = f"Attempt {index}: the original work was interrupted for {tool}() ({reason})."
+        if protective_result:
+            prefix += " " + result_sentence(f"{tool}()", protective_result)
+        lines.append(prefix + f" Inventory at interruption: {values}. Position: {position or 'not recorded'}.")
+    return lines
+
+
 def frame_state(
     *, goal: str, intent: str, tool: str, params: Mapping[str, Any] | None,
     facts: Mapping[str, Any], running: bool, phase: str | None = None,
     elapsed_s: float | None = None, progress_signal: str | None = None,
     since_progress_s: float | None = None, result: Mapping[str, Any] | None = None,
     earlier_attempts: list[str] | None = None,
+    interrupted_attempts: list[str] | None = None,
 ) -> dict[str, Any]:
     """Describe one frame.  Every fact is said once, as a sentence."""
     call = call_text(tool, params)
-    state: dict[str, Any] = {"task": goal, "agent_intent": intent}
+    state: dict[str, Any] = {
+        "task": goal,
+        # Outcome-shaped Agent words such as "there is a pickaxe in the
+        # inventory" are an intention, not an observed inventory fact.
+        # This clarification was verified on recorded running frames; keep
+        # the separately verified terminal-frame wording unchanged.
+        "agent_intent": f"The Agent wants the following result: “{intent}”." if running and intent else intent,
+    }
     inventory = _inventory(facts)
     if inventory is not None:
         state["inventory"] = ", ".join(f"{item} {count}" for item, count in inventory.items()) or "empty"
+    state["main_hand"] = _main_hand(facts)
     state["body"] = _body_sentence(facts)
     state["threats"] = _threat_sentence(facts)
     if running:
@@ -236,6 +375,8 @@ def frame_state(
         state["finished_call"] = result_sentence(call, result)
         if earlier_attempts:
             state["earlier_attempts_of_this_call"] = list(earlier_attempts)
+        if interrupted_attempts:
+            state["interruptions_of_the_original_work"] = list(interrupted_attempts)
     start = _position(facts.get("start_position"))
     now = _position(facts.get("position", facts.get("pos")))
     if start and now:
@@ -250,6 +391,7 @@ def frame_options(
     facts: Mapping[str, Any], running: bool, result: Mapping[str, Any] | None = None,
     next_call: str = "", tree: Mapping[str, str] | None = None, repeat_note: str = "",
     intent_of_plan: bool = False,
+    interrupt: Mapping[str, Any] | None = None,
 ) -> dict[str, str]:
     """The concrete things the Body may do next in this frame.
 
@@ -257,8 +399,7 @@ def frame_options(
     is the one of the plan around it.
     """
     if dead(facts):
-        # A dead Body can do none of the other things.
-        return dict(_DEAD_OPTIONS)
+        return {}
     call = call_text(tool, params)
     result = result if isinstance(result, Mapping) else {}
     failed = not running and result.get("success") is not True
@@ -276,54 +417,167 @@ def frame_options(
     elif not (failed and result.get("canRetry") is False):
         options["repeat"] = f"Run the same call again: {call}." + (f" {repeat_note}" if repeat_note else "")
     # After a failed step the plan cannot simply move on: later steps depend on it.
-    if not failed:
+    # While a call runs for an intent, whether the facts already show it is
+    # asked as its own question (frame_questions); the next step follows from
+    # that answer, not from an option beside "keep going".
+    if not failed and not (running and intent):
         options["next_step"] = (
             f"{stop} and start the next step of the plan: {next_call}." if next_call
             else f"{stop} and report to the Agent that this work is finished."
         )
     for key, text in (tree or {}).items():
         options[str(key)] = str(text)
+    if running and isinstance(interrupt, Mapping):
+        condition = interrupt.get("condition")
+        handler = interrupt.get("handler")
+        if isinstance(condition, Mapping) and isinstance(handler, Mapping):
+            options["interrupt"] = (
+                f"Stop the current action because “{condition.get('text', '')}” "
+                f"and do: {handler.get('intent', '')}."
+            )
+    if failed:
+        options.update(equipment_options(facts, result, call=call))
+    options.update(protective_options(facts, stop=stop))
+    options["call_agent"] = f"{stop} and hand control back to the Agent for a new plan."
+    return options
+
+
+def equipment_candidates(facts: Mapping[str, Any], result: Mapping[str, Any]) -> dict[str, str]:
+    """Other owned tools of the observed held/broken tool's game category."""
+    held = str(facts.get("selected_item") or "").removeprefix("minecraft:")
+    source = held
+    for details in (result.get("summary"), result.get("metrics")):
+        if isinstance(details, Mapping) and isinstance(details.get("broken_item"), str):
+            source = details["broken_item"].removeprefix("minecraft:")
+            break
+    category = next((kind for kind in ("pickaxe", "axe", "shovel", "sword")
+                     if source.endswith("_" + kind)), None)
+    if category is None:
+        return {}
+    return {"equip:" + str(item).removeprefix("minecraft:"): str(item)
+            for item, count in sorted((_inventory(facts) or {}).items())
+            if isinstance(count, (int, float)) and count > 0
+            and str(item).endswith("_" + category)
+            and str(item).removeprefix("minecraft:") not in {held, source}}
+
+
+def equipment_options(facts: Mapping[str, Any], result: Mapping[str, Any], *, call: str) -> dict[str, str]:
+    """The same owned-tool alternatives for any failed terminal call."""
+    if result.get("success") is True:
+        return {}
+    return {key: f"Equip {item} from the inventory and run the same call again: {call}."
+            for key, item in equipment_candidates(facts, result).items()}
+
+
+def equipment_intent(item: str) -> str:
+    return f"Hold {item} in the main hand."
+
+
+def repeat_note(again_when: str, until: str) -> str:
+    """The Agent's own repeat conditions, said beside the same-call option."""
+    return f"Repeat when: {again_when}; stop when: {until}."
+
+
+def protective_options(facts: Mapping[str, Any], *, stop: str = "") -> dict[str, str]:
+    """One eligibility compiler for work and idle protective tools."""
+    options: dict[str, str] = {}
+    prefix = f"{stop} and " if stop else ""
+    def text(action: str) -> str:
+        return prefix + action if prefix else action[0].upper() + action[1:]
     air = facts.get("oxygen")
     if isinstance(air, (int, float)) and air < AIR_FULL:
-        options["surface"] = f"{stop} and swim up to air now."
+        options["surface"] = text("swim up to air now.")
     food_item, food = facts.get("food_item"), facts.get("food")
     if isinstance(food_item, str) and food_item and isinstance(food, (int, float)) and food < 20:
-        options["eat"] = f"{stop} and eat {food_item} from the inventory."
+        options["eat"] = text(f"eat {food_item} from the inventory.")
     near = hostiles(facts)
     hurt = just_hurt(facts)
     if near and (near[0]["dist"] <= HOSTILE_REACH or hurt):
-        options["move_away"] = f"{stop} and move away from the {near[0]['name']}."
-    if hurt and _position(facts.get("safe_standing_position", facts.get("last_safe_position"))):
-        options["retreat_safe"] = f"{stop} and go back to the last place where the Body stood safely."
-    options["call_agent"] = f"{stop} and hand control back to the Agent for a new plan."
+        if isinstance(near[0].get("id"), str) and near[0]["id"]:
+            # Said in the option: with only "in melee", a zombie at one block
+            # and an iron sword in hand still lost to fleeing (probe 24/36 vs 36/36).
+            hand = _main_hand(facts)
+            held_with = f" with the {hand} in the main hand" if hand and hand != "nothing" else ""
+            options["engage"] = text(f"fight back against the {near[0]['name']} in melee{held_with}.")
+            inventory = _inventory(facts) or {}
+            held = {str(item).removeprefix("minecraft:"): count for item, count in inventory.items()}
+            weapon = next((weapon for weapon in ("bow", "crossbow") if held.get(weapon, 0) > 0), None)
+            if weapon and held.get("arrow", 0) > 0:
+                options["ranged"] = text(f"shoot the {near[0]['name']} with the {weapon} from the inventory.")
+        options["move_away"] = text(f"move away from the {near[0]['name']}.")
+    safe = facts.get("safe_standing_position", facts.get("last_safe_position"))
+    away = player_distance({"pos": safe}, facts) if _position(safe) else None
+    # Standing there already, going back is no move at all: chosen again and
+    # again, it arrived at once 11 times in 7 s (step5-threat-claude8).
+    if hurt and _position(safe) and (away is None or away > AT_PLACE_BLOCKS):
+        options["retreat_safe"] = text("go back to the last place where the Body stood safely.")
+    return options
+
+
+# What a running protective action is judged on.
+PROTECTION_FACTS = ("body", "threats", "inventory", "main_hand", "position")
+
+
+def protecting_options(facts: Mapping[str, Any], current: str) -> dict[str, str]:
+    """While a protective action runs, every frame asks the protective choice
+    again; the running action is one of the options, not a "keep going".
+    Offered "keep going", Decision kept fleeing at one block while health fell
+    from 18 to 2 (live step5-threat-claude2)."""
+    options = protective_options(facts)
+    if current not in options:
+        options = {current: DEFAULT_ACTION_INTENTS.get(current, current), **options}
+    options["call_agent"] = "Hand control back to the Agent for a new plan."
     return options
 
 
 def after_default_options(
     *, original_call: str, intent: str, default_call: str, result: Mapping[str, Any] | None,
-    facts: Mapping[str, Any] | None = None,
+    facts: Mapping[str, Any] | None = None, protective_choice: str = "",
 ) -> dict[str, str]:
-    """What the Body may do once a protective action has ended."""
+    """What the Body may do once a protective action has ended: go back (or
+    stay), any protective action the facts allow now, owned spare equipment,
+    or the Agent.
+
+    Offered as "Run the same call again", a fight refused at low health was
+    repeated twelve times under a skeleton's arrows (step5-threat-claude4);
+    named beside the others, the replay chose to move away 18/18.  The one
+    that just ended follows the same eligibility as the others: offered
+    anyway, going back to the safe place where the Body already stood was
+    chosen 12 times in a row (step5-threat-claude9)."""
     if dead(facts or {}):
-        return dict(_DEAD_OPTIONS)
+        return {}
     result = result if isinstance(result, Mapping) else {}
     options = {
         "resume": f"Go back to the earlier work, {original_call}" + (f", for: “{intent}”" if intent else "."),
-    }
-    if not (result.get("success") is not True and result.get("canRetry") is False):
-        options["repeat"] = f"Run the same call again: {default_call}."
+    } if original_call else {"stay": idle_options({})["stay"]}
+    options.update(protective_options(facts or {}))
+    options.update(equipment_options(facts or {}, result, call=default_call))
     options["call_agent"] = "Do not go back and hand control back to the Agent for a new plan."
     return options
 
 
-def frame_questions(options: Mapping[str, str]) -> dict[str, Any]:
+def frame_questions(
+    options: Mapping[str, str], *, protecting: bool = False, acting_for_intent: bool = False,
+    interrupt: Mapping[str, Any] | None = None, running_protection: bool = False,
+) -> dict[str, Any]:
     """One request.  The danger question is asked only when a protective
-    action is on offer in this frame."""
-    protective = {key: text for key, text in options.items() if key in PROTECTIVE}
-    normal = {key: text for key, text in options.items() if key not in PROTECTIVE}
+    action is on offer in this frame.  Whether running work has reached its
+    intent is asked in its own request (done_question)."""
+    protective = {key: text for key, text in options.items() if key in PROTECTIVE and not protecting}
+    normal = dict(options) if protecting else {key: text for key, text in options.items() if key not in PROTECTIVE}
     questions: dict[str, Any] = {
-        "q": {"type": "choice", "instructions": "Choose what the Body does next.", "criteria": normal},
+        "q": {"type": "choice", "instructions": (
+            "Choose how the Body protects itself right now." if running_protection
+            else "Choose what the Body does right now to achieve the Agent's intent."
+            if acting_for_intent else "Choose what the Body does next."
+        ), "criteria": normal},
     }
+    if "interrupt" in normal and isinstance(interrupt, Mapping):
+        condition, handler = interrupt.get("condition"), interrupt.get("handler")
+        if isinstance(condition, Mapping) and isinstance(handler, Mapping):
+            questions["q"]["instructions"] += (
+                f" The Agent also says: when “{condition.get('text', '')}”, "
+                f"interrupt the current work and do “{handler.get('intent', '')}”.")
     if protective:
         questions["d"] = {"type": "choice", "instructions": "Is the Body in danger?", "criteria": dict(_DANGER)}
         questions["p"] = {
@@ -331,6 +585,117 @@ def frame_questions(options: Mapping[str, str]) -> dict[str, Any]:
             "criteria": {**protective, **({"call_agent": options["call_agent"]} if "call_agent" in options else {})},
         }
     return questions
+
+
+def interrupt_result_question(*, goal: str, intent: str, original_call: str,
+                              handler_intent: str, handler_call: str,
+                              facts: Mapping[str, Any]) -> dict[str, Any]:
+    state = frame_state(goal=goal, intent=intent, tool="interrupt_handler", params={},
+                        facts=facts, running=False,
+                        result={"success": True, "reason": "handler_completed"})
+    state["finished_call"] = f"The interruption handler for “{handler_intent}” has ended normally."
+    options = after_default_options(
+        original_call=original_call, default_call=handler_call, intent=intent,
+        result={"success": True}, facts=facts)
+    options["repeat"] = f"Do the interruption handler again: “{handler_intent}”, starting with {handler_call}."
+    return {"state": state, "questions": frame_questions(options)}
+
+
+def nearby_players(facts: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    # Native action frames and perception reads use different names for the
+    # same bounded entity sample. An explicit empty sample is authoritative.
+    entities = next((facts[key] for key in ("nearby_entities", "entities", "entities_near")
+                     if isinstance(facts.get(key), (list, tuple))), [])
+    return [item for item in entities
+            if isinstance(item, Mapping)
+            and str(item.get("entity_type", item.get("type", ""))).removeprefix("minecraft:") == "player"]
+
+
+def player_distance(player: Mapping[str, Any], facts: Mapping[str, Any]) -> float | None:
+    if isinstance(player.get("dist"), (int, float)):
+        return float(player["dist"])
+    if isinstance(player.get("dist2"), (int, float)):
+        return max(0, player["dist2"]) ** 0.5
+    here, there = facts.get("position", facts.get("pos")), player.get("pos")
+    if isinstance(here, (list, tuple)) and isinstance(there, (list, tuple)) and len(here) == len(there) == 3:
+        return sum((float(a) - float(b)) ** 2 for a, b in zip(here, there)) ** 0.5
+    return None
+
+
+def idle_options(facts: Mapping[str, Any], *, current: str = "") -> dict[str, str]:
+    """Idle range compiled from generic player/profile facts and protection."""
+    if dead(facts):
+        return {}
+    options = {"keep_going": f"Keep doing the current life activity: {current}."} if current else {}
+    profile = facts.get("life_profile") if isinstance(facts.get("life_profile"), Mapping) else {}
+    players = nearby_players(facts) if profile else []
+    thinking = facts.get("agent_thinking") is True
+    if players:
+        player = players[0]
+        name = str(player.get("name") or player.get("id") or "the nearby player")
+        options["look_player"] = f"Look toward {name} at the observed position."
+        distance = player_distance(player, facts)
+        # This is the existing approach tool's arrival band, not a judgement
+        # about when the life intention has been achieved.
+        if distance is not None and distance > 2:
+            options["approach_player"] = f"Walk to {name} at the observed position."
+        if not thinking:
+            options["follow_player"] = f"Follow {name} as a moving player."
+    home = profile.get("home") if isinstance(profile, Mapping) else None
+    position = _position(facts.get("position", facts.get("pos")))
+    home_pos = _position(home.get("pos")) if isinstance(home, Mapping) else None
+    at_home = False
+    if home_pos and position:
+        at_home = player_distance({"pos": home.get("pos")}, facts) <= AT_PLACE_BLOCKS
+    if home_pos and position and not at_home and not thinking:
+        options["go_home"] = f"Walk to the home position {home_pos}."
+    if not thinking:
+        relationships = profile.get("relationships") or []
+        visible = {str(p.get("name")) for p in players}
+        for relationship in relationships:
+            if isinstance(relationship, Mapping) and relationship.get("player") not in visible:
+                name = str(relationship.get("player") or "")
+                if name:
+                    options.setdefault("seek_player", f"Search nearby for {name} and walk up to them.")
+    options["stay"] = "Stay where the Body is and wait for the next step."
+    options.update(protective_options(facts))
+    if profile:
+        options["call_agent"] = "Hand control back to the Agent for a new direction."
+    return options
+
+
+def idle_question(facts: Mapping[str, Any], options: Mapping[str, str]) -> dict[str, Any]:
+    """Compile idle prose here, alongside the work-frame prose."""
+    state: dict[str, Any] = {"body": _body_sentence(facts)}
+    if facts.get("life_intent"):
+        state["agent_intent"] = f"This is the idle-life intention: “{facts['life_intent']}”."
+    clock = facts.get("time")
+    if isinstance(clock, (int, float)):
+        tick = clock % 24000
+        state["daylight"] = ("It is day." if tick < 12000 or tick >= 23000 else
+                             "It is dusk; night falls soon." if tick < 13000 else "It is night.")
+    players = nearby_players(facts)
+    if players:
+        lines = []
+        for player in players:
+            distance = player_distance(player, facts)
+            name = player.get("name") or player.get("id") or "a nearby player"
+            lines.append(f"Player {name} is {distance:.0f} blocks away." if distance is not None
+                         else f"Player {name} is in view.")
+        state["players"] = " ".join(lines)
+    threats = _threat_sentence(facts)
+    if threats:
+        state["threats"] = threats
+    inventory = _inventory(facts)
+    if inventory is not None:
+        state["inventory"] = ", ".join(f"{k} {v}" for k, v in inventory.items()) or "empty"
+    hand = _main_hand(facts)
+    if hand:
+        state["main_hand"] = hand
+    position = _position(facts.get("position", facts.get("pos")))
+    if position:
+        state["position"] = f"now at {position}."
+    return {"state": state, "questions": frame_questions(options)}
 
 
 def only_option(questions: Mapping[str, Any]) -> str | None:
@@ -350,14 +715,87 @@ def frame_choice(raw: Mapping[str, Any] | None, questions: Mapping[str, Any]) ->
         answer = answers.get(name)
         choice = answer.get("choice") if isinstance(answer, Mapping) else None
         allowed = (questions.get(name) or {}).get("criteria") or {}
-        return str(choice) if choice in allowed else None
+        return choice if isinstance(choice, str) and choice in allowed else None
 
-    name = "p" if "d" in questions and chosen("d") == "in_danger" else "q"
+    name = "q"
+    if "d" in questions:
+        danger = chosen("d")
+        if danger not in {"safe", "in_danger"}:
+            return "unknown"
+        if danger == "in_danger":
+            name = "p"
     return chosen(name) or "unknown"
+
+
+def in_danger(raw: Mapping[str, Any] | None, questions: Mapping[str, Any]) -> bool:
+    """Whether this answer took the protective branch."""
+    answers = raw.get("answers") if isinstance(raw, Mapping) else None
+    answer = answers.get("d") if isinstance(answers, Mapping) else None
+    return "d" in questions and isinstance(answer, Mapping) and answer.get("choice") == "in_danger"
+
+
+# Facts that can show an intent.  The 4B single-pass Decision compares an
+# intent with them correctly only when nothing else is in view: the progress
+# line ("inventory changed: oak_log +3") reads as "done" to it, and so do the
+# task and the call text (docs/references/reflex-always-on-20261012/
+# decision-capability-20261014.md).
+_DONE_FACTS = ("inventory", "main_hand", "position")
+
+
+def done_question(state: Mapping[str, Any], intent: str) -> dict[str, Any]:
+    """Whether running work has reached its intent, asked in its own request
+    with only the facts the intent can be checked against."""
+    small: dict[str, Any] = {"agent_intent": f"The Agent wants the following result: “{intent}”."}
+    small.update({key: state[key] for key in _DONE_FACTS if state.get(key)})
+    return {"state": small, "questions": {"a": {"type": "choice", "instructions": (
+        "Compare each part of the result the Agent wants with the inventory and Body facts above. "
+        "Do the facts already show every part of it?"
+    ), "criteria": {
+        "shown": f"Yes: the facts above already show “{intent}”.",
+        "not_shown": f"No: the facts above do not show all of “{intent}” yet.",
+    }}}}
+
+
+def return_place_question(*, work_call: str, intent: str, before: Any, now: Any) -> dict[str, Any] | None:
+    """Whether danger stopped the work again where it stopped it before the
+    Body last went back.  The 4B Decision compares two places well but not
+    a count of interruptions; whether to risk going back again is then the
+    Agent's (decision-capability-20261014.md)."""
+    before_at, now_at = _position(before), _position(now)
+    if not before_at or not now_at:
+        return None
+    return {"state": {
+        "agent_intent": f"The earlier work was for: “{intent}”." if intent else f"The earlier work was {work_call}.",
+        "last_return": f"Before the Body last went back to {work_call}, danger stopped it at {before_at}.",
+        "this_interruption": f"Now danger has stopped it again at {now_at}.",
+    }, "questions": {"r": {"type": "choice", "instructions": (
+        "Compare the two places. Did danger stop the work again at about the same place?"
+    ), "criteria": {
+        "same": "Yes: about the same place as before the last return.",
+        "different": "No: somewhere else.",
+    }}}}
+
+
+def return_place_choice(raw: Mapping[str, Any] | None) -> str | None:
+    answers = raw.get("answers") if isinstance(raw, Mapping) else None
+    answer = answers.get("r") if isinstance(answers, Mapping) else None
+    choice = answer.get("choice") if isinstance(answer, Mapping) else None
+    return choice if choice in {"same", "different"} else None
+
+
+def done_choice(raw: Mapping[str, Any] | None) -> str | None:
+    """"shown" / "not_shown", or None when there is no valid answer."""
+    answers = raw.get("answers") if isinstance(raw, Mapping) else None
+    answer = answers.get("a") if isinstance(answers, Mapping) else None
+    choice = answer.get("choice") if isinstance(answer, Mapping) else None
+    return choice if choice in {"shown", "not_shown"} else None
 
 
 __all__ = [
     "PROTECTIVE", "VitalWindow", "after_default_options", "attempt_lines", "call_text", "frame_choice",
+    "protecting_options", "PROTECTION_FACTS",
     "frame_options", "frame_questions", "frame_state", "hostiles", "just_hurt",
+    "idle_options", "idle_question", "done_question", "done_choice", "in_danger",
+    "return_place_question", "return_place_choice",
     "only_option", "result_sentence",
 ]

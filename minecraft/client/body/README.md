@@ -7,7 +7,7 @@ backend until a caller selects the `real_client` provider.
 
 The supported tuple is Minecraft `26.1.2`, Fabric Loader `0.19.3`, Fabric API
 `0.152.1+26.1.2`, Java `25`, and Baritone `v1.18.0` with the narrow MineBot
-execution patch (`1.18.0+minebot.1`). Gradle builds the unoptimized Fabric jar
+execution patch (`1.18.0+minebot.2`). Gradle builds the unoptimized Fabric jar
 from upstream commit `016cc210434894f371baf0c327ac94907d12dcd3` using
 [tools/build_baritone.py](../../../tools/build_baritone.py) and the checked-in
 patch. Only `PathExecutor` changes: preserve required clearing before the

@@ -1,0 +1,238 @@
+............................................ [  1%]
+....................................... [  3%]
+.................................................................. [  5%]
+...................................................................... [  8%]
+.................................................................. [ 11%]
+........................................................................ [ 14%]
+...................................................................... [ 17%]
+.................................................................. [ 19%]
+........................................................................ [ 22%]
+........................................................................ [ 25%]
+........................................................................ [ 28%]
+........................................................................ [ 31%]
+.................................................................... [ 34%]
+........................................................................ [ 37%]
+........................................................................ [ 39%]
+........................................................................ [ 42%]
+............................................... [ 44%]
+.................................................. [ 46%]
+.................................................................. [ 49%]
+..................................... [ 50%]
+........................................................................ [ 53%]
+........................................................................ [ 56%]
+.....................................s.................................. [ 59%]
+........................................................................ [ 62%]
+........................................................................ [ 65%]
+.................................................................. [ 68%]
+....................................................... [ 70%]
+........................................................................ [ 73%]
+........................................................................ [ 76%]
+........................................................................ [ 78%]
+........................................................................ [ 81%]
+................................................................... [ 84%]
+........................................................ [ 86%]
+........................................................................ [ 89%]
+........................................................................ [ 92%]
+........................................................................ [ 95%]
+........................................................................ [ 98%]
+.......................................                                  [100%]
+=================================== FAILURES ===================================
+_ ResponsesKernelTests.test_http_keepalive_survives_event_gap_but_idle_and_eof_fail (mode='keepalive') _
+
+    @contextlib.contextmanager
+    def map_httpcore_exceptions() -> typing.Iterator[None]:
+        global HTTPCORE_EXC_MAP
+        if len(HTTPCORE_EXC_MAP) == 0:
+            HTTPCORE_EXC_MAP = _load_httpcore_exceptions()
+        try:
+>           yield
+
+../MineBot/.venv/lib/python3.13/site-packages/httpx/_transports/default.py:101: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+../MineBot/.venv/lib/python3.13/site-packages/httpx/_transports/default.py:271: in __aiter__
+    async for part in self._httpcore_stream:
+../MineBot/.venv/lib/python3.13/site-packages/httpcore/_async/connection_pool.py:407: in __aiter__
+    raise exc from None
+../MineBot/.venv/lib/python3.13/site-packages/httpcore/_async/connection_pool.py:403: in __aiter__
+    async for part in self._stream:
+../MineBot/.venv/lib/python3.13/site-packages/httpcore/_async/http11.py:342: in __aiter__
+    raise exc
+../MineBot/.venv/lib/python3.13/site-packages/httpcore/_async/http11.py:334: in __aiter__
+    async for chunk in self._connection._receive_response_body(**kwargs):
+../MineBot/.venv/lib/python3.13/site-packages/httpcore/_async/http11.py:203: in _receive_response_body
+    event = await self._receive_event(timeout=timeout)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+../MineBot/.venv/lib/python3.13/site-packages/httpcore/_async/http11.py:217: in _receive_event
+    data = await self._network_stream.read(
+../MineBot/.venv/lib/python3.13/site-packages/httpcore/_backends/anyio.py:32: in read
+    with map_exceptions(exc_map):
+         ^^^^^^^^^^^^^^^^^^^^^^^
+../miniconda3/lib/python3.13/contextlib.py:162: in __exit__
+    self.gen.throw(value)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+map = {<class 'TimeoutError'>: <class 'httpcore.ReadTimeout'>, <class 'anyio.BrokenResourceError'>: <class 'httpcore.ReadErr... 'anyio.ClosedResourceError'>: <class 'httpcore.ReadError'>, <class 'anyio.EndOfStream'>: <class 'httpcore.ReadError'>}
+
+    @contextlib.contextmanager
+    def map_exceptions(map: ExceptionMapping) -> typing.Iterator[None]:
+        try:
+            yield
+        except Exception as exc:  # noqa: PIE786
+            for from_exc, to_exc in map.items():
+                if isinstance(exc, from_exc):
+>                   raise to_exc(exc) from exc
+E                   httpcore.ReadTimeout
+
+../MineBot/.venv/lib/python3.13/site-packages/httpcore/_exceptions.py:14: ReadTimeout
+
+The above exception was the direct cause of the following exception:
+
+self = <minebot.app.responses_kernel._HttpResponsesConnection object at 0x7ae6203db2f0>
+payload = {'model': 'test', 'instructions': 'Local stream test', 'tools': [], 'input': [{'role': 'user', 'content': 'hello'}], ...}
+observation = <minebot.app.responses_observation.RequestObservation object at 0x7ae6452ac110>
+
+    async def _stream(self, payload: dict[str, Any], observation: RequestObservation | None = None) -> None:
+        output_start = len(self.history)
+        started, last_event = time.monotonic(), "none"
+        terminal = False
+        obs = observation or RequestObservation(self.emit)
+        token = current_observation.set(obs)
+        try:
+            async with await self.client.responses.create(**payload) as stream:
+                response = getattr(stream, "response", None)
+                if response is not None:
+                    self.emit("responses_http_open", request_key=obs.request_key, http_version=response.http_version,
+                              status_code=response.status_code,
+                              latency_s=round(time.monotonic() - started, 3))
+>               async for item in stream:
+
+minebot/app/responses_kernel.py:222: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+../MineBot/.venv/lib/python3.13/site-packages/openai/_streaming.py:158: in __aiter__
+    async for item in self._iterator:
+../MineBot/.venv/lib/python3.13/site-packages/openai/_streaming.py:172: in __stream__
+    async for sse in iterator:
+../MineBot/.venv/lib/python3.13/site-packages/openai/_streaming.py:162: in _iter_events
+    async for sse in self._decoder.aiter_bytes(self.response.aiter_bytes()):
+../MineBot/.venv/lib/python3.13/site-packages/openai/_streaming.py:319: in aiter_bytes
+    async for chunk in self._aiter_chunks(iterator):
+../MineBot/.venv/lib/python3.13/site-packages/openai/_streaming.py:330: in _aiter_chunks
+    async for chunk in iterator:
+../MineBot/.venv/lib/python3.13/site-packages/httpx/_models.py:997: in aiter_bytes
+    async for raw_bytes in self.aiter_raw():
+../MineBot/.venv/lib/python3.13/site-packages/httpx/_models.py:1055: in aiter_raw
+    async for raw_stream_bytes in self.stream:
+minebot/app/responses_observation.py:151: in __aiter__
+    async for chunk in self.stream:
+../MineBot/.venv/lib/python3.13/site-packages/httpx/_client.py:176: in __aiter__
+    async for chunk in self._stream:
+../MineBot/.venv/lib/python3.13/site-packages/httpx/_transports/default.py:270: in __aiter__
+    with map_httpcore_exceptions():
+         ^^^^^^^^^^^^^^^^^^^^^^^^^
+../miniconda3/lib/python3.13/contextlib.py:162: in __exit__
+    self.gen.throw(value)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    @contextlib.contextmanager
+    def map_httpcore_exceptions() -> typing.Iterator[None]:
+        global HTTPCORE_EXC_MAP
+        if len(HTTPCORE_EXC_MAP) == 0:
+            HTTPCORE_EXC_MAP = _load_httpcore_exceptions()
+        try:
+            yield
+        except Exception as exc:
+            mapped_exc = None
+    
+            for from_exc, to_exc in HTTPCORE_EXC_MAP.items():
+                if not isinstance(exc, from_exc):
+                    continue
+                # We want to map to the most specific exception we can find.
+                # Eg if `exc` is an `httpcore.ReadTimeout`, we want to map to
+                # `httpx.ReadTimeout`, not just `httpx.TimeoutException`.
+                if mapped_exc is None or issubclass(to_exc, mapped_exc):
+                    mapped_exc = to_exc
+    
+            if mapped_exc is None:  # pragma: no cover
+                raise
+    
+            message = str(exc)
+>           raise mapped_exc(message) from exc
+E           httpx.ReadTimeout
+
+../MineBot/.venv/lib/python3.13/site-packages/httpx/_transports/default.py:118: ReadTimeout
+
+The above exception was the direct cause of the following exception:
+
+self = <test_responses_kernel.ResponsesKernelTests testMethod=test_http_keepalive_survives_event_gap_but_idle_and_eof_fail>
+
+    async def test_http_keepalive_survives_event_gap_but_idle_and_eof_fail(self):
+        from minebot.app.responses_observation import observe_http_request, observe_http_response
+        # Real SDK and loopback SSE: MockTransport cannot enforce socket read
+        # timeouts, and its event iterator cannot represent filtered comments.
+        for mode in ("keepalive", "silent", "eof"):
+            with self.subTest(mode=mode):
+                handlers, heartbeats = [], []
+                async def serve(reader, writer):
+                    handlers.append(asyncio.current_task())
+                    try:
+                        headers = await reader.readuntil(b"\r\n\r\n")
+                        length = next(int(line.split(b":", 1)[1]) for line in headers.split(b"\r\n")
+                                      if line.lower().startswith(b"content-length:"))
+                        await reader.readexactly(length)
+                        writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n")
+                        async def send(event):
+                            writer.write(("data: " + json.dumps(event) + "\n\n").encode())
+                            await writer.drain()
+                        await send(created("loopback"))
+                        if mode == "eof":
+                            return
+                        for _ in range(10):
+                            await asyncio.sleep(0.025)
+                            if mode == "keepalive":
+                                writer.write(b": keepalive\n\n")
+                                await writer.drain()
+                                heartbeats.append(True)
+                        await send(terminal("loopback"))
+                    except ConnectionError:
+                        pass
+                    finally:
+                        writer.close()
+                        await writer.wait_closed()
+                server = await asyncio.start_server(serve, "127.0.0.1", 0)
+                port = server.sockets[0].getsockname()[1]
+                observations = []
+                client = AsyncOpenAI(api_key="local-test", base_url=f"http://127.0.0.1:{port}/v1",
+                                      max_retries=0, timeout=httpx.Timeout(0.1, connect=1),
+                                      http_client=httpx.AsyncClient(trust_env=False,
+                                          event_hooks={"request": [observe_http_request], "response": [observe_http_response]}))
+                async def instructions(): return "Local stream test"
+                kernel = ResponsesKernel(client=client, model="test", tools=lambda: [],
+                    instructions=instructions, invoke=None, emit=lambda event, **kw: observations.append((event, kw)),
+                    speak=lambda text: None, transport="http", request_timeout_s=0.1)
+                try:
+                    if mode == "keepalive":
+>                       result = await asyncio.wait_for(kernel.run("hello"), 3)
+                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/unit/test_responses_kernel.py:159: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+../miniconda3/lib/python3.13/asyncio/tasks.py:507: in wait_for
+    return await fut
+           ^^^^^^^^^
+minebot/app/responses_kernel.py:555: in run
+    event = json.loads(reader.result())
+                       ^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <minebot.app.responses_kernel._HttpResponsesConnection object at 0x7ae6203db2f0>
+
+    async def recv_bytes(self) -> bytes:
+        event = await self.events.get()
+        if isinstance(event, Exception):
+>           raise event
+E           minebot.app.responses_kernel.ResponsesTransportError: HTTP Responses stream interrupted (ReadTimeout, last_event=response.created):
+
+minebot/app/responses_kernel.py:299: ResponsesTransportError
+=========================== short test summary info ============================
+SUBFAILED(mode='keepalive') tests/unit/test_responses_kernel.py::ResponsesKernelTests::test_http_keepalive_survives_event_gap_but_idle_and_eof_fail
+1 failed, 2483 passed, 1 skipped, 290 subtests passed in 1412.58s (0:23:32)

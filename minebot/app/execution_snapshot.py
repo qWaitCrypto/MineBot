@@ -48,6 +48,16 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
+
+def _entity_distance(entity: object) -> float:
+    if not isinstance(entity, Mapping):
+        return float("inf")
+    dist2 = entity.get("dist2")
+    if isinstance(dist2, (int, float)):
+        return float(dist2)
+    dist = entity.get("dist", entity.get("distance"))
+    return float(dist) ** 2 if isinstance(dist, (int, float)) else float("inf")
+
 class _Operation:
     def __init__(self, operation_id: str, tool: str, arguments: Mapping[str, Any]) -> None:
         self.operation_id = operation_id
@@ -256,7 +266,7 @@ class ExecutionSnapshots:
         inventory = payload.get("inventory")
         if not isinstance(inventory, Mapping):
             inventory = payload.get("inventory_counts")
-        if not payload.get("lite") and isinstance(inventory, Mapping) and payload.get("inventory_complete") is not False:
+        if (not payload.get("lite") or payload.get("inventory_complete") is True) and isinstance(inventory, Mapping) and payload.get("inventory_complete") is not False:
             counts = {str(key): int(value) for key, value in inventory.items() if isinstance(value, int)}
             if op.inventory is None:
                 op.start_inventory = dict(counts)
@@ -303,15 +313,22 @@ class ExecutionSnapshots:
             "any_process_active", "scaffold_blocks", "health", "food", "oxygen",
             # These are ambient survival and safety facts.  They are copied
             # from the Body frame; the snapshot does not infer them.
-            "in_water", "submerged", "water", "safe_standing_position",
+            "in_water", "submerged", "water", "on_ground", "head_in_liquid", "safe_standing_position",
             "last_safe_position", "food_available", "food_item",
             "nearest_hostile_position",
         ):
             if key in payload:
                 facts[key] = payload[key]
-        for key in ("nearby_entities", "nearby_hostiles", "entities", "hostiles"):
+        entity_keys = ("nearby_entities", "nearby_hostiles", "entities", "hostiles")
+        if any(key in payload and isinstance(payload[key], (list, tuple)) for key in entity_keys):
+            for key in entity_keys:
+                facts.pop(key, None)
+        for key in entity_keys:
             if key in payload and isinstance(payload[key], (list, tuple)):
-                facts[key] = list(payload[key])[:32]
+                # Nearest first, as the perception read does: the native list
+                # arrives in no particular order, and cutting it at 32 dropped a
+                # skeleton 8 blocks away while it was shooting (step6 claude2).
+                facts[key] = sorted(payload[key], key=_entity_distance)[:32]
         active = [name for name, field in PROCESS_FIELDS.items() if payload.get(field) is True]
         if any(field in payload for field in PROCESS_FIELDS.values()):
             facts["processes"] = active

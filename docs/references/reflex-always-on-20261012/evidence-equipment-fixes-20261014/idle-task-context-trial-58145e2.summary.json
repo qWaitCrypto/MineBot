@@ -1,0 +1,10 @@
+{
+  "baseline": {
+    "recorded": "call_agent",
+    "selected": "call_agent",
+    "matched": true
+  },
+  "distribution": {
+    "keep_going": 12
+  }
+}

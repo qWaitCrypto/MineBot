@@ -1,0 +1,23 @@
+[
+  {
+    "action_id": "7784e535-8eaa-4811-b4f9-f92a4f33d0f6",
+    "action_kind": null,
+    "reason": "goal_reached",
+    "elapsed_ms": 858,
+    "sampled_at_ms": 1791948107825
+  },
+  {
+    "action_id": "bf0bc71d-514e-4ad2-afd0-c07a19760d66",
+    "action_kind": "engageEntity",
+    "reason": "tool_broke",
+    "elapsed_ms": 148,
+    "sampled_at_ms": 1791948111568
+  },
+  {
+    "action_id": "1af01df9-6da1-4537-9058-5ee592b607cb",
+    "action_kind": "engageEntity",
+    "reason": "killed",
+    "elapsed_ms": 1955,
+    "sampled_at_ms": 1791948114912
+  }
+]

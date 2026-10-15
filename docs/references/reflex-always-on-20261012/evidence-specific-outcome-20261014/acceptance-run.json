@@ -1,0 +1,21 @@
+{
+  "code_commit": "c0ed3ee9b6774d7377d8aac450e1e212cc7d0197",
+  "code_dirty": false,
+  "world": "step5-next-edc89ff-20261014",
+  "fresh_world": false,
+  "empty_inventory": false,
+  "ports": [
+    25569,
+    25579,
+    8771
+  ],
+  "bot": "Step5NextBot",
+  "server_pid": 2290854,
+  "launcher_pid": 2301939,
+  "owner_pid": 2301928,
+  "started_at": 1791955212.029808,
+  "model": "deepseek-v4.1-flash",
+  "kernel": "sdk",
+  "goal": null,
+  "scope": "Corrected harness after 240s startup window expired; reuse owned server 2290854 from specific-outcome; retained artificial platform; fresh SDK state; no acceptance evidence from aborted startup."
+}

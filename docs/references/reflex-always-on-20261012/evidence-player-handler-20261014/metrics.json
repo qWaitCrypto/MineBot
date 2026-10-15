@@ -1,0 +1,215 @@
+{
+  "source": "/home/qwait/MineBot-always-on/logs/reflex-always-on-20261014-player-handler-fixed/trace.jsonl",
+  "seq_end": 983,
+  "elapsed_s": 61.314441204071045,
+  "requests_by_purpose": {
+    "idle_frame": 16,
+    "running_frame": 23,
+    "plan_result_frame": 4
+  },
+  "requests_by_loop_state": {
+    "idle": 21,
+    "work": 22
+  },
+  "requests_by_state_and_purpose": {
+    "idle / idle_frame": 16,
+    "idle / running_frame": 1,
+    "work / running_frame": 22,
+    "idle / plan_result_frame": 4
+  },
+  "requests_per_session_minute_by_loop_state": {
+    "idle": 20.549808091806288,
+    "work": 21.5283703818923
+  },
+  "requests_per_minute_buckets": [
+    {
+      "minute_from_trace_start": 0,
+      "observed_seconds": 60,
+      "counts_by_state_and_purpose": {
+        "idle / idle_frame": 15,
+        "idle / running_frame": 1,
+        "work / running_frame": 22,
+        "idle / plan_result_frame": 4
+      }
+    },
+    {
+      "minute_from_trace_start": 1,
+      "observed_seconds": 1.314441204071045,
+      "counts_by_state_and_purpose": {
+        "idle / idle_frame": 1
+      }
+    }
+  ],
+  "loop_state_seconds": {
+    "idle": 40.757948875427246,
+    "work": 20.5564923286438
+  },
+  "requests_per_session_minute_by_purpose": {
+    "idle_frame": 15.65699664137622,
+    "running_frame": 22.506932671978316,
+    "plan_result_frame": 3.914249160344055
+  },
+  "requests_per_observed_body_work_minute_by_purpose": {
+    "idle_frame": 49.2131030656618,
+    "running_frame": 70.74383565688883,
+    "plan_result_frame": 12.30327576641545
+  },
+  "requests_during_observed_body_work_by_purpose": {
+    "running_frame": 21
+  },
+  "requests_during_observed_body_work_per_minute_by_purpose": {
+    "running_frame": 64.59219777368111
+  },
+  "rate_accounting": "Session-normalized rates include all requests. Total requests divided by observed work time measures overhead, not work cadence. The during-work rate restricts the numerator to requests inside observed native work intervals.",
+  "native_action_count": 4,
+  "observed_native_work_s": 19.506999969482422,
+  "idle_remainder_estimate_s": 41.80744123458862,
+  "supervised_body_call_s": 21.16699981689453,
+  "outside_supervised_body_calls_s": 40.147441387176514,
+  "supervised_call_timing_method": "Union of completed supervised-call intervals; includes tool execution and its settlement, not proof of physical movement. Native terminals missing elapsed_ms are excluded from native work time, never treated as proof that the Body was idle.",
+  "timing_method": "Union of native terminal elapsed_ms intervals, deduplicated by action_id; IPC receipt is the end timestamp. Idle remainder and no-question gap are estimates; missing native terminals are not counted as work.",
+  "longest_estimated_idle_without_any_question_s": 15.467917442321777,
+  "longest_idle_state_without_any_question_s": 15.467917442321777,
+  "idle_state_gap_method": "idle is the loop state, and may contain life movement. This measurement excludes dead/work intervals but includes session startup.",
+  "largest_request_gaps": [
+    {
+      "before_seq": 49,
+      "after_seq": 139,
+      "seconds": 15.467917442321777
+    },
+    {
+      "before_seq": 166,
+      "after_seq": 333,
+      "seconds": 2.631821870803833
+    },
+    {
+      "before_seq": 386,
+      "after_seq": 549,
+      "seconds": 2.4817655086517334
+    },
+    {
+      "before_seq": 862,
+      "after_seq": 890,
+      "seconds": 2.385310649871826
+    },
+    {
+      "before_seq": 591,
+      "after_seq": 686,
+      "seconds": 1.4805576801300049
+    },
+    {
+      "before_seq": 43,
+      "after_seq": 49,
+      "seconds": 1.2831430435180664
+    },
+    {
+      "before_seq": 351,
+      "after_seq": 360,
+      "seconds": 1.2292931079864502
+    },
+    {
+      "before_seq": 853,
+      "after_seq": 862,
+      "seconds": 1.2252528667449951
+    },
+    {
+      "before_seq": 566,
+      "after_seq": 575,
+      "seconds": 1.2249200344085693
+    },
+    {
+      "before_seq": 152,
+      "after_seq": 157,
+      "seconds": 1.2003741264343262
+    }
+  ],
+  "default_actions_requested": {
+    "look_player": 1
+  },
+  "default_actions_finished": {
+    "look_player": 1
+  },
+  "action_accounting": "Answers are semantic selections, default_requested is an attempted action dispatch, and native_action_count is observed execution. They are not interchangeable.",
+  "answers": {
+    "unknown": 1,
+    "stay": 14,
+    "look_player": 1,
+    "keep_going": 17,
+    "next_step": 4,
+    "interrupt": 2,
+    "resume": 1
+  },
+  "unknown_ratio": 0.025,
+  "decision_ms_median": 133.1735,
+  "agent_delivery_counts": {
+    "reflex_fact_wake": 1
+  },
+  "agent_deliveries": [
+    {
+      "seq": 888,
+      "event": "reflex_fact_wake",
+      "reason": null,
+      "status": "completed",
+      "kind": null,
+      "activity_id": "activity-4d1037598cdc4128b3b8df12112fa144",
+      "body_event": null
+    }
+  ],
+  "runtime_intent_wakes": [],
+  "wake_accounting": "reflex_death is a death observation, not a wake. agent_start counts launches/turn entries, not delivery events. Distinct deliveries can be coalesced into a model turn.",
+  "agent_start_count": 2,
+  "delegate_work": 1,
+  "read_reflex": 0,
+  "state_switches": 10,
+  "reaction_chains": [],
+  "deaths": [],
+  "last_body": {
+    "seq": 889,
+    "pos": [
+      206.74,
+      121.0,
+      220.5
+    ],
+    "health": 20.0,
+    "food": 20,
+    "oxygen": 300
+  },
+  "agent_tool_calls": {
+    "delegate_work": 1,
+    "checkpoint_task": 1,
+    "read_task": 1
+  },
+  "distinct_decision_actions": [
+    "interrupt",
+    "look_player",
+    "resume"
+  ],
+  "failure": {
+    "premature_stop_request_seq": 862,
+    "expected": "keep_going",
+    "target_position": [
+      220,
+      121,
+      220
+    ],
+    "native_final_position": [
+      206.74008212499456,
+      121,
+      220.50075239384566
+    ],
+    "runtime_terminal_status": "completed",
+    "task_physically_completed": false
+  },
+  "native_client_timing": {
+    "terminal_count": 4,
+    "observed_work_s": 19.506999969482422,
+    "remainder_s": 41.80744123458862,
+    "requests_during_work": {
+      "running_frame": 20
+    },
+    "requests_per_work_minute": {
+      "running_frame": 61.51637883207725
+    },
+    "limitation": "Union of terminal intervals; remainder includes startup, settlement and missing terminals."
+  }
+}

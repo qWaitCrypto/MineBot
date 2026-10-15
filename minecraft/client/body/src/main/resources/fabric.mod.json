@@ -18,6 +18,6 @@
     "fabricloader": ">=0.19.3",
     "minecraft": "26.1.2",
     "fabric-api": "*",
-    "baritone": "=1.18.0+minebot.1"
+    "baritone": "=1.18.0+minebot.2"
   }
 }

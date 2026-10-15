@@ -1,0 +1,2190 @@
+{
+  "source": "/home/qwait/MineBot-always-on/logs/reflex-always-on-20261014-step7-current-f/trace.jsonl",
+  "frame_count": 109,
+  "questions_equal": 109,
+  "old_raw_binding_available": 0,
+  "asked_frame_binding_available": 109,
+  "scope": "Recorded choices, raw frame reconstruction and deterministic binding; no new model judgement and no physical execution.",
+  "frames": [
+    {
+      "request_seq": 2957,
+      "answer_seq": 2962,
+      "tool_call_id": "reflex-life-213",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 2972,
+      "answer_seq": 2977,
+      "tool_call_id": "reflex-life-214",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 2988,
+      "answer_seq": 2993,
+      "tool_call_id": "reflex-life-215",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 3003,
+      "answer_seq": 3008,
+      "tool_call_id": "reflex-life-216",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 3019,
+      "answer_seq": 3024,
+      "tool_call_id": "reflex-life-217",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 3034,
+      "answer_seq": 3039,
+      "tool_call_id": "reflex-life-218",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 3049,
+      "answer_seq": 3055,
+      "tool_call_id": "reflex-life-219",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 3065,
+      "answer_seq": 3070,
+      "tool_call_id": "reflex-life-220",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 3080,
+      "answer_seq": 3085,
+      "tool_call_id": "reflex-life-221",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 3096,
+      "answer_seq": 3101,
+      "tool_call_id": "reflex-life-222",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 3111,
+      "answer_seq": 3116,
+      "tool_call_id": "reflex-life-223",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 3126,
+      "answer_seq": 3132,
+      "tool_call_id": "reflex-life-224",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 3142,
+      "answer_seq": 3147,
+      "tool_call_id": "reflex-life-225",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 3157,
+      "answer_seq": 3162,
+      "tool_call_id": "reflex-life-226",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 3173,
+      "answer_seq": 3178,
+      "tool_call_id": "reflex-life-227",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 3188,
+      "answer_seq": 3193,
+      "tool_call_id": "reflex-life-228",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 3203,
+      "answer_seq": 3208,
+      "tool_call_id": "reflex-life-229",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 3219,
+      "answer_seq": 3224,
+      "tool_call_id": "reflex-life-230",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 3234,
+      "answer_seq": 3237,
+      "tool_call_id": "reflex-life-231",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 3250,
+      "answer_seq": 3255,
+      "tool_call_id": "reflex-life-232",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 3265,
+      "answer_seq": 3270,
+      "tool_call_id": "reflex-life-233",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 3281,
+      "answer_seq": 3286,
+      "tool_call_id": "reflex-life-234",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 3296,
+      "answer_seq": 3301,
+      "tool_call_id": "reflex-life-235",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 3312,
+      "answer_seq": 3317,
+      "tool_call_id": "reflex-life-236",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 3327,
+      "answer_seq": 3332,
+      "tool_call_id": "reflex-life-237",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 3342,
+      "answer_seq": 3348,
+      "tool_call_id": "reflex-life-238",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 3358,
+      "answer_seq": 3363,
+      "tool_call_id": "reflex-life-239",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 3375,
+      "answer_seq": 3381,
+      "tool_call_id": "reflex-life-240",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 3391,
+      "answer_seq": 3396,
+      "tool_call_id": "reflex-life-241",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 3407,
+      "answer_seq": 3412,
+      "tool_call_id": "reflex-life-242",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 3422,
+      "answer_seq": 3427,
+      "tool_call_id": "reflex-life-243",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 3438,
+      "answer_seq": 3443,
+      "tool_call_id": "reflex-life-244",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 3453,
+      "answer_seq": 3458,
+      "tool_call_id": "reflex-life-245",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 3469,
+      "answer_seq": 3474,
+      "tool_call_id": "reflex-life-246",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 3484,
+      "answer_seq": 3489,
+      "tool_call_id": "reflex-life-247",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 3500,
+      "answer_seq": 3505,
+      "tool_call_id": "reflex-life-248",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 3515,
+      "answer_seq": 3520,
+      "tool_call_id": "reflex-life-249",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 3531,
+      "answer_seq": 3536,
+      "tool_call_id": "reflex-life-250",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 3546,
+      "answer_seq": 3551,
+      "tool_call_id": "reflex-life-251",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 3562,
+      "answer_seq": 3567,
+      "tool_call_id": "reflex-life-252",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 3577,
+      "answer_seq": 3582,
+      "tool_call_id": "reflex-life-253",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 3593,
+      "answer_seq": 3598,
+      "tool_call_id": "reflex-life-254",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 3608,
+      "answer_seq": 3613,
+      "tool_call_id": "reflex-life-255",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 3624,
+      "answer_seq": 3629,
+      "tool_call_id": "reflex-life-256",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 3639,
+      "answer_seq": 3644,
+      "tool_call_id": "reflex-life-257",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 3654,
+      "answer_seq": 3660,
+      "tool_call_id": "reflex-life-258",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 3670,
+      "answer_seq": 3675,
+      "tool_call_id": "reflex-life-259",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 3685,
+      "answer_seq": 3691,
+      "tool_call_id": "reflex-life-260",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 3701,
+      "answer_seq": 3706,
+      "tool_call_id": "reflex-life-261",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 3716,
+      "answer_seq": 3721,
+      "tool_call_id": "reflex-life-262",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 3732,
+      "answer_seq": 3737,
+      "tool_call_id": "reflex-life-263",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 3747,
+      "answer_seq": 3752,
+      "tool_call_id": "reflex-life-264",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 3763,
+      "answer_seq": 3768,
+      "tool_call_id": "reflex-life-265",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 3778,
+      "answer_seq": 3783,
+      "tool_call_id": "reflex-life-266",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 3793,
+      "answer_seq": 3799,
+      "tool_call_id": "reflex-life-267",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 3809,
+      "answer_seq": 3814,
+      "tool_call_id": "reflex-life-268",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 3824,
+      "answer_seq": 3830,
+      "tool_call_id": "reflex-life-269",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 3840,
+      "answer_seq": 3845,
+      "tool_call_id": "reflex-life-270",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 3855,
+      "answer_seq": 3860,
+      "tool_call_id": "reflex-life-271",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 3871,
+      "answer_seq": 3876,
+      "tool_call_id": "reflex-life-272",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 3886,
+      "answer_seq": 3891,
+      "tool_call_id": "reflex-life-273",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 3902,
+      "answer_seq": 3907,
+      "tool_call_id": "reflex-life-274",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 3917,
+      "answer_seq": 3922,
+      "tool_call_id": "reflex-life-275",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 3933,
+      "answer_seq": 3938,
+      "tool_call_id": "reflex-life-276",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 3948,
+      "answer_seq": 3953,
+      "tool_call_id": "reflex-life-277",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 3963,
+      "answer_seq": 3968,
+      "tool_call_id": "reflex-life-278",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 3979,
+      "answer_seq": 3984,
+      "tool_call_id": "reflex-life-279",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 3994,
+      "answer_seq": 3999,
+      "tool_call_id": "reflex-life-280",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 4010,
+      "answer_seq": 4015,
+      "tool_call_id": "reflex-life-281",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 4025,
+      "answer_seq": 4030,
+      "tool_call_id": "reflex-life-282",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 4041,
+      "answer_seq": 4046,
+      "tool_call_id": "reflex-life-283",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 4056,
+      "answer_seq": 4061,
+      "tool_call_id": "reflex-life-284",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 4072,
+      "answer_seq": 4077,
+      "tool_call_id": "reflex-life-285",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 4087,
+      "answer_seq": 4092,
+      "tool_call_id": "reflex-life-286",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 4103,
+      "answer_seq": 4108,
+      "tool_call_id": "reflex-life-287",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 4118,
+      "answer_seq": 4123,
+      "tool_call_id": "reflex-life-288",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 4134,
+      "answer_seq": 4139,
+      "tool_call_id": "reflex-life-289",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 4149,
+      "answer_seq": 4154,
+      "tool_call_id": "reflex-life-290",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 4164,
+      "answer_seq": 4169,
+      "tool_call_id": "reflex-life-291",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 4180,
+      "answer_seq": 4185,
+      "tool_call_id": "reflex-life-292",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 4195,
+      "answer_seq": 4200,
+      "tool_call_id": "reflex-life-293",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 4211,
+      "answer_seq": 4216,
+      "tool_call_id": "reflex-life-294",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 4226,
+      "answer_seq": 4231,
+      "tool_call_id": "reflex-life-295",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 4241,
+      "answer_seq": 4247,
+      "tool_call_id": "reflex-life-296",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 4257,
+      "answer_seq": 4262,
+      "tool_call_id": "reflex-life-297",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 4272,
+      "answer_seq": 4277,
+      "tool_call_id": "reflex-life-298",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 4288,
+      "answer_seq": 4293,
+      "tool_call_id": "reflex-life-299",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 4303,
+      "answer_seq": 4308,
+      "tool_call_id": "reflex-life-300",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 4318,
+      "answer_seq": 4323,
+      "tool_call_id": "reflex-life-301",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 4334,
+      "answer_seq": 4339,
+      "tool_call_id": "reflex-life-302",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 4349,
+      "answer_seq": 4354,
+      "tool_call_id": "reflex-life-303",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 4365,
+      "answer_seq": 4370,
+      "tool_call_id": "reflex-life-304",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 4380,
+      "answer_seq": 4385,
+      "tool_call_id": "reflex-life-305",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 4395,
+      "answer_seq": 4401,
+      "tool_call_id": "reflex-life-306",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 4411,
+      "answer_seq": 4416,
+      "tool_call_id": "reflex-life-307",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 4426,
+      "answer_seq": 4432,
+      "tool_call_id": "reflex-life-308",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 4442,
+      "answer_seq": 4447,
+      "tool_call_id": "reflex-life-309",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 4457,
+      "answer_seq": 4463,
+      "tool_call_id": "reflex-life-310",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 4473,
+      "answer_seq": 4478,
+      "tool_call_id": "reflex-life-311",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 4488,
+      "answer_seq": 4493,
+      "tool_call_id": "reflex-life-312",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 4504,
+      "answer_seq": 4509,
+      "tool_call_id": "reflex-life-313",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 4519,
+      "answer_seq": 4524,
+      "tool_call_id": "reflex-life-314",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 4535,
+      "answer_seq": 4540,
+      "tool_call_id": "reflex-life-315",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 4550,
+      "answer_seq": 4555,
+      "tool_call_id": "reflex-life-316",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 4565,
+      "answer_seq": 4570,
+      "tool_call_id": "reflex-life-317",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 4581,
+      "answer_seq": 4586,
+      "tool_call_id": "reflex-life-318",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 4596,
+      "answer_seq": 4601,
+      "tool_call_id": "reflex-life-319",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 4614,
+      "answer_seq": 4619,
+      "tool_call_id": "reflex-life-320",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    },
+    {
+      "request_seq": 4629,
+      "answer_seq": 4634,
+      "tool_call_id": "reflex-life-321",
+      "fact_revision": 1,
+      "question_unchanged": true,
+      "old_raw_binding": null,
+      "asked_frame_binding": [
+        "move_to",
+        {
+          "pos": [
+            151.5,
+            70,
+            163.5
+          ],
+          "radius": 2,
+          "timeout_s": 60.0
+        }
+      ]
+    }
+  ]
+}

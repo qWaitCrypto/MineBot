@@ -363,8 +363,13 @@ def tool_is_enabled(
 
 
 INTENT_DESCRIPTION = (
-    "The result this call should achieve, not what you are thinking. "
-    "Good: 'have 4 logs in the inventory'. Bad: 'I will try the trees first'."
+    "The result this call should achieve, not what you are thinking, "
+    "written in English as facts the Body reports: inventory item ids and counts, the item held in "
+    "the main hand, or a position or height. Use the item ids the inventory shows; when any kind "
+    "will do, list them, e.g. 'at least 8 logs of any kind (oak_log, birch_log, spruce_log, ...) in "
+    "the inventory', never a bare category such as 'logs'. "
+    "Good: 'at least 4 oak_log in the inventory', 'stone_pickaxe held in the main hand', "
+    "'standing at y 70 or higher'. Bad: 'I will try the trees first', 'back on open ground'."
 )
 
 
@@ -671,12 +676,19 @@ def tool_invoker_for(tool: RegisteredTool):
                         timeout_s=tool.sidecar.timeout_s,
                         tool_call_id=tool_call_id,
                     )
-                    progress_steps = captured.progress_steps
-                    post_state = captured.post_state
-                    if captured.error is not None:
-                        raise captured.error
-                    assert captured.result is not None
-                    result = captured.result
+                    if isinstance(captured, _CapturedToolExecution):
+                        progress_steps = captured.progress_steps
+                        post_state = captured.post_state
+                        if captured.error is not None:
+                            raise captured.error
+                        assert captured.result is not None
+                        result = captured.result
+                    else:
+                        # Admission rejection and a cooperative Decision stop
+                        # return the runtime's terminal payload without a
+                        # completed callback capture. Preserve that receipt;
+                        # neither path proves captured progress or post-state.
+                        result = captured
                 elif runtime is None:
                     result = execute_tool(tool, params, ctx.context.weld_context)
                 else:
@@ -1610,13 +1622,16 @@ class AgentRuntime:
         self.body_control = BodyControl(authority)
         self._body_stop_lock = asyncio.Lock()
         self._responses_turn_lock = asyncio.Lock()
-        from minebot.app.direct_call_supervision import CallSupervisor
+        from minebot.app.body_loop import BodyLoop
         self.decision_client = DecisionClient(emit=self.trace.emit)
         from minebot.app.panel_telemetry import PanelTelemetry
         self.panel_telemetry = PanelTelemetry(self.trace)
         # One supervisor covers direct Agent calls and work-plan call nodes.
         # Keep the old attribute as a compatibility alias for slice-1 tools.
-        self.call_supervisor = CallSupervisor(self)
+        # One lifecycle owner for all SDK Body calls.  ``call_supervisor`` is
+        # retained as the compatibility name used by older integrations.
+        self.body_loop = BodyLoop(self)
+        self.call_supervisor = self.body_loop
         self.direct_build_supervisor = self.call_supervisor
         self.reflex_manager = None
         self.background_call: BackgroundCall | None = None
@@ -1642,6 +1657,8 @@ class AgentRuntime:
         self.responses_kernel = None
         self._reflex_wakeup_task: asyncio.Task[Any] | None = None
         self._sdk_reflex_fact_listener: Callable[[dict[str, Any]], None] | None = None
+        self._sdk_body_event_listener: Callable[[Any], None] | None = None
+        self._pending_body_death: dict[str, Any] | None = None
         self._native_context = None
         self.native_task_workspace = None
         self.native_task_outcome = None
@@ -1727,7 +1744,9 @@ class AgentRuntime:
                 "or wait for progress because the runtime delivers terminal facts asynchronously. "
                 "Use only call, sequence, batch, choice and wait; write concrete intent and preserve complex Body "
                 "arguments. Conditions may use requires as AND. Read and revise the annotated tree with read_reflex "
-                "and control_reflex; never claim _runtime results yourself. interrupt_when is deferred."
+                "and control_reflex; never claim _runtime results yourself. A plan may include "
+                "interrupt_when={condition:{text:...},handler:<work node with intent>}. Decision may "
+                "stop the current node, run that handler, and choose whether to resume the earlier work."
             )
         return "\n\n".join(parts)
 
@@ -1889,6 +1908,21 @@ class AgentRuntime:
         """Attach the outer SDK session's reflex-result wake callback."""
         self._sdk_reflex_fact_listener = listener
 
+    def set_sdk_body_event_listener(self, listener: Callable[[Any], None] | None) -> None:
+        """Use the SDK session's existing BODY_EVENT/recovery queue."""
+        self._sdk_body_event_listener = listener
+
+    def notify_body_lifecycle_event(self, event: Any) -> None:
+        from minebot.app.body_events import agent_event_data
+        from minebot.contract import Event
+        event = Event(seq=event.seq, tick=event.tick, bot=event.bot, name=event.name,
+                      data=agent_event_data(event))
+        if event.name == "death":
+            self._pending_body_death = dict(event.data)
+        listener = self._sdk_body_event_listener
+        if callable(listener):
+            listener(event)
+
     async def _run_responses_turn(self, extra_signals, *, body_actions_allowed: bool) -> AgentTurnOutcome:
         prepared = await self._read_lane.run(self._prepare_turn, extra_signals)
         if isinstance(prepared, AgentTurnOutcome):
@@ -1964,6 +1998,36 @@ class AgentRuntime:
         claim_generation: int | None = None
         if tool.sidecar.can_mutate_body:
             control = self.body_control
+            # Life actions may be interrupted immediately when an Agent call
+            # arrives.  A threat action keeps the Body until it settles; an
+            # Agent call waits only for its own timeout and then receives the
+            # ordinary body_busy result.  Both paths use the existing stop and
+            # claim records; no second admission lock is introduced.
+            if claim_holder in {"agent_call", "agent_plan"}:
+                snapshot = control.snapshot()
+                if snapshot.holder == "life" and snapshot.stop_state == "running":
+                    await self.cancel_active_execution_with_facts(
+                        "agent_call_arrived", invalidate_generation=False, cancel_reflex=False,
+                    )
+                elif snapshot.holder == "threat" and snapshot.stop_state in {"running", "stopping"}:
+                    deadline = time.monotonic() + max(0.0, float(timeout_s or 0.0))
+                    self.trace.emit(
+                        "body_call_waiting", tool_call_id=tool_call_id,
+                        holder="threat", timeout_s=max(0.0, float(timeout_s or 0.0)),
+                    )
+                    while True:
+                        snapshot = control.snapshot()
+                        if snapshot.holder != "threat" or snapshot.stop_state not in {"running", "stopping"}:
+                            break
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            # Protection still owns a healthy Body. Admission
+                            # timed out; this is a receipt, not a recovery fault.
+                            return ToolResult(
+                                False, "body_busy", True,
+                                metrics={"holder": snapshot.to_payload()},
+                            ).to_payload()
+                        await asyncio.sleep(min(0.05, remaining))
             if control.unknown:
                 probe = getattr(self.body, "confirm_control_idle", None)
                 native = None
@@ -1987,6 +2051,13 @@ class AgentRuntime:
                     raise BodyRecoveryRequired(reason, facts={"control_unknown": True}) from exc
                 raise BodyRecoveryRequired("body_busy", facts={"holder": control.snapshot().to_payload()}) from exc
         receipt: dict[str, object] = {}
+
+        def readmit_callback():
+            nonlocal claim_generation
+            if claim_generation is not None:
+                claim_generation = self.body_control.claim(claim_id, holder=claim_holder).generation
+                self.trace.emit("body_call_readmitted", tool_call_id=tool_call_id,
+                                generation=claim_generation, holder=claim_holder)
 
         def admitted_callback(*values):
             from minebot.contract.execution import body_claim_scope, execution_checkpoint, execution_receipt_scope
@@ -2031,10 +2102,10 @@ class AgentRuntime:
             # of this slice; keep its existing timing/settlement semantics.
             if (tool.sidecar.can_mutate_body and supervisor is not None
                     and not getattr(self, "native_responses", False)
-                    and not bool((supervision_context or {}).get("_skip_supervision"))):
+                    ):
                 result = await supervisor.run(tool, admitted_callback, call_args,
                     call_id=operation_id, timeout_s=timeout_s,
-                    supervision_context=supervision_context)
+                    supervision_context=supervision_context, readmit=readmit_callback)
                 outcome = _execution_outcome(result)
                 return with_execution_receipt(result)
             if tool.sidecar.can_mutate_body:
@@ -2079,6 +2150,10 @@ class AgentRuntime:
 
         def notify(payload: JsonObject) -> None:
             snapshots.observe(operation_id, payload)
+            loop = getattr(self, "call_supervisor", None)
+            observe = getattr(loop, "observe_native_action_progress", None)
+            if callable(observe):
+                observe(operation_id, payload)
             if telemetry is not None:
                 telemetry.observe(operation_id, payload)
 
@@ -2127,6 +2202,8 @@ class AgentRuntime:
         continuation_budget: ContinuationEpochBudget | None = None,
         review_grant_stop_epoch_id: str | None = None,
     ) -> AgentTurnOutcome:
+        if hasattr(self, "body_loop") and not self.native_responses:
+            await self.body_loop.start()
         if self.reflex_manager is not None:
             self.reflex_manager.bind_loop(asyncio.get_running_loop())
         if self.native_responses:
@@ -2222,6 +2299,7 @@ class AgentRuntime:
             "session": self.conversation_session,
         }
         self.agent_context.acknowledge_turn_input(pending_input_count)
+        self.agent_thinking = True
         try:
             if self.runner_run_streamed is not None:
                 streamed = self.runner_run_streamed(turn_agent, input_text, **runner_kwargs)
@@ -2265,6 +2343,8 @@ class AgentRuntime:
             progress_epochs.finalize_unsettled("runner_error")
             self._raise_model_transport_error_if_retryable(exc)
             raise
+        finally:
+            self.agent_thinking = False
 
         deferred = progress_epochs.finalize_unsettled("runner_completed_with_unsettled_epoch")
         if deferred is not None:
@@ -2368,7 +2448,11 @@ class AgentRuntime:
         the Body across turns, anything queued there waits for that work to
         end, which would freeze the Agent it was meant to free.
         """
-        if self.native_responses or self.live_body_owner() is not None:
+        # Reflex actions also occupy the physical writer across Agent turns.
+        # They are not Agent background calls, so live_body_owner() deliberately
+        # omits them; that must not make observation queue behind their work.
+        reflex_owner = self.body_control.snapshot().holder in {"life", "threat"}
+        if self.native_responses or self.live_body_owner() is not None or reflex_owner:
             return self._read_lane
         return self.execution_lane
 
@@ -2494,6 +2578,10 @@ class AgentRuntime:
         plan = summary() if callable(summary) else None
         if plan is not None:
             work["plan"] = plan
+        loop = getattr(self, "body_loop", None)
+        experiences = getattr(loop, "recent_experiences", None)
+        if experiences:
+            work["reflex_experiences"] = list(experiences)
         if work:
             execution = self.execution_snapshots.current()
             if execution is not None:
@@ -2585,6 +2673,16 @@ class AgentRuntime:
         cancel_reflex: bool = True,
     ) -> JsonObject:
         cancellation_started = time.monotonic()
+        self.trace.emit("execution_cancel_started", reason=reason)
+        phase_started = cancellation_started
+        phase_ms: dict[str, float] = {}
+
+        def finish_phase(name: str) -> None:
+            nonlocal phase_started
+            now = time.monotonic()
+            phase_ms[name] = round((now - phase_started) * 1000.0, 3)
+            phase_started = now
+
         if cancel_reflex and self.reflex_manager is not None:
             # Revoke the plan before touching the native Body.  A late
             # Decision result must not be able to admit its next write.
@@ -2597,6 +2695,7 @@ class AgentRuntime:
         if invalidate_generation:
             self.authority.invalidate_generation(reason)
         cancellation_scope_count = self.request_execution_cancel(reason)
+        finish_phase("request")
         interrupt_ok: bool | None = None
         interrupt_accepted: bool | None = None
         interrupt_complete: bool | None = None
@@ -2612,11 +2711,13 @@ class AgentRuntime:
                 "error_type": type(exc).__name__,
                 "message": _shorten(str(exc), limit=300),
             }
+        finish_phase("interrupt")
         remaining_s = max(
             0.0,
             EXECUTION_LANE_CANCEL_TIMEOUT_S - (time.monotonic() - cancellation_started),
         )
         execution_idle = await self.wait_for_execution_idle(timeout_s=remaining_s)
+        finish_phase("writer_idle")
         remaining_s = max(
             0.0,
             EXECUTION_LANE_CANCEL_TIMEOUT_S - (time.monotonic() - cancellation_started),
@@ -2624,6 +2725,7 @@ class AgentRuntime:
         owner_facts = await self._wait_for_body_owner_idle(
             timeout_s=remaining_s,
         )
+        finish_phase("owner_idle")
         owner_observed = bool(owner_facts.get("owner_observed"))
         owner = owner_facts.get("owner")
         owner_settled = owner_observed and owner is None
@@ -2635,12 +2737,28 @@ class AgentRuntime:
         native_probe = getattr(self.body, "confirm_control_idle", None)
         native_facts = {}
         if callable(native_probe):
-            try:
-                native_facts = await self._read_lane.run(native_probe)
-            except Exception as exc:
-                native_facts = {"native_stopped": False, "control_unknown": True,
-                                "probe_error": type(exc).__name__}
+            checks = 0
+            while True:
+                checks += 1
+                try:
+                    native_facts = await self._read_lane.run(native_probe)
+                except Exception as exc:
+                    native_facts = {"native_stopped": False, "control_unknown": True,
+                                    "probe_error": type(exc).__name__}
+                    break
+                if native_facts.get("native_stopped") is True or interrupt_accepted is not True:
+                    break
+                # The native action accepted the interrupt and is still carrying
+                # it out: settle on its actual stop within the same budget. One
+                # probe 42 ms after the lane went idle marked control unknown and
+                # the protective move failed (live step5-threat-claude4).
+                remaining_s = EXECUTION_LANE_CANCEL_TIMEOUT_S - (time.monotonic() - cancellation_started)
+                if remaining_s <= 0:
+                    break
+                await asyncio.sleep(min(BODY_OWNER_SETTLE_POLL_S, remaining_s))
+            native_facts = {**native_facts, "native_probe_checks": checks}
             owner_settled = native_facts.get("native_stopped") is True
+        finish_phase("native_probe")
         settled = execution_idle and owner_settled
         if settled:
             self.body_control.settle()
@@ -2666,6 +2784,8 @@ class AgentRuntime:
             **facts,
             idle=execution_idle,
             active_count=self.execution_lane.active_count,
+            phase_ms=phase_ms,
+            elapsed_ms=round((time.monotonic() - cancellation_started) * 1000.0, 3),
         )
         return facts
 
@@ -2721,7 +2841,12 @@ class AgentRuntime:
             await asyncio.gather(call.task, return_exceptions=True)
         if self.reflex_manager is not None:
             await self.reflex_manager.close()
-        await self.direct_build_supervisor.close()
+        body_loop = getattr(self, "body_loop", None)
+        if body_loop is not None:
+            await body_loop.stop()
+            await body_loop.close()
+        else:
+            await self.direct_build_supervisor.close()
         if self.responses_kernel is not None:
             self.responses_kernel.halt()
             if any(c.mutating and not c.task.done() for c in self.responses_kernel.pending):
@@ -2800,6 +2925,10 @@ class AgentRuntime:
         failures = 0
         while True:
             await asyncio.sleep(BODY_WATCH_POLL_S)
+            if self._pending_body_death is not None:
+                facts = self._pending_body_death
+                self._pending_body_death = None
+                return "death", facts
             try:
                 state = await self.run_read(self.body.get_state)
             except Exception as exc:
@@ -2973,6 +3102,10 @@ class AgentRuntime:
         context_item = current_context_item(live_context)
         if context_item is not None:
             view = [*view, context_item]
+            if isinstance(work, dict) and work.get("reflex_experiences"):
+                self.trace.emit("reflex_context_included",
+                    experiences=list(work["reflex_experiences"]),
+                    context_item_role=context_item["role"])
         elif len(view) == len(items) and not isinstance(original, str) and all(
                 shown is given for shown, given in zip(items, received)):
             return data.model_data
@@ -3437,6 +3570,7 @@ class AgentRuntime:
         )
 
     def _enter_recovery_from_body_fact(self, reason: str, facts: dict[str, object] | None = None) -> AgentTurnOutcome:
+        self._pending_body_death = None
         payload = dict(facts or {})
         signal = AgentSignal.death_detected(reason, **payload)
         reduction = self.mode_runtime.reduce([signal], self.lifecycle.state, goal_text=self.agent_context.goal_text)
@@ -3584,6 +3718,8 @@ class AgentRuntime:
             *signalize_events(events),
             *(extra_signals or []),
         ]
+        if any(signal.kind == "death_detected" for signal in signals):
+            self._pending_body_death = None
         pending_mobility_terminal = self._pending_mobility_terminal
         if pending_mobility_terminal is not None:
             signals.append(

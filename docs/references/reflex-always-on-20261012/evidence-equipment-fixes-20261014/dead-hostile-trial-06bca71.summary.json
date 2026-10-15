@@ -1,0 +1,24 @@
+[
+  {
+    "seq": 457,
+    "baseline": {
+      "selected": "repeat",
+      "recorded": "repeat",
+      "matched": true
+    },
+    "distribution": {
+      "stay": 12
+    }
+  },
+  {
+    "seq": 464,
+    "baseline": {
+      "selected": "repeat",
+      "recorded": "repeat",
+      "matched": true
+    },
+    "distribution": {
+      "stay": 12
+    }
+  }
+]

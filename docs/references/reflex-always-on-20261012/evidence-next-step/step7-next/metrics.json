@@ -1,0 +1,230 @@
+{
+  "source": "/home/qwait/MineBot-always-on/logs/reflex-always-on-20261014-step7-next/trace.jsonl",
+  "seq_end": 1404,
+  "elapsed_s": 504.07043290138245,
+  "requests_by_purpose": {
+    "idle_frame": 204,
+    "running_frame": 8
+  },
+  "requests_by_loop_state": {
+    "idle": 212
+  },
+  "requests_by_state_and_purpose": {
+    "idle / idle_frame": 204,
+    "idle / running_frame": 8
+  },
+  "requests_per_session_minute_by_loop_state": {
+    "idle": 25.234568762116965
+  },
+  "requests_per_minute_buckets": [
+    {
+      "minute_from_trace_start": 0,
+      "observed_seconds": 60,
+      "counts_by_state_and_purpose": {
+        "idle / idle_frame": 42,
+        "idle / running_frame": 8
+      }
+    },
+    {
+      "minute_from_trace_start": 1,
+      "observed_seconds": 60,
+      "counts_by_state_and_purpose": {
+        "idle / idle_frame": 41
+      }
+    },
+    {
+      "minute_from_trace_start": 2,
+      "observed_seconds": 60,
+      "counts_by_state_and_purpose": {
+        "idle / idle_frame": 50
+      }
+    },
+    {
+      "minute_from_trace_start": 3,
+      "observed_seconds": 60,
+      "counts_by_state_and_purpose": {
+        "idle / idle_frame": 51
+      }
+    },
+    {
+      "minute_from_trace_start": 4,
+      "observed_seconds": 60,
+      "counts_by_state_and_purpose": {
+        "idle / idle_frame": 20
+      }
+    }
+  ],
+  "loop_state_seconds": {
+    "idle": 267.8053412437439,
+    "dead": 236.26509165763855
+  },
+  "requests_per_session_minute_by_purpose": {
+    "idle_frame": 24.282320884301228,
+    "running_frame": 0.9522478778157345
+  },
+  "requests_per_observed_body_work_minute_by_purpose": {
+    "idle_frame": 1663.947809796683,
+    "running_frame": 65.25285528614444
+  },
+  "requests_during_observed_body_work_by_purpose": {
+    "running_frame": 8
+  },
+  "requests_during_observed_body_work_per_minute_by_purpose": {
+    "running_frame": 65.25285528614444
+  },
+  "rate_accounting": "Session-normalized rates include all requests. Total requests divided by observed work time measures overhead, not work cadence. The during-work rate restricts the numerator to requests inside observed native work intervals.",
+  "native_action_count": 1,
+  "observed_native_work_s": 7.355999946594238,
+  "idle_remainder_estimate_s": 496.7144329547882,
+  "supervised_body_call_s": 7.864000082015991,
+  "outside_supervised_body_calls_s": 496.20643281936646,
+  "supervised_call_timing_method": "Union of completed supervised-call intervals; includes tool execution and its settlement, not proof of physical movement. Native terminals missing elapsed_ms are excluded from native work time, never treated as proof that the Body was idle.",
+  "timing_method": "Union of native terminal elapsed_ms intervals, deduplicated by action_id; IPC receipt is the end timestamp. Idle remainder and no-question gap are estimates; missing native terminals are not counted as work.",
+  "longest_estimated_idle_without_any_question_s": 239.401287317276,
+  "longest_idle_state_without_any_question_s": 8.393161058425903,
+  "idle_state_gap_method": "idle is the loop state, and may contain life movement. This measurement excludes dead/work intervals but includes session startup.",
+  "largest_request_gaps": [
+    {
+      "before_seq": 369,
+      "after_seq": 375,
+      "seconds": 8.393161058425903
+    },
+    {
+      "before_seq": 425,
+      "after_seq": 430,
+      "seconds": 5.7173426151275635
+    },
+    {
+      "before_seq": 931,
+      "after_seq": 938,
+      "seconds": 3.0614311695098877
+    },
+    {
+      "before_seq": 92,
+      "after_seq": 97,
+      "seconds": 2.977555274963379
+    },
+    {
+      "before_seq": 872,
+      "after_seq": 877,
+      "seconds": 2.44169282913208
+    },
+    {
+      "before_seq": 627,
+      "after_seq": 632,
+      "seconds": 2.166264057159424
+    },
+    {
+      "before_seq": 314,
+      "after_seq": 320,
+      "seconds": 1.972564935684204
+    },
+    {
+      "before_seq": 68,
+      "after_seq": 83,
+      "seconds": 1.5369389057159424
+    },
+    {
+      "before_seq": 350,
+      "after_seq": 356,
+      "seconds": 1.4313862323760986
+    },
+    {
+      "before_seq": 106,
+      "after_seq": 111,
+      "seconds": 1.4086108207702637
+    }
+  ],
+  "default_actions_requested": {
+    "go_home": 1
+  },
+  "default_actions_finished": {
+    "go_home": 1
+  },
+  "action_accounting": "Answers are semantic selections, default_requested is an attempted action dispatch, and native_action_count is observed execution. They are not interchangeable.",
+  "answers": {
+    "go_home": 1,
+    "keep_going": 7,
+    "stay": 204
+  },
+  "unknown_ratio": 0.0,
+  "decision_ms_median": 131.51049999999998,
+  "agent_delivery_counts": {
+    "body_event_wake": 1
+  },
+  "agent_deliveries": [
+    {
+      "seq": 1036,
+      "event": "body_event_wake",
+      "reason": null,
+      "status": null,
+      "kind": null,
+      "activity_id": null,
+      "body_event": "death"
+    }
+  ],
+  "runtime_intent_wakes": [
+    {
+      "seq": 1044,
+      "reason": null,
+      "kind": "recovery_reconcile"
+    },
+    {
+      "seq": 1052,
+      "reason": null,
+      "kind": "recovery_reconcile"
+    },
+    {
+      "seq": 1060,
+      "reason": null,
+      "kind": "recovery_reconcile"
+    },
+    {
+      "seq": 1178,
+      "reason": null,
+      "kind": "recovery_reconcile"
+    },
+    {
+      "seq": 1186,
+      "reason": null,
+      "kind": "recovery_reconcile"
+    },
+    {
+      "seq": 1193,
+      "reason": null,
+      "kind": "recovery_reconcile"
+    }
+  ],
+  "wake_accounting": "reflex_death is a death observation, not a wake. agent_start counts launches/turn entries, not delivery events. Distinct deliveries can be coalesced into a model turn.",
+  "agent_start_count": 0,
+  "delegate_work": 0,
+  "read_reflex": 0,
+  "state_switches": 1,
+  "reaction_chains": [],
+  "deaths": [
+    {
+      "seq": 1034,
+      "position": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "health": 0.0,
+      "oxygen": null,
+      "respawn_seq": null,
+      "respawn_delay_s": null,
+      "native_respawn_delay_s": null
+    }
+  ],
+  "last_body": {
+    "seq": 1024,
+    "pos": [
+      221.73,
+      121.0,
+      221.73
+    ],
+    "health": 20.0,
+    "food": 20,
+    "oxygen": 300
+  }
+}

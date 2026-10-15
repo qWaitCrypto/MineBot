@@ -2373,3 +2373,21 @@ def _quota_model_error() -> RateLimitError:
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_enter_world_starts_reflex_without_an_agent_turn_and_reuses_runtime():
+    async def run():
+        calls, bodies = [], []
+        session = AgentSession(lambda goal: build_parts(goal, calls, bodies))
+        try:
+            await session.enter_world()
+            parts = session.parts
+            assert parts.runtime.body_loop._lifecycle_started
+            loop_task = parts.runtime.body_loop._lifecycle_task
+            assert calls == [] and len(bodies) == 1
+            await session.enter_world()
+            assert session.parts is parts
+            assert parts.runtime.body_loop._lifecycle_task is loop_task
+        finally:
+            await session.aclose()
+    asyncio.run(run())

@@ -1,0 +1,214 @@
+{
+  "source": "/home/qwait/MineBot-always-on/logs/reflex-always-on-20261014-step5-next-b/trace.jsonl",
+  "seq_end": 750,
+  "elapsed_s": 56.5065484046936,
+  "requests_by_purpose": {
+    "idle_frame": 13,
+    "running_frame": 40,
+    "plan_result_frame": 3,
+    "default_result_frame": 1
+  },
+  "requests_by_loop_state": {
+    "idle": 16,
+    "threat": 8,
+    "work": 33
+  },
+  "requests_by_state_and_purpose": {
+    "idle / idle_frame": 13,
+    "threat / running_frame": 7,
+    "work / running_frame": 33,
+    "idle / plan_result_frame": 3,
+    "threat / default_result_frame": 1
+  },
+  "requests_per_session_minute_by_loop_state": {
+    "idle": 16.989181379909933,
+    "threat": 8.494590689954967,
+    "work": 35.04018659606424
+  },
+  "requests_per_minute_buckets": [
+    {
+      "minute_from_trace_start": 0,
+      "observed_seconds": 56.5065484046936,
+      "counts_by_state_and_purpose": {
+        "idle / idle_frame": 13,
+        "threat / running_frame": 7,
+        "work / running_frame": 33,
+        "idle / plan_result_frame": 3,
+        "threat / default_result_frame": 1
+      }
+    }
+  ],
+  "loop_state_seconds": {
+    "idle": 21.77783727645874,
+    "threat": 2.842036008834839,
+    "work": 31.886675119400024
+  },
+  "requests_per_session_minute_by_purpose": {
+    "idle_frame": 13.803709871176823,
+    "running_frame": 42.472953449774835,
+    "plan_result_frame": 3.1854715087331127,
+    "default_result_frame": 1.0618238362443708
+  },
+  "requests_per_observed_body_work_minute_by_purpose": {
+    "idle_frame": 24.903419352192646,
+    "running_frame": 76.6259056990543,
+    "plan_result_frame": 5.746942927429072,
+    "default_result_frame": 1.9156476424763573
+  },
+  "requests_during_observed_body_work_by_purpose": {
+    "running_frame": 31
+  },
+  "requests_during_observed_body_work_per_minute_by_purpose": {
+    "running_frame": 59.385076916767076
+  },
+  "rate_accounting": "Session-normalized rates include all requests. Total requests divided by observed work time measures overhead, not work cadence. The during-work rate restricts the numerator to requests inside observed native work intervals.",
+  "native_action_count": 5,
+  "observed_native_work_s": 31.32100009918213,
+  "idle_remainder_estimate_s": 25.185548305511475,
+  "supervised_body_call_s": 34.72699999809265,
+  "outside_supervised_body_calls_s": 21.779548406600952,
+  "supervised_call_timing_method": "Union of completed supervised-call intervals; includes tool execution and its settlement, not proof of physical movement. Native terminals missing elapsed_ms are excluded from native work time, never treated as proof that the Body was idle.",
+  "timing_method": "Union of native terminal elapsed_ms intervals, deduplicated by action_id; IPC receipt is the end timestamp. Idle remainder and no-question gap are estimates; missing native terminals are not counted as work.",
+  "longest_estimated_idle_without_any_question_s": 1.511404275894165,
+  "longest_idle_state_without_any_question_s": 1.4954736232757568,
+  "idle_state_gap_method": "idle is the loop state, and may contain life movement. This measurement excludes dead/work intervals but includes session startup.",
+  "largest_request_gaps": [
+    {
+      "before_seq": 387,
+      "after_seq": 473,
+      "seconds": 1.5584173202514648
+    },
+    {
+      "before_seq": 188,
+      "after_seq": 280,
+      "seconds": 1.4853413105010986
+    },
+    {
+      "before_seq": 364,
+      "after_seq": 373,
+      "seconds": 1.3129308223724365
+    },
+    {
+      "before_seq": 669,
+      "after_seq": 678,
+      "seconds": 1.2730870246887207
+    },
+    {
+      "before_seq": 613,
+      "after_seq": 622,
+      "seconds": 1.272667407989502
+    },
+    {
+      "before_seq": 712,
+      "after_seq": 721,
+      "seconds": 1.2624962329864502
+    },
+    {
+      "before_seq": 721,
+      "after_seq": 730,
+      "seconds": 1.2399263381958008
+    },
+    {
+      "before_seq": 280,
+      "after_seq": 364,
+      "seconds": 1.2377924919128418
+    },
+    {
+      "before_seq": 622,
+      "after_seq": 631,
+      "seconds": 1.2375857830047607
+    },
+    {
+      "before_seq": 631,
+      "after_seq": 640,
+      "seconds": 1.236631155014038
+    }
+  ],
+  "default_actions_requested": {
+    "engage": 1,
+    "move_away": 1
+  },
+  "default_actions_finished": {
+    "engage": 1,
+    "move_away": 1
+  },
+  "action_accounting": "Answers are semantic selections, default_requested is an attempted action dispatch, and native_action_count is observed execution. They are not interchangeable.",
+  "answers": {
+    "stay": 12,
+    "engage": 1,
+    "keep_going": 35,
+    "next_step": 3,
+    "move_away": 1,
+    "resume": 1
+  },
+  "unknown_ratio": 0.0,
+  "decision_ms_median": 129.239,
+  "agent_delivery_counts": {},
+  "agent_deliveries": [],
+  "runtime_intent_wakes": [],
+  "wake_accounting": "reflex_death is a death observation, not a wake. agent_start counts launches/turn entries, not delivery events. Distinct deliveries can be coalesced into a model turn.",
+  "agent_start_count": 1,
+  "delegate_work": 1,
+  "read_reflex": 0,
+  "state_switches": 14,
+  "reaction_chains": [
+    {
+      "action_progress_monotonic_s": 534342.696551995,
+      "action_sampled_at_ms": 1791943107343,
+      "answer_monotonic_s": 534342.329556664,
+      "answer_to_action_s": 0.36699533101636916,
+      "choice": "engage",
+      "event": "reflex_reaction_chain",
+      "event_distance": 1.0,
+      "event_health": 20.0,
+      "event_monotonic_s": 534342.134939827,
+      "event_sampled_at_ms": 1791943106772,
+      "event_to_request_s": 0.00011646596249192953,
+      "first_native_progress": true,
+      "native_action_id": "44ebbfd8-5fd1-4324-a2d8-0ea54e7af443",
+      "request_monotonic_s": 534342.135056293,
+      "request_to_answer_s": 0.19450037099886686,
+      "seq": 32,
+      "session_id": "Step5NextBot",
+      "target": "e98a1fde-0143-4ec1-9901-5dee61b47629",
+      "tool": "engage_entity",
+      "tool_call_id": "reflex-idle-5",
+      "total_s": 0.561612167977728,
+      "ts": 1791943107.3446383
+    },
+    {
+      "answer_monotonic_s": 534363.906677683,
+      "choice": "move_away",
+      "event": "reflex_reaction_chain",
+      "event_distance": 5.917252941914449,
+      "event_health": 4.0,
+      "event_monotonic_s": 534363.445962663,
+      "event_sampled_at_ms": null,
+      "first_native_progress": false,
+      "request_monotonic_s": 534363.709828962,
+      "result": {
+        "canRetry": false,
+        "reason": "already_safe",
+        "success": true
+      },
+      "seq": 514,
+      "session_id": "Step5NextBot",
+      "target": "e40b43ee-29ea-4c39-95b8-2523c6651f10",
+      "tool": "move_away",
+      "tool_call_id": "reflex-default-98fcd612-3f7b-4372-9637-8f34014d227f",
+      "ts": 1791943128.900105
+    }
+  ],
+  "deaths": [],
+  "last_body": {
+    "seq": 744,
+    "pos": [
+      190.74,
+      121.0,
+      191.64
+    ],
+    "health": 20.0,
+    "food": 20,
+    "oxygen": 300
+  }
+}

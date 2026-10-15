@@ -1,0 +1,37 @@
+{"time": 1791952749.331874, "last_seq": 8, "kind": "first_idle", "matched_seq": 6}
+{"time": 1791952749.3620038, "last_seq": 9, "kind": "fixture_day", "command": "time set day", "response": "Set minecraft:overworld to time marker minecraft:day"}
+{"time": 1791952749.3732495, "last_seq": 9, "kind": "fixture_freeze_day", "command": "gamerule minecraft:advance_time false", "response": "Gamerule advance_time is now set to: false"}
+{"time": 1791952749.3771093, "last_seq": 9, "kind": "fixture_no_new_natural_mobs", "command": "gamerule minecraft:spawn_mobs false", "response": "Gamerule spawn_mobs is now set to: false"}
+{"time": 1791952749.3870595, "last_seq": 9, "kind": "fixture_start", "command": "tp Step5NextBot 220.5 121 220.5 0 0", "response": "Teleported Step5NextBot to 220.500000, 121.000000, 220.500000"}
+{"time": 1791952749.4018335, "last_seq": 9, "kind": "fixture_heal", "command": "effect give Step5NextBot minecraft:instant_health 1 10 true", "response": "Applied effect Instant Health to Step5NextBot"}
+{"time": 1791952749.4065247, "last_seq": 9, "kind": "fixture_feed", "command": "effect give Step5NextBot minecraft:saturation 1 10 true", "response": "Applied effect Saturation to Step5NextBot"}
+{"time": 1791952749.4105902, "last_seq": 9, "kind": "fixture_remove_old_visitor", "command": "player Visitor kill", "response": "Can only manipulate existing players"}
+{"time": 1791952749.428061, "last_seq": 9, "kind": "before_player_rotation", "command": "data get entity Step5NextBot Rotation", "response": "Step5NextBot has the following entity data: [0.0f, 0.0f]"}
+{"time": 1791952749.4291356, "last_seq": 9, "kind": "visitor_test_start"}
+{"time": 1791952749.4645302, "last_seq": 9, "kind": "fixture_visitor_6_blocks", "command": "player Visitor spawn at 226.5 121 220.5 facing 90 0 in minecraft:overworld", "response": ""}
+{"time": 1791952755.0260746, "last_seq": 33, "kind": "player_action_dispatched", "matched_seq": 33}
+{"time": 1791952755.8050218, "last_seq": 41, "kind": "player_action_finished", "matched_seq": 40}
+{"time": 1791952755.8120434, "last_seq": 41, "kind": "after_player_rotation", "command": "data get entity Step5NextBot Rotation", "response": "Step5NextBot has the following entity data: [-89.40001f, 15.150002f]"}
+{"time": 1791952755.824738, "last_seq": 41, "kind": "after_player_position", "command": "data get entity Step5NextBot Pos", "response": "Step5NextBot has the following entity data: [220.5d, 121.0d, 220.5d]"}
+{"time": 1791952755.8322947, "last_seq": 41, "kind": "fixture_remove_visitor", "command": "player Visitor kill", "response": ""}
+{"time": 1791952755.840106, "last_seq": 41, "kind": "visitor_removed"}
+{"time": 1791952756.8706448, "last_seq": 46, "kind": "idle_without_visitor", "matched_seq": 43}
+{"time": 1791952756.8836496, "last_seq": 46, "kind": "fixture_patrol_start", "command": "tp Step5NextBot 220.5 121 220.5", "response": "Teleported Step5NextBot to 220.500000, 121.000000, 220.500000"}
+{"time": 1791952756.8993654, "last_seq": 46, "kind": "fixture_empty_inventory", "command": "clear Step5NextBot", "response": "Removed 1 item(s) from player Step5NextBot"}
+{"time": 1791952756.9190052, "last_seq": 46, "kind": "fixture_held_weapon", "command": "item replace entity Step5NextBot weapon.mainhand with minecraft:wooden_sword", "response": "Replaced a slot on Step5NextBot with [Wooden Sword]"}
+{"time": 1791952756.9342325, "last_seq": 46, "kind": "fixture_spare_weapon", "command": "give Step5NextBot minecraft:stone_sword", "response": "Gave 1 [Stone Sword] to Step5NextBot"}
+{"time": 1791952756.9431217, "last_seq": 46, "kind": "user_message", "text": "/goal 请把高台巡视交给delegate_work：到[250,121,220]，再到[190,121,220]，最后回到[220,121,220]。plan最外层intent写走完三站并回起点，每个移动intent写到达该点。加interrupt_when：当主手为空并且背包里有石剑，handler装备背包石剑到主手，之后继续巡视。条件原话和handler意图由你写进树，不在Agent回合自己轮询或直接补装备。不破坏、不放置、不采集。下发后想后面的事，等完成通知再报告。"}
+{"time": 1791952783.2147212, "last_seq": 337, "kind": "real_agent_interrupt_tree_running", "matched_seq": 333}
+{"time": 1791952783.2279644, "last_seq": 339, "kind": "empty_hand_trigger"}
+{"time": 1791952783.2455487, "last_seq": 339, "kind": "fixture_remove_held_weapon", "command": "item replace entity Step5NextBot weapon.mainhand with minecraft:air", "response": "Replaced a slot on Step5NextBot with [Air]"}
+{"time": 1791952801.009056, "last_seq": 799, "kind": "decision_selected_interrupt", "matched_seq": 795}
+{"time": 1791952802.6827738, "last_seq": 826, "kind": "handler_equipped", "matched_seq": 825}
+{"time": 1791952803.5479062, "last_seq": 843, "kind": "decision_resumed_work", "matched_seq": 841}
+{"time": 1791952806.9261756, "last_seq": 882, "kind": "patrol_terminal", "matched_seq": 882}
+{"time": 1791952808.359828, "last_seq": 888, "kind": "agent_received_terminal", "matched_seq": 888}
+{"time": 1791952808.3973706, "last_seq": 888, "kind": "final_inventory", "command": "data get entity Step5NextBot Inventory", "response": "Step5NextBot has the following entity data: [{count: 1, Slot: 1b, id: \"minecraft:stone_sword\"}]"}
+{"time": 1791952808.4349775, "last_seq": 891, "kind": "final_position", "command": "data get entity Step5NextBot Pos", "response": "Step5NextBot has the following entity data: [206.74008212499456d, 121.0d, 220.50075239384566d]"}
+{"time": 1791952808.4699984, "last_seq": 895, "kind": "final_health", "command": "data get entity Step5NextBot Health", "response": "Step5NextBot has the following entity data: 20.0f"}
+{"time": 1791952808.5363631, "last_seq": 973, "kind": "regression_test_complete", "deaths": []}
+{"time": 1791952808.5725868, "last_seq": 975, "kind": "visitor_cleanup", "command": "player Visitor kill", "response": "Can only manipulate existing players"}
+{"time": 1791952808.607939, "last_seq": 975, "kind": "user_message", "text": "/quit"}

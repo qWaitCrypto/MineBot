@@ -1,5 +1,10 @@
 """The frame question wording, checked against the sentences settled offline."""
 
+import json
+from pathlib import Path
+
+import pytest
+
 from minebot.app import reflex_question as rq
 
 GOAL = "make a stone pickaxe"
@@ -20,7 +25,7 @@ def test_running_frame_says_each_fact_once_as_a_sentence():
     )
     assert state == {
         "task": GOAL,
-        "agent_intent": "get 3 raw iron",
+        "agent_intent": "The Agent wants the following result: “get 3 raw iron”.",
         "inventory": "stone_pickaxe 1, dirt 2",
         "body": "Health is 20 of 20. Hunger is 20 of 20. Air supply is full.",
         "threats": "Nearest hostile mob: Creeper, 21 blocks away.",
@@ -44,21 +49,102 @@ def test_changing_air_and_injury_are_written_as_change():
     assert _running({"inventory": {}})["inventory"] == "empty"
 
 
+def test_equipment_intent_sees_current_main_hand_once_in_all_frames():
+    # Live seq1825: wooden pickaxe was in the bag, but the hand still held a sapling.
+    facts = {"inventory_counts": {"wooden_pickaxe": 1}, "selected_item": "oak_sapling",
+             "health": 20, "food": 20, "oxygen": 300}
+    for running in (True, False):
+        state = rq.frame_state(goal="make a pickaxe", intent="craft and equip a wooden pickaxe",
+            tool="craft_item", params={"item": "wooden_pickaxe", "auto_equip": True},
+            facts=facts, running=running, result=None if running else {"success": True})
+        # Said beside the inventory: inside the body sentence it was missed
+        # when an intent named both the item and holding it (live seq1978).
+        assert list(state)[list(state).index("inventory") + 1] == "main_hand"
+        assert state["main_hand"] == "oak_sapling"
+        assert "main hand" not in state["body"]
+    idle = rq.idle_question(facts, rq.idle_options(facts))["state"]
+    assert idle["main_hand"] == "oak_sapling"
+    assert list(idle)[list(idle).index("inventory") + 1] == "main_hand"
+
+
+@pytest.mark.parametrize("facts,expected", [
+    ({"selected_item": ""}, "nothing"),
+    ({"selected_item": None, "selected_item_known": True}, None),
+    ({"selected_item": "oak_sapling", "selected_item_known": False}, None),
+    ({}, None),
+])
+def test_unknown_main_hand_is_not_reported_as_empty(facts, expected):
+    assert rq._main_hand(facts) == expected
+    assert "main hand" not in rq._body_sentence(facts)
+
+
 def test_vital_window_gives_values_from_a_few_seconds_ago():
     window = rq.VitalWindow()
     assert window.add(0.0, {"health": 20, "oxygen": 300}) == {}
-    assert window.add(1.0, {"health": 20, "oxygen": 280}) == {}
+    assert window.add(1.0, {"health": 20, "oxygen": 280}) == {"oxygen_before": 300.0, "oxygen_age_s": 1.0}
     before = window.add(5.0, {"health": 14, "oxygen": 200})
-    assert before == {"health_before": 20.0, "oxygen_before": 300.0, "vital_age_s": 5.0}
+    assert before == {"health_before": 20.0, "oxygen_before": 300.0, "vital_age_s": 5.0, "oxygen_age_s": 5.0}
     assert window.add(30.0, {"health": 14}) == {}
+
+
+def test_recorded_air_turnaround_uses_current_direction_and_its_own_age():
+    recorded = json.loads((Path(__file__).parents[1] / "fixtures" / "reflex_step2_oxygen_direction.json").read_text())
+    expected = {
+        2197: (122, 1, 211, True), 2286: (122, 2, 295, True),
+        2287: (295, 1, 291, False), 2288: (295, 2, 271, False),
+        2289: (295, 3, 250, False), 2290: (295, 4, 229, False),
+        2291: (295, 5, 208, False), 2292: (295, 6, 188, False),
+    }
+    window = rq.VitalWindow()
+    seen = []
+    for sample in recorded["samples"]:
+        facts = {**sample, **window.add(sample["ts"], sample)}
+        if sample["seq"] not in expected:
+            continue
+        baseline, age, air, rising = expected[sample["seq"]]
+        prefix = "The Body is breathing again:" if rising else "The head is under water and the Body cannot breathe:"
+        unit = "second" if age == 1 else "seconds"
+        assert rq._body_sentence(facts) == (
+            f"Health is 20 of 20. Hunger is 20 of 20. {prefix} air supply was "
+            f"{baseline} {age} {unit} ago and is {air} of 300 now."
+        )
+        seen.append(sample["seq"])
+    assert seen == recorded["targets"]
+
+
+@pytest.mark.parametrize("samples,baseline,age", [
+    ([(0, 300), (1, 270), (2, 240), (3, 270), (4, 290)], 240, 2),
+    ([(0, 270), (1, 270), (2, 270), (3, 250), (4, 250)], 270, 4),
+    ([(0, 270)], None, None),
+])
+def test_air_direction_with_recovery_plateaus_and_one_sample(samples, baseline, age):
+    window = rq.VitalWindow()
+    for stamp, air in samples:
+        facts = window.add(stamp, {"oxygen": air})
+    assert facts.get("oxygen_before") == baseline
+    assert facts.get("oxygen_age_s") == age
+
+
+def test_idle_and_work_use_the_same_protective_eligibility_and_inventory_words():
+    facts = {"health": 5, "health_before": 10, "vital_age_s": 5,
+             "oxygen": 77, "food": 15, "food_item": "apple", "inventory": {"apple": 2},
+             "safe_standing_position": [1, 64, 1],
+             "entities": [{"hostile": True, "name": "hostile mob", "dist": 30}]}
+    idle = rq.idle_options(facts)
+    work = rq.frame_options(tool="move_to", params={}, intent="reach home", facts=facts, running=True)
+    assert set(idle) - {"stay"} == set(work) - {"keep_going", "next_step", "call_agent"}
+    assert "move_away" in idle
+    idle_state = rq.idle_question(facts, idle)["state"]
+    assert idle_state["inventory"] == _running(facts)["inventory"] == "apple 2"
 
 
 def test_running_options_are_concrete_and_protective_ones_follow_the_facts():
     calm = rq.frame_options(facts={"oxygen": 300}, intent="get 3 raw iron", running=True,
                             next_call='smelt_item(count=3, input_item="raw_iron")', **CALL)
+    # With an intent, "next step" is not an option beside "keep going":
+    # whether the facts show the intent is its own question.
     assert calm == {
         "keep_going": 'Keep doing the current work, collect_resource(count=3, item="raw_iron"), for: “get 3 raw iron”',
-        "next_step": 'Stop the current action and start the next step of the plan: smelt_item(count=3, input_item="raw_iron").',
         "call_agent": "Stop the current action and hand control back to the Agent for a new plan.",
     }
     danger = rq.frame_options(
@@ -85,6 +171,80 @@ def test_result_options_never_skip_a_failed_step():
                                 result={"success": False, "reason": "x", "canRetry": False}, **CALL)
     assert list(hopeless) == ["call_agent"]
     assert rq.only_option(rq.frame_questions(hopeless)) == "call_agent"
+
+
+def test_result_report_is_a_concrete_thing_to_do_not_a_verdict():
+    # Agreed rule (frame-question doc section 1): no "has been achieved"
+    # options. The last step reports that the work is finished.
+    args = dict(facts={}, intent="到达[220,121,220]", running=False, result={"success": True}, **CALL)
+    terminal = rq.frame_options(**args)
+    assert terminal["next_step"] == "Do not repeat it and report to the Agent that this work is finished."
+    internal = rq.frame_options(next_call="equip_item(item=stone_sword)", **args)
+    assert internal["next_step"] == "Do not repeat it and start the next step of the plan: equip_item(item=stone_sword)."
+    assert set(terminal) == set(internal)
+
+
+@pytest.mark.parametrize("next_call", ["", "equip_item(item=stone_sword)"])
+def test_running_work_does_not_offer_next_step_beside_keep_going(next_call):
+    # Live seq499/1978/3913: asked beside "keep going", the next step was
+    # chosen at 3 of 5 logs, 3 of 12 coal and an unheld pickaxe.
+    options = rq.frame_options(facts={}, intent="x", running=True, next_call=next_call, **CALL)
+    assert "next_step" not in options
+    assert list(rq.frame_questions(options, acting_for_intent=True)) == ["q"]
+
+
+def test_intent_question_carries_only_the_facts_it_can_be_checked_against():
+    # Probes on live frames: the progress line ("inventory changed: oak_log
+    # +3"), the task and the call text made the 4B scorer answer "shown" at
+    # 3 of 4 logs; with only these facts it compared the counts correctly.
+    state = {"task": "t", "agent_intent": "i", "inventory": "oak_log 3", "main_hand": "oak_log",
+             "body": "b", "threats": "x", "current_work": "collect_resource(count=4) is running.",
+             "progress": "inventory changed: oak_log +3.", "position": "now at [1.0, 2.0, 3.0]."}
+    intent = "at least 4 oak_log in the inventory"
+    asked = rq.done_question(state, intent)
+    assert asked["state"] == {
+        "agent_intent": f"The Agent wants the following result: “{intent}”.",
+        "inventory": "oak_log 3", "main_hand": "oak_log", "position": "now at [1.0, 2.0, 3.0].",
+    }
+    assert list(asked["questions"]) == ["a"]
+    assert set(asked["questions"]["a"]["criteria"]) == {"shown", "not_shown"}
+    assert rq.done_question({"inventory": "empty"}, intent)["state"] == {
+        "agent_intent": f"The Agent wants the following result: “{intent}”.", "inventory": "empty"}
+
+
+def test_intent_answer_and_danger_branch_are_read_strictly():
+    assert rq.done_choice({"answers": {"a": {"choice": "shown"}}}) == "shown"
+    assert rq.done_choice({"answers": {"a": {"choice": "not_shown"}}}) == "not_shown"
+    assert rq.done_choice({"answers": {"a": {"choice": "maybe"}}}) is None
+    assert rq.done_choice({"answers": {}}) is None and rq.done_choice(None) is None
+    questions = rq.frame_questions({"keep_going": "k", "call_agent": "c", "surface": "s"})
+    assert rq.in_danger({"answers": {"d": {"choice": "in_danger"}}}, questions)
+    assert not rq.in_danger({"answers": {"d": {"choice": "safe"}}}, questions)
+    assert not rq.in_danger({"answers": {"d": {"choice": "in_danger"}}}, {"q": {}})
+
+
+def test_failure_observations_survive_the_agent_projector_without_new_result_fields():
+    from minebot.app.runner import _model_tool_payload
+    native = {"success": False, "reason": "target_not_found", "canRetry": True,
+              "metrics": {"requested_target": "absent-uuid", "scope": "nearbyEntities",
+                          "search_radius": 32, "entities_observed": 0}}
+    projected = _model_tool_payload("engage_entity", native, trace_ref="regression")
+    expected = "engage_entity() has ended. It reported failure: target_not_found. The tool observed 0 entities within 32 blocks."
+    assert rq.result_sentence("engage_entity()", native) == expected
+    assert rq.result_sentence("engage_entity()", projected) == expected
+    assert native["canRetry"] is True
+
+
+@pytest.mark.parametrize("details", [{}, {"search_radius": 32}, {"entities_observed": 0},
+                                     {"entities_observed": False, "search_radius": 32}])
+def test_failure_does_not_invent_missing_observation_facts(details):
+    assert rq.result_sentence("call()", {"success": False, "reason": "x", "metrics": details}) == (
+        "call() has ended. It reported failure: x.")
+
+
+def test_success_still_only_says_ended_normally_even_with_observation_metrics():
+    assert rq.result_sentence("call()", {"success": True, "metrics": {
+        "entities_observed": 1, "search_radius": 32}}) == "call() has ended normally."
 
 
 def test_result_frame_reports_how_the_call_ended_and_earlier_attempts():
@@ -125,19 +285,54 @@ def test_danger_is_asked_only_when_a_protective_action_is_on_offer():
     assert rq.frame_choice(None, calm) == "unknown"
 
 
+@pytest.mark.parametrize("danger_answer", [
+    None, {}, {"choice": ""}, {"choice": "unknown"},
+    {"choice": "not_a_danger_option"}, {"choice": ["safe"]},
+    {"choice": {"safe": True}}, {"choice": 1},
+])
+def test_unknown_danger_cannot_authorize_normal_or_protective_action(danger_answer):
+    questions = rq.frame_questions({
+        "keep_going": "Continue the work.", "next_step": "Stop and start the next step.",
+        "surface": "Swim up to air.", "call_agent": "Stop and call the Agent.",
+    })
+    answers = {"q": {"choice": "next_step"}, "p": {"choice": "surface"}}
+    if danger_answer is not None:
+        answers["d"] = danger_answer
+    assert rq.frame_choice({"answers": answers}, questions) == "unknown"
+
+
+def test_dead_entities_do_not_remain_actionable_hostiles_in_facts_or_options():
+    facts={'health':20,'food':20,'oxygen':300,'entities':[
+        {'id':'dead','name':'Former hostile','hostile':True,'health':0,'dist2':1},
+        {'id':'alive','name':'Live hostile','hostile':True,'health':10,'dist2':4}]}
+    assert [entry['id'] for entry in rq.hostiles(facts)]==['alive']
+    assert 'Live hostile' in rq._threat_sentence(facts)
+    assert 'Former hostile' not in rq._threat_sentence(facts)
+    facts['entities']=facts['entities'][:1]
+    assert rq._threat_sentence(facts)=='No hostile mob is in view.'
+    assert not {'engage','ranged','move_away'} & rq.protective_options(facts).keys()
+    # Missing health does not prove an entity dead.
+    facts['entities'][0].pop('health')
+    assert rq.hostiles(facts)[0]['id']=='dead'
+
+
 def test_after_a_protective_action_the_body_may_go_back_to_its_work():
-    options = rq.after_default_options(
-        original_call='collect_resource(count=3, item="raw_iron")', intent="get 3 raw iron",
-        default_call="go_to_surface()", result={"success": True},
-    )
-    assert options == {
+    common = dict(original_call='collect_resource(count=3, item="raw_iron")', intent="get 3 raw iron",
+                  default_call="go_to_surface()", result={"success": True}, protective_choice="surface")
+    # The action that just ended is named beside the other protective actions,
+    # not "Run the same call again" (step5-threat-claude4: repeated 12 times),
+    # and only while the facts still allow it (step5-threat-claude9).
+    assert rq.after_default_options(facts={"oxygen": 120}, **common) == {
         "resume": 'Go back to the earlier work, collect_resource(count=3, item="raw_iron"), for: “get 3 raw iron”',
-        "repeat": "Run the same call again: go_to_surface().",
+        "surface": "Swim up to air now.",
         "call_agent": "Do not go back and hand control back to the Agent for a new plan.",
     }
-    stuck = rq.after_default_options(original_call="x()", intent="", default_call="go_to_surface()",
-                                     result={"success": False, "reason": "blocked", "canRetry": False})
-    assert list(stuck) == ["resume", "call_agent"]
+    assert list(rq.after_default_options(facts={"oxygen": 300}, **common)) == ["resume", "call_agent"]
+    shot = rq.after_default_options(original_call="", intent="", default_call="engage_entity()",
+        result={"success": False, "reason": "disengaged_low_health"}, protective_choice="engage",
+        facts={"health": 6, "health_before": 20, "vital_age_s": 3, "selected_item": "iron_sword",
+               "entities": [{"hostile": True, "name": "Skeleton", "dist": 8, "id": "s", "pos": [8, 64, 0]}]})
+    assert list(shot) == ["stay", "engage", "move_away", "call_agent"]
 
 
 def test_a_step_without_its_own_intent_is_said_to_be_one_step_of_the_plan():
@@ -155,7 +350,7 @@ def test_a_step_without_its_own_intent_is_said_to_be_one_step_of_the_plan():
     assert list(inherited) == list(own)
 
 
-def test_a_dead_body_is_handed_to_the_agent_without_asking():
+def test_a_dead_body_has_no_decision_options():
     # Live run reflex-stage-20261012f: with health 0 the question still
     # offered the surface action again, and Decision took it.
     facts = {"health": 0, "food": 17, "oxygen": 0}
@@ -163,8 +358,7 @@ def test_a_dead_body_is_handed_to_the_agent_without_asking():
                                facts=facts, running=True, next_call="craft_item()")
     after = rq.after_default_options(original_call="collect_resource()", intent="get iron",
                                      default_call="go_to_surface()", result={"success": False}, facts=facts)
-    assert list(running) == list(after) == ["call_agent"]
-    assert rq.only_option(rq.frame_questions(running)) == "call_agent"
+    assert running == after == rq.idle_options(facts) == {}
     state = rq.frame_state(goal="g", intent="get iron", tool="collect_resource", params={}, facts=facts, running=True)
     assert state["body"] == "The Body has died."
     alive = rq.after_default_options(original_call="c()", intent="i", default_call="d()", result={"success": True},

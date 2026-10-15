@@ -1,0 +1,11 @@
+{
+  "stop_response": "Stopping the server",
+  "ports_still_occupied": [],
+  "ended_at": 1791955709.1879454,
+  "first_check_ports_occupied": [
+    25569,
+    25579
+  ],
+  "verified_at": 1791956177.574471,
+  "verification": "bind with SO_REUSEADDR; owned server saved and exited normally"
+}

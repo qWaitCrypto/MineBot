@@ -1,0 +1,491 @@
+{
+  "source": "/home/qwait/MineBot-always-on/logs/reflex-always-on-20261014-default-equipment-fixed/trace.jsonl",
+  "seq_end": 1251,
+  "elapsed_s": 53.533791065216064,
+  "requests_by_purpose": {
+    "idle_frame": 20,
+    "running_frame": 30,
+    "plan_result_frame": 2,
+    "default_result_frame": 1
+  },
+  "requests_by_loop_state": {
+    "idle": 22,
+    "work": 17,
+    "threat": 14
+  },
+  "requests_by_state_and_purpose": {
+    "idle / idle_frame": 20,
+    "work / running_frame": 17,
+    "idle / plan_result_frame": 2,
+    "threat / running_frame": 13,
+    "threat / default_result_frame": 1
+  },
+  "requests_per_session_minute_by_loop_state": {
+    "idle": 24.657323416381,
+    "work": 19.053386276294408,
+    "threat": 15.691023992242455
+  },
+  "requests_per_minute_buckets": [
+    {
+      "minute_from_trace_start": 0,
+      "observed_seconds": 53.533791065216064,
+      "counts_by_state_and_purpose": {
+        "idle / idle_frame": 20,
+        "work / running_frame": 17,
+        "idle / plan_result_frame": 2,
+        "threat / running_frame": 13,
+        "threat / default_result_frame": 1
+      }
+    }
+  ],
+  "loop_state_seconds": {
+    "idle": 26.76094698905945,
+    "work": 16.85970139503479,
+    "threat": 9.913142681121826
+  },
+  "requests_per_session_minute_by_purpose": {
+    "idle_frame": 22.415748560346362,
+    "running_frame": 33.623622840519545,
+    "plan_result_frame": 2.2415748560346365,
+    "default_result_frame": 1.1207874280173182
+  },
+  "requests_per_observed_body_work_minute_by_purpose": {
+    "idle_frame": 67.99251925757842,
+    "running_frame": 101.98877888636763,
+    "plan_result_frame": 6.799251925757842,
+    "default_result_frame": 3.399625962878921
+  },
+  "requests_during_observed_body_work_by_purpose": {
+    "running_frame": 17
+  },
+  "requests_during_observed_body_work_per_minute_by_purpose": {
+    "running_frame": 57.79364136894166
+  },
+  "rate_accounting": "Session-normalized rates include all requests. Total requests divided by observed work time measures overhead, not work cadence. The during-work rate restricts the numerator to requests inside observed native work intervals.",
+  "native_action_count": 4,
+  "observed_native_work_s": 17.64900040626526,
+  "idle_remainder_estimate_s": 35.884790658950806,
+  "supervised_body_call_s": 25.986000537872314,
+  "outside_supervised_body_calls_s": 27.54779052734375,
+  "supervised_call_timing_method": "Union of completed supervised-call intervals; includes tool execution and its settlement, not proof of physical movement. Native terminals missing elapsed_ms are excluded from native work time, never treated as proof that the Body was idle.",
+  "timing_method": "Union of native terminal elapsed_ms intervals, deduplicated by action_id; IPC receipt is the end timestamp. Idle remainder and no-question gap are estimates; missing native terminals are not counted as work.",
+  "longest_estimated_idle_without_any_question_s": 1.508101224899292,
+  "longest_idle_state_without_any_question_s": 1.508101224899292,
+  "idle_state_gap_method": "idle is the loop state, and may contain life movement. This measurement excludes dead/work intervals but includes session startup.",
+  "largest_request_gaps": [
+    {
+      "before_seq": 127,
+      "after_seq": 292,
+      "seconds": 1.684934139251709
+    },
+    {
+      "before_seq": 794,
+      "after_seq": 890,
+      "seconds": 1.508101224899292
+    },
+    {
+      "before_seq": 1027,
+      "after_seq": 1045,
+      "seconds": 1.4905071258544922
+    },
+    {
+      "before_seq": 1053,
+      "after_seq": 1071,
+      "seconds": 1.490178108215332
+    },
+    {
+      "before_seq": 1105,
+      "after_seq": 1123,
+      "seconds": 1.4840285778045654
+    },
+    {
+      "before_seq": 916,
+      "after_seq": 1019,
+      "seconds": 1.4789543151855469
+    },
+    {
+      "before_seq": 1209,
+      "after_seq": 1227,
+      "seconds": 1.4598867893218994
+    },
+    {
+      "before_seq": 1157,
+      "after_seq": 1175,
+      "seconds": 1.4473369121551514
+    },
+    {
+      "before_seq": 374,
+      "after_seq": 475,
+      "seconds": 1.439347267150879
+    },
+    {
+      "before_seq": 1183,
+      "after_seq": 1201,
+      "seconds": 1.434629201889038
+    }
+  ],
+  "default_actions_requested": {
+    "move_away": 1,
+    "engage": 11
+  },
+  "default_actions_finished": {
+    "move_away": 1,
+    "engage": 11
+  },
+  "action_accounting": "Answers are semantic selections, default_requested is an attempted action dispatch, and native_action_count is observed execution. They are not interchangeable.",
+  "answers": {
+    "stay": 9,
+    "keep_going": 15,
+    "next_step": 2,
+    "move_away": 1,
+    "resume": 1,
+    "engage": 11,
+    "call_agent": 9
+  },
+  "unknown_ratio": 0.0,
+  "decision_ms_median": 131.0615,
+  "agent_delivery_counts": {
+    "reflex_fact_wake": 2
+  },
+  "agent_deliveries": [
+    {
+      "seq": 805,
+      "event": "reflex_fact_wake",
+      "reason": null,
+      "status": "completed",
+      "kind": null,
+      "activity_id": "activity-02c5594455c6429ca787c97ddd272ae4",
+      "body_event": null
+    },
+    {
+      "seq": 936,
+      "event": "reflex_fact_wake",
+      "reason": null,
+      "status": "handoff_requested",
+      "kind": null,
+      "activity_id": null,
+      "body_event": null
+    }
+  ],
+  "runtime_intent_wakes": [],
+  "wake_accounting": "reflex_death is a death observation, not a wake. agent_start counts launches/turn entries, not delivery events. Distinct deliveries can be coalesced into a model turn.",
+  "agent_start_count": 3,
+  "delegate_work": 1,
+  "read_reflex": 0,
+  "state_switches": 30,
+  "reaction_chains": [
+    {
+      "action_progress_monotonic_s": 537611.417175484,
+      "action_sampled_at_ms": 1791946376064,
+      "answer_monotonic_s": 537610.760311072,
+      "answer_to_action_s": 0.65686441201251,
+      "choice": "move_away",
+      "event": "reflex_reaction_chain",
+      "event_distance": 12.615677198259338,
+      "event_health": 20.0,
+      "event_monotonic_s": 537608.309212637,
+      "event_sampled_at_ms": null,
+      "event_to_request_s": 2.2619850839255378,
+      "first_native_progress": true,
+      "native_action_id": "7b69b0ac-3f25-402a-9326-e81d4c1f6def",
+      "request_monotonic_s": 537610.571197721,
+      "request_to_answer_s": 0.18911335105076432,
+      "seq": 595,
+      "session_id": "Step5NextBot",
+      "target": "af5f0057-7a88-43c3-b428-7ab6a6a2cb2c",
+      "tool": "move_away",
+      "tool_call_id": "reflex-default-6c47f61c-202a-4344-a838-cfabf4c26033",
+      "total_s": 3.107962846988812,
+      "ts": 1791946376.065912
+    },
+    {
+      "action_progress_monotonic_s": 537616.472655532,
+      "action_sampled_at_ms": 1791946381119,
+      "answer_monotonic_s": 537616.084847248,
+      "answer_to_action_s": 0.38780828390736133,
+      "choice": "engage",
+      "event": "reflex_reaction_chain",
+      "event_distance": 12.615677198259338,
+      "event_health": 20.0,
+      "event_monotonic_s": 537608.309212637,
+      "event_sampled_at_ms": null,
+      "event_to_request_s": 7.594269608031027,
+      "first_native_progress": true,
+      "native_action_id": "12584a7d-7c73-4ffd-ac9a-ef74806f7f91",
+      "request_monotonic_s": 537615.903482245,
+      "request_to_answer_s": 0.1813650029944256,
+      "seq": 897,
+      "session_id": "Step5NextBot",
+      "target": "af5f0057-7a88-43c3-b428-7ab6a6a2cb2c",
+      "tool": "engage_entity",
+      "tool_call_id": "reflex-idle-10",
+      "total_s": 8.163442894932814,
+      "ts": 1791946381.1207788
+    },
+    {
+      "action_progress_monotonic_s": 537618.15597895,
+      "action_sampled_at_ms": 1791946382803,
+      "answer_monotonic_s": 537617.868105772,
+      "answer_to_action_s": 0.2878731780219823,
+      "choice": "engage",
+      "event": "reflex_reaction_chain",
+      "event_distance": 12.615677198259338,
+      "event_health": 20.0,
+      "event_monotonic_s": 537608.309212637,
+      "event_sampled_at_ms": null,
+      "event_to_request_s": 9.376141779939644,
+      "first_native_progress": true,
+      "native_action_id": "11853934-f16c-49d6-9875-ec1e064af030",
+      "request_monotonic_s": 537617.685354417,
+      "request_to_answer_s": 0.18275135499425232,
+      "seq": 915,
+      "session_id": "Step5NextBot",
+      "target": "af5f0057-7a88-43c3-b428-7ab6a6a2cb2c",
+      "tool": "engage_entity",
+      "tool_call_id": "reflex-idle-11",
+      "total_s": 9.846766312955879,
+      "ts": 1791946382.804117
+    },
+    {
+      "action_progress_monotonic_s": 537620.217703446,
+      "action_sampled_at_ms": 1791946384864,
+      "answer_monotonic_s": 537619.866441692,
+      "answer_to_action_s": 0.35126175405457616,
+      "choice": "engage",
+      "event": "reflex_reaction_chain",
+      "event_distance": 12.615677198259338,
+      "event_health": 20.0,
+      "event_monotonic_s": 537608.309212637,
+      "event_sampled_at_ms": null,
+      "event_to_request_s": 11.374247933039442,
+      "first_native_progress": true,
+      "native_action_id": "2977fc8e-40d4-4d9d-9a06-f1e7a0037c17",
+      "request_monotonic_s": 537619.68346057,
+      "request_to_answer_s": 0.18298112193588167,
+      "seq": 1026,
+      "session_id": "Step5NextBot",
+      "target": "af5f0057-7a88-43c3-b428-7ab6a6a2cb2c",
+      "tool": "engage_entity",
+      "tool_call_id": "reflex-idle-12",
+      "total_s": 11.9084908090299,
+      "ts": 1791946384.865825
+    },
+    {
+      "action_progress_monotonic_s": 537622.271160801,
+      "action_sampled_at_ms": 1791946386918,
+      "answer_monotonic_s": 537621.939290066,
+      "answer_to_action_s": 0.33187073504086584,
+      "choice": "engage",
+      "event": "reflex_reaction_chain",
+      "event_distance": 12.615677198259338,
+      "event_health": 20.0,
+      "event_monotonic_s": 537608.309212637,
+      "event_sampled_at_ms": null,
+      "event_to_request_s": 13.443334199953824,
+      "first_native_progress": true,
+      "native_action_id": "3ce03f58-be73-4409-a7cb-d270db93c8b3",
+      "request_monotonic_s": 537621.752546837,
+      "request_to_answer_s": 0.18674322904553264,
+      "seq": 1052,
+      "session_id": "Step5NextBot",
+      "target": "af5f0057-7a88-43c3-b428-7ab6a6a2cb2c",
+      "tool": "engage_entity",
+      "tool_call_id": "reflex-idle-13",
+      "total_s": 13.961948164040223,
+      "ts": 1791946386.9194655
+    },
+    {
+      "action_progress_monotonic_s": 537624.316720626,
+      "action_sampled_at_ms": 1791946388963,
+      "answer_monotonic_s": 537623.991648418,
+      "answer_to_action_s": 0.3250722079537809,
+      "choice": "engage",
+      "event": "reflex_reaction_chain",
+      "event_distance": 12.615677198259338,
+      "event_health": 20.0,
+      "event_monotonic_s": 537608.309212637,
+      "event_sampled_at_ms": null,
+      "event_to_request_s": 15.496488754986785,
+      "first_native_progress": true,
+      "native_action_id": "982af3b4-f86a-4b05-8d6f-f217d1418eb4",
+      "request_monotonic_s": 537623.805701392,
+      "request_to_answer_s": 0.1859470260096714,
+      "seq": 1078,
+      "session_id": "Step5NextBot",
+      "target": "af5f0057-7a88-43c3-b428-7ab6a6a2cb2c",
+      "tool": "engage_entity",
+      "tool_call_id": "reflex-idle-14",
+      "total_s": 16.007507988950238,
+      "ts": 1791946388.964874
+    },
+    {
+      "action_progress_monotonic_s": 537626.256279279,
+      "action_sampled_at_ms": 1791946390903,
+      "answer_monotonic_s": 537625.951908405,
+      "answer_to_action_s": 0.30437087395694107,
+      "choice": "engage",
+      "event": "reflex_reaction_chain",
+      "event_distance": 12.615677198259338,
+      "event_health": 20.0,
+      "event_monotonic_s": 537608.309212637,
+      "event_sampled_at_ms": null,
+      "event_to_request_s": 17.453593670972623,
+      "first_native_progress": true,
+      "native_action_id": "8f3aaa55-7a1e-4442-9cb6-d10479d478b9",
+      "request_monotonic_s": 537625.762806308,
+      "request_to_answer_s": 0.189102097065188,
+      "seq": 1104,
+      "session_id": "Step5NextBot",
+      "target": "af5f0057-7a88-43c3-b428-7ab6a6a2cb2c",
+      "tool": "engage_entity",
+      "tool_call_id": "reflex-idle-15",
+      "total_s": 17.947066641994752,
+      "ts": 1791946390.9043188
+    },
+    {
+      "action_progress_monotonic_s": 537628.26952056,
+      "action_sampled_at_ms": 1791946392916,
+      "answer_monotonic_s": 537627.971396185,
+      "answer_to_action_s": 0.29812437505461276,
+      "choice": "engage",
+      "event": "reflex_reaction_chain",
+      "event_distance": 12.615677198259338,
+      "event_health": 20.0,
+      "event_monotonic_s": 537608.309212637,
+      "event_sampled_at_ms": null,
+      "event_to_request_s": 19.475843688938767,
+      "first_native_progress": true,
+      "native_action_id": "e932edba-318b-46f6-bea4-5fc08246a521",
+      "request_monotonic_s": 537627.785056326,
+      "request_to_answer_s": 0.18633985903579742,
+      "seq": 1130,
+      "session_id": "Step5NextBot",
+      "target": "af5f0057-7a88-43c3-b428-7ab6a6a2cb2c",
+      "tool": "engage_entity",
+      "tool_call_id": "reflex-idle-16",
+      "total_s": 19.960307923029177,
+      "ts": 1791946392.9176478
+    },
+    {
+      "action_progress_monotonic_s": 537630.2502387,
+      "action_sampled_at_ms": 1791946394897,
+      "answer_monotonic_s": 537629.916593157,
+      "answer_to_action_s": 0.3336455429671332,
+      "choice": "engage",
+      "event": "reflex_reaction_chain",
+      "event_distance": 12.615677198259338,
+      "event_health": 20.0,
+      "event_monotonic_s": 537608.309212637,
+      "event_sampled_at_ms": null,
+      "event_to_request_s": 21.422614393988624,
+      "first_native_progress": true,
+      "native_action_id": "f52dbaa9-ceb9-48ff-989a-1451a93aa72c",
+      "request_monotonic_s": 537629.731827031,
+      "request_to_answer_s": 0.18476612598169595,
+      "seq": 1156,
+      "session_id": "Step5NextBot",
+      "target": "af5f0057-7a88-43c3-b428-7ab6a6a2cb2c",
+      "tool": "engage_entity",
+      "tool_call_id": "reflex-idle-17",
+      "total_s": 21.941026062937453,
+      "ts": 1791946394.8984656
+    },
+    {
+      "action_progress_monotonic_s": 537632.21943066,
+      "action_sampled_at_ms": 1791946396866,
+      "answer_monotonic_s": 537631.925468536,
+      "answer_to_action_s": 0.293962124036625,
+      "choice": "engage",
+      "event": "reflex_reaction_chain",
+      "event_distance": 12.615677198259338,
+      "event_health": 20.0,
+      "event_monotonic_s": 537608.309212637,
+      "event_sampled_at_ms": null,
+      "event_to_request_s": 23.432582817040384,
+      "first_native_progress": true,
+      "native_action_id": "5eead295-6bf0-4ae1-9443-d9b1cd919c0c",
+      "request_monotonic_s": 537631.741795454,
+      "request_to_answer_s": 0.1836730819195509,
+      "seq": 1182,
+      "session_id": "Step5NextBot",
+      "target": "af5f0057-7a88-43c3-b428-7ab6a6a2cb2c",
+      "tool": "engage_entity",
+      "tool_call_id": "reflex-idle-18",
+      "total_s": 23.91021802299656,
+      "ts": 1791946396.8677337
+    },
+    {
+      "action_progress_monotonic_s": 537634.151521497,
+      "action_sampled_at_ms": 1791946398798,
+      "answer_monotonic_s": 537633.883066769,
+      "answer_to_action_s": 0.2684547280659899,
+      "choice": "engage",
+      "event": "reflex_reaction_chain",
+      "event_distance": 12.615677198259338,
+      "event_health": 20.0,
+      "event_monotonic_s": 537608.309212637,
+      "event_sampled_at_ms": null,
+      "event_to_request_s": 25.390517308027484,
+      "first_native_progress": true,
+      "native_action_id": "cd1c1325-8636-46ee-82ee-a88737eb51a7",
+      "request_monotonic_s": 537633.699729945,
+      "request_to_answer_s": 0.18333682394586504,
+      "seq": 1208,
+      "session_id": "Step5NextBot",
+      "target": "af5f0057-7a88-43c3-b428-7ab6a6a2cb2c",
+      "tool": "engage_entity",
+      "tool_call_id": "reflex-idle-19",
+      "total_s": 25.84230886003934,
+      "ts": 1791946398.7996485
+    },
+    {
+      "action_progress_monotonic_s": 537636.100256816,
+      "action_sampled_at_ms": 1791946400747,
+      "answer_monotonic_s": 537635.838174769,
+      "answer_to_action_s": 0.26208204706199467,
+      "choice": "engage",
+      "event": "reflex_reaction_chain",
+      "event_distance": 12.615677198259338,
+      "event_health": 20.0,
+      "event_monotonic_s": 537608.309212637,
+      "event_sampled_at_ms": null,
+      "event_to_request_s": 27.347317609936,
+      "first_native_progress": true,
+      "native_action_id": "79cb2a3c-ceba-4f10-874c-901f832cd064",
+      "request_monotonic_s": 537635.656530247,
+      "request_to_answer_s": 0.18164452200289816,
+      "seq": 1234,
+      "session_id": "Step5NextBot",
+      "target": "af5f0057-7a88-43c3-b428-7ab6a6a2cb2c",
+      "tool": "engage_entity",
+      "tool_call_id": "reflex-idle-20",
+      "total_s": 27.79104417900089,
+      "ts": 1791946400.748685
+    }
+  ],
+  "deaths": [],
+  "last_body": {
+    "seq": 1245,
+    "pos": [
+      220.78,
+      121.0,
+      220.87
+    ],
+    "health": 20.0,
+    "food": 20,
+    "oxygen": 300
+  },
+  "native_client_timing": {
+    "source": "client.log MINEBOT_PHASE_A terminal JSON, deduplicated by action_id",
+    "terminal_count": 15,
+    "observed_work_s": 22.79900050163269,
+    "remainder_s": 30.734790563583374,
+    "requests_during_work": {
+      "running_frame": 27
+    },
+    "requests_per_work_minute": {
+      "running_frame": 71.05574649572853
+    },
+    "limitation": "Only terminals with native timing are measured. Remainder includes startup and settlement; it is not proof of physical idleness."
+  }
+}

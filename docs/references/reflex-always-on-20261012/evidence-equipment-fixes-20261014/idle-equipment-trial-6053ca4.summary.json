@@ -1,0 +1,12 @@
+{
+  "terminal_seq": 900,
+  "body_read_seq": 907,
+  "idle_baseline": {
+    "selected": "engage",
+    "recorded": "engage",
+    "matched": true
+  },
+  "result_distribution": {
+    "equip:stone_sword": 12
+  }
+}

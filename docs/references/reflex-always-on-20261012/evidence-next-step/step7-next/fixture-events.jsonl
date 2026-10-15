@@ -1,0 +1,29 @@
+{"time": 1791944574.2227733, "last_seq": 7, "kind": "first_question", "matched_seq": 6}
+{"time": 1791944574.226688, "last_seq": 7, "kind": "fixture_day", "command": "time set day", "response": "Set minecraft:overworld to time marker minecraft:day"}
+{"time": 1791944574.2291253, "last_seq": 7, "kind": "fixture_day_frozen", "command": "gamerule minecraft:advance_time false", "response": "Gamerule advance_time is now set to: false"}
+{"time": 1791944574.2312596, "last_seq": 7, "kind": "fixture_no_new_natural_spawns", "command": "gamerule minecraft:spawn_mobs false", "response": "Gamerule spawn_mobs is now set to: false"}
+{"time": 1791944574.2367258, "last_seq": 7, "kind": "fixture_restore_regeneration", "command": "gamerule minecraft:natural_health_regeneration true", "response": "Gamerule natural_health_regeneration is now set to: true"}
+{"time": 1791944574.239102, "last_seq": 7, "kind": "fixture_heal", "command": "effect give Step5NextBot minecraft:instant_health 1 10 true", "response": "Applied effect Instant Health to Step5NextBot"}
+{"time": 1791944574.2408772, "last_seq": 7, "kind": "fixture_feed", "command": "effect give Step5NextBot minecraft:saturation 1 10 true", "response": "Applied effect Saturation to Step5NextBot"}
+{"time": 1791944574.2447205, "last_seq": 7, "kind": "fixture_empty_inventory", "command": "clear Step5NextBot", "response": "Removed 3 item(s) from player Step5NextBot"}
+{"time": 1791944574.2469854, "last_seq": 7, "kind": "fixture_start_away_from_home", "command": "tp Step5NextBot 250.5 121 250.5", "response": "Teleported Step5NextBot to 250.500000, 121.000000, 250.500000"}
+{"time": 1791944574.2471023, "last_seq": 7, "kind": "life_observation_started", "duration_s": 1800, "home": [220.5, 121, 220.5]}
+{"time": 1791944574.2472084, "last_seq": 7, "kind": "observation_minute", "elapsed_s": 0.0, "body_seq": null, "position": null, "health": null, "deaths": []}
+{"time": 1791944634.3771467, "last_seq": 274, "kind": "observation_minute", "elapsed_s": 60.1, "body_seq": 270, "position": [221.73, 121.0, 221.73], "health": 20.0, "deaths": []}
+{"time": 1791944694.437422, "last_seq": 471, "kind": "fixture_visitor_spawn", "command": "player Visitor spawn at 227.7 121.0 221.7", "response": ""}
+{"time": 1791944694.4380348, "last_seq": 471, "kind": "observation_minute", "elapsed_s": 120.2, "body_seq": 463, "position": [221.73, 121.0, 221.73], "health": 20.0, "deaths": []}
+{"time": 1791944754.6186545, "last_seq": 708, "kind": "fixture_visitor_walk", "command": "player Visitor move forward", "response": ""}
+{"time": 1791944754.619114, "last_seq": 708, "kind": "observation_minute", "elapsed_s": 180.4, "body_seq": 702, "position": [221.73, 121.0, 221.73], "health": 20.0, "deaths": []}
+{"time": 1791944759.6280663, "last_seq": 729, "kind": "fixture_visitor_stop", "command": "player Visitor stop", "response": ""}
+{"time": 1791944804.5911949, "last_seq": 903, "kind": "fixture_visitor_leave", "command": "player Visitor kill", "response": ""}
+{"time": 1791944814.9011242, "last_seq": 937, "kind": "observation_minute", "elapsed_s": 240.7, "body_seq": 935, "position": [221.73, 121.0, 221.73], "health": 20.0, "deaths": []}
+{"time": 1791944873.8977115, "last_seq": 1077, "kind": "fixture_dusk_start_away_from_home", "command": "tp Step5NextBot 250.5 121 250.5", "response": "No entity was found"}
+{"time": 1791944874.4813042, "last_seq": 1078, "kind": "fixture_dusk", "command": "time set 12500", "response": "Set minecraft:overworld to 12500 tick(s)"}
+{"time": 1791944874.4818327, "last_seq": 1078, "kind": "observation_minute", "elapsed_s": 300.2, "body_seq": 1024, "position": [221.73, 121.0, 221.73], "health": 20.0, "deaths": [1034]}
+{"time": 1791944934.5775762, "last_seq": 1165, "kind": "user_message", "text": "/goal 请走到 [210,121,230]，不破坏或放置方块，不采集。意图写到达这个位置；完成后如实报告，然后让身体回到空闲生活。"}
+{"time": 1791944934.5776982, "last_seq": 1165, "kind": "task_during_life", "while_native_home_move": false, "native_body_seq": 1024, "life_request_seq": 10}
+{"time": 1791944934.5783422, "last_seq": 1165, "kind": "observation_minute", "elapsed_s": 360.3, "body_seq": 1024, "position": [221.73, 121.0, 221.73], "health": 20.0, "deaths": [1034]}
+{"time": 1791944994.6808648, "last_seq": 1279, "kind": "observation_minute", "elapsed_s": 420.4, "body_seq": 1024, "position": [221.73, 121.0, 221.73], "health": 20.0, "deaths": [1034]}
+{"time": 1791945054.2752047, "last_seq": 1364, "kind": "fixture_day_after_task", "command": "time set day", "response": "Set minecraft:overworld to time marker minecraft:day"}
+{"time": 1791945054.275622, "last_seq": 1364, "kind": "observation_minute", "elapsed_s": 480.0, "body_seq": 1024, "position": [221.73, 121.0, 221.73], "health": 20.0, "deaths": [1034]}
+{"time": 1791945076.5675044, "kind": "validation_stopped_after_disconnect", "last_seq": 1398, "reason": "Client left the world; synthetic death health is null. Not a 30-minute life pass."}

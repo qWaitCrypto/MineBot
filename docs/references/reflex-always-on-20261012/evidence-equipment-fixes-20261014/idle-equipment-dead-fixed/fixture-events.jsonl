@@ -1,0 +1,24 @@
+{"time": 1791948094.9406457, "last_seq": 7, "kind": "first_question", "matched_seq": 6}
+{"time": 1791948094.9682672, "last_seq": 9, "kind": "fixture_no_natural_spawns", "command": "gamerule minecraft:spawn_mobs false", "response": "Gamerule spawn_mobs is now set to: false"}
+{"time": 1791948094.976707, "last_seq": 9, "kind": "fixture_night", "command": "time set night", "response": "Set minecraft:overworld to time marker minecraft:night"}
+{"time": 1791948094.980432, "last_seq": 9, "kind": "fixture_frozen_time", "command": "gamerule minecraft:advance_time false", "response": "Gamerule advance_time is now set to: false"}
+{"time": 1791948094.9928033, "last_seq": 9, "kind": "fixture_start", "command": "tp Step5NextBot 220.5 121 220.5", "response": "Teleported Step5NextBot to 220.500000, 121.000000, 220.500000"}
+{"time": 1791948094.9995532, "last_seq": 9, "kind": "fixture_heal", "command": "effect give Step5NextBot minecraft:instant_health 1 10 true", "response": "Applied effect Instant Health to Step5NextBot"}
+{"time": 1791948095.0125563, "last_seq": 9, "kind": "fixture_empty_inventory", "command": "clear Step5NextBot", "response": "Removed 3 item(s) from player Step5NextBot"}
+{"time": 1791948095.0288627, "last_seq": 9, "kind": "fixture_last_durability", "command": "item replace entity Step5NextBot weapon.mainhand with minecraft:wooden_sword[minecraft:damage=58]", "response": "Replaced a slot on Step5NextBot with [Wooden Sword]"}
+{"time": 1791948095.0346081, "last_seq": 9, "kind": "fixture_spare", "command": "give Step5NextBot minecraft:stone_sword", "response": "Gave 1 [Stone Sword] to Step5NextBot"}
+{"time": 1791948095.0350745, "last_seq": 9, "kind": "user_message", "text": "/goal 请用 delegate_work 交出一个移动节点，走到[224,121,220]。意图写到达该位置，不破坏、不放置、不采集。下发后不read_reflex、不轮询；收到完成通知后如实报告并待命。不要主动换装备，之后的附近威胁由反射层处理。"}
+{"time": 1791948108.2416804, "last_seq": 316, "kind": "agent_patrol_terminal", "matched_seq": 316}
+{"time": 1791948110.053939, "last_seq": 407, "kind": "idle_after_patrol", "matched_seq": 404}
+{"time": 1791948110.0690112, "last_seq": 407, "kind": "fixture_close_target", "command": "execute at Step5NextBot run summon minecraft:zombie ~1 ~ ~ {NoAI:1b,PersistenceRequired:1b,Tags:[\"idle_equipment_fixed\"]}", "response": "Summoned new Zombie"}
+{"time": 1791948112.1462507, "last_seq": 427, "kind": "equipment_selected", "matched_seq": 425}
+{"time": 1791948115.0327246, "last_seq": 537, "kind": "target_killed_by_body", "matched_seq": 536}
+{"time": 1791948115.843517, "last_seq": 624, "kind": "idle_protection_finished", "matched_seq": 620}
+{"time": 1791948115.8646233, "last_seq": 624, "kind": "fixture_final_inventory", "command": "data get entity Step5NextBot Inventory", "response": "Step5NextBot has the following entity data: [{components: {\"minecraft:damage\": 4}, count: 1, Slot: 1b, id: \"minecraft:stone_sword\"}]"}
+{"time": 1791948115.8801656, "last_seq": 624, "kind": "fixture_final_selected_slot", "command": "data get entity Step5NextBot SelectedItemSlot", "response": "Step5NextBot has the following entity data: 1"}
+{"time": 1791948115.900229, "last_seq": 624, "kind": "fixture_final_target_health", "command": "data get entity @e[tag=idle_equipment_fixed,limit=1] Health", "response": "No entity was found"}
+{"time": 1791948115.9124525, "last_seq": 624, "kind": "fixture_final_health", "command": "data get entity Step5NextBot Health", "response": "Step5NextBot has the following entity data: 20.0f"}
+{"time": 1791948115.926272, "last_seq": 624, "kind": "fixture_final_position", "command": "data get entity Step5NextBot Pos", "response": "Step5NextBot has the following entity data: [224.42375429572516d, 121.0d, 220.5d]"}
+{"time": 1791948115.9483202, "last_seq": 624, "kind": "fixture_complete", "deaths": []}
+{"time": 1791948115.9608727, "last_seq": 624, "kind": "fixture_target_cleanup", "command": "kill @e[tag=idle_equipment_fixed]", "response": "No entity was found"}
+{"time": 1791948115.9712093, "last_seq": 624, "kind": "user_message", "text": "/quit"}

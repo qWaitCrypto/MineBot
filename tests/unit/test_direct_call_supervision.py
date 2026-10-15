@@ -4,6 +4,8 @@ import threading
 import time
 from types import SimpleNamespace
 
+import pytest
+
 from minebot.app.client_body_tools import client_body_tools
 from minebot.app.construction_facts import read_construction
 from minebot.app.decision_client import DecisionAnswer
@@ -290,10 +292,19 @@ class StubDecision:
 
     async def ask(self, payload, *, priority):
         self.requests.append((payload, priority))
+        if set(payload.get("questions", {})) == {"a"}:
+            # The running frame's own "is the intent shown?" request answers
+            # the scripted next_step; it does not consume a scripted answer.
+            shown = getattr(self, "_last", None) == "next_step"
+            return DecisionAnswer("a", {"answers": {"a": {"choice": "shown" if shown else "not_shown"}}},
+                                  0.01, len(self.requests))
         choice = next(self.answers)
         # Tests written before the options were renamed still say step_done/continue.
         choice = {"step_done": "next_step", "continue": "keep_going"}.get(choice, choice)
-        return DecisionAnswer(choice, {"answers": {"q": {"choice": choice}}}, 0.01, len(self.requests))
+        self._last = choice
+        criteria = (payload.get("questions", {}).get("q") or {}).get("criteria") or {}
+        q_choice = "keep_going" if choice == "next_step" and "next_step" not in criteria else choice
+        return DecisionAnswer(choice, {"answers": {"q": {"choice": q_choice}}}, 0.01, len(self.requests))
 
     async def close(self):
         return None
@@ -327,6 +338,9 @@ def test_normal_long_non_build_call_uses_shared_supervisor_without_question():
         decision = StubDecision(("continue",))
         runtime.call_supervisor._client = decision
         try:
+            # Exercise the per-Body lifecycle task rather than the
+            # pre-session compatibility child monitor.
+            await runtime.body_loop.start()
             result = await runtime.run_tool(tool, execute_tool, tool, {"target": [1, 5, 0], "intent": "reach the requested target"},
                                             runtime.weld_context, tool_call_id="move-call", timeout_s=2)
             assert result["success"]
@@ -348,6 +362,7 @@ def test_shared_supervisor_yield_stops_generic_call_and_delivers_one_fact():
         decision = StubDecision(("step_done",))
         runtime.call_supervisor._client = decision
         try:
+            await runtime.body_loop.start()
             result = await asyncio.wait_for(runtime.run_tool(
                 tool, execute_tool, tool, {"target": [1, 5, 0], "intent": "reach the requested target"}, runtime.weld_context,
                 tool_call_id="original-generic", timeout_s=2), 2)
@@ -359,7 +374,8 @@ def test_shared_supervisor_yield_stops_generic_call_and_delivers_one_fact():
             assert ipc.cancelled.is_set()
             raw = [e for e in runtime.trace.events if e["event"] == "tool_raw_result"]
             assert len(raw) == 1 and raw[0]["tool_call_id"] == "original-generic"
-            assert len(decision.requests) == 1
+            # One frame: the work request and its own "is the intent shown?" request.
+            assert [set(payload["questions"]) for payload, _ in decision.requests] == [{"q"}, {"a"}]
         finally:
             await runtime.aclose()
     asyncio.run(run())
@@ -454,7 +470,7 @@ def test_plan_call_and_direct_call_share_the_same_supervisor():
                      "arguments": {"target": [1, 5, 0], "intent": "reach the requested target"}},
         }
         try:
-            result = await WorkPlanExecutor(plan, call=call).run()
+            result = await WorkPlanExecutor(plan, call=call, decision=StubDecision(("next_step",))).run()
             assert result.status == "completed"
             assert runtime.call_supervisor is runtime.direct_build_supervisor
             assert [e for e in runtime.trace.events if e["event"] == "call_supervision_finished"
@@ -565,17 +581,24 @@ def test_supervisor_clock_questions_when_body_sends_no_samples(monkeypatch):
         monkeypatch.setattr(snapshot_module, "FACT_FRAME_INTERVAL_S", 0.05)
 
         decisions = []
+        finish_native = threading.Event()
 
         async def always_continue(*_args, **_kwargs):
             decisions.append(True)
+            if len(decisions) >= 5:
+                finish_native.set()
             return "continue"
 
         runtime.call_supervisor.judge = always_continue
-        original = ipc.command
-
         def silent_command(objective, *, action_id, timeout_ms, on_progress):
             # The native call remains active but never reports progress.
-            return original(objective, action_id=action_id, timeout_ms=timeout_ms, on_progress=lambda _payload: None)
+            # Finish after observed clock questions, rather than racing the
+            # Body read lane against an artificial 350ms wall-clock window.
+            ipc.active = action_id
+            ipc.started.set()
+            finish_native.wait(1.5)
+            ipc.active = None
+            return RealClientTerminal(action_id, "completed", "world_result_verified", ipc.state())
 
         ipc.command = silent_command
         try:
@@ -585,6 +608,7 @@ def test_supervisor_clock_questions_when_body_sends_no_samples(monkeypatch):
             assert result["success"]
             assert len(decisions) >= 5
         finally:
+            finish_native.set()
             await runtime.aclose()
     asyncio.run(run())
 
@@ -649,7 +673,7 @@ def test_ambiguous_decision_is_unknown_and_does_not_stop():
                     "call_agent",
                     {"answers": {"q": {"choice": "call_agent", "probabilities": {
                         "call_agent": 0.46, "continue": 0.44, "step_done": 0.10,
-                    }}}},
+                    }}, "a": {"choice": "not_shown"}}},
                     0.2, 1,
                 )
 
@@ -734,6 +758,7 @@ def test_one_decision_in_flight_keeps_only_latest_fact_frame():
     async def run():
         ipc = GenericCallIpc(progressing=False)
         runtime, _ = make_runtime(ipc)
+        finish_native = threading.Event()
 
         def invoke(_params):
             observation = __import__("minebot.contract.execution", fromlist=["current_tool_observation"]).current_tool_observation()
@@ -741,10 +766,14 @@ def test_one_decision_in_flight_keeps_only_latest_fact_frame():
             _call_id, notify = observation
             notify({"position": [0, 5, 0], "pathing": True,
                     "navigation": {"pathing": True, "path_position": 0}, "goal": True})
-            time.sleep(.03)
+            # The first request must contain the first frame before the
+            # native action publishes the replacement frame.
+            deadline = time.monotonic() + 1
+            while not decision.started.is_set() and time.monotonic() < deadline:
+                time.sleep(.001)
             notify({"position": [0, 5, 0], "pathing": False,
                     "builder_paused": True, "navigation": {"pathing": False, "path_position": 0}})
-            time.sleep(.08)
+            finish_native.wait(1.5)
             return ToolResult(True, "world_result_verified", False)
 
         tool = RegisteredTool(
@@ -761,6 +790,8 @@ def test_one_decision_in_flight_keeps_only_latest_fact_frame():
                 self.payloads.append(payload); self.started.set()
                 if len(self.payloads) == 1:
                     await self.release.wait()
+                else:
+                    finish_native.set()
                 return DecisionAnswer("continue", {"answers": {"q": {"choice": "continue"}}}, .001, len(self.payloads))
             async def close(self):
                 return None
@@ -780,56 +811,27 @@ def test_one_decision_in_flight_keeps_only_latest_fact_frame():
             assert len(decision.payloads) == 2
             assert "builder_paused" in json.dumps(decision.payloads[1], ensure_ascii=False)
         finally:
+            finish_native.set()
             await runtime.aclose()
     asyncio.run(run())
 
 
-def test_idle_unknown_limit_calls_agent_without_stopping_body():
+def test_idle_supervision_is_owned_by_body_loop():
     async def run():
-        runtime, tool = make_runtime(GenericCallIpc())
-        runtime.execution_snapshots.begin("idle", tool.name, {})
-        runtime.execution_snapshots.observe("idle", {"position": [0, 5, 0], "pathing": False})
-        runtime.execution_snapshots.finish("idle", state="succeeded", reason="done", control="released")
-        runtime.call_supervisor._client = StubDecision(("unknown", "unknown", "unknown"))
-        delivered = []
-        runtime.notify_reflex_fact = delivered.append
+        runtime, _tool = make_runtime(GenericCallIpc())
         try:
-            counts = await runtime.call_supervisor.supervise_idle(
-                tool, call_id="idle", duration_s=1, frame_interval_s=.001,
-                plan_context={"goal": "collect", "current_step": "collect ore", "is_plan": False},
-            )
-            assert counts == {"questions": 3, "unknown": 3, "agent": 1}
-            assert delivered and delivered[0]["status"] == "call_agent"
-            assert not [e for e in runtime.trace.events if e["event"] == "call_supervision_stop_requested"]
+            assert runtime.call_supervisor is runtime.body_loop
+            assert not hasattr(runtime.call_supervisor, "supervise_idle")
         finally:
             await runtime.aclose()
     asyncio.run(run())
 
 
-def test_plan_idle_question_uses_work_result_and_body_fact_shape():
+def test_plan_idle_result_uses_body_loop_result_judge():
     async def run():
-        runtime, tool = make_runtime(GenericCallIpc())
-        runtime.execution_snapshots.begin("plan-idle", tool.name, {})
-        runtime.execution_snapshots.observe("plan-idle", {"position": [0, 5, 0], "pathing": False})
-        runtime.execution_snapshots.finish("plan-idle", state="succeeded", reason="done", control="released")
-        decision = StubDecision(("step_done",))
-        runtime.call_supervisor._client = decision
+        runtime, _tool = make_runtime(GenericCallIpc())
         try:
-            await runtime.call_supervisor.supervise_idle(
-                tool, call_id="plan-idle", frame_interval_s=.001,
-                plan_context={"goal": "collect", "current_step": "collect ore", "node_description": "collect ore", "is_plan": True},
-                options={"step_done": "done", "repeat": "repeat", "inspect": "inspect", "call_agent": "agent"},
-                decision_context={
-                    "tool_arguments": {"target": [1, 5, 0], "intent": "reach the requested target"},
-                    "tool_result": {"success": False, "reason": "cancelled"},
-                    "body_state": {"position": [0, 5, 0]}, "reads": [],
-                },
-                stop_on_choice=True,
-            )
-            payload = decision.requests[0][0]
-            assert "finished_call" in payload["state"]
-            assert "cancelled" in payload["state"]["finished_call"]
-            assert "current_work" not in payload["state"]
+            assert callable(runtime.body_loop.decide_plan_result)
         finally:
             await runtime.aclose()
     asyncio.run(run())
@@ -889,6 +891,197 @@ def test_plan_step_stopped_by_decision_through_a_cancellation_still_advances():
     asyncio.run(run())
 
 
+def test_sdk_epoch_preserves_decision_cancellation_as_one_final_receipt():
+    """Real DeepSeek calls used the captured SDK path, unlike plan calls.
+
+    Its cooperative stop must remain a cancellation result, rather than an
+    AttributeError when the runtime returns a payload instead of a capture.
+    """
+    from minebot.app.runner import ProgressEpochAdapter, RuntimeRunContext, sdk_tool_for
+    from minebot.brain.lifecycle import LifecycleState
+    from minebot.contract.execution import execution_checkpoint
+
+    async def run():
+        runtime, _ = make_runtime(ResetGenericCallIpc(progressing=False))
+
+        def invoke(_params):
+            while True:
+                execution_checkpoint()
+                time.sleep(.01)
+
+        tool = RegisteredTool(
+            "captured_checkpoint", "A call stopped at a cooperative checkpoint.",
+            {"type": "object", "properties": {}, "additionalProperties": False},
+            invoke,
+            ToolSidecar("captured_checkpoint", True, source="test",
+                        body_scope=("moveTo",), timeout_s=5),
+        )
+        runtime.registry.register(tool)
+        runtime.call_supervisor._client = StubDecision(("next_step",))
+        epochs = ProgressEpochAdapter(runtime=runtime, run_id="captured-stop")
+        context = RuntimeRunContext(
+            agent_context=runtime.agent_context, weld_context=runtime.weld_context,
+            profile=runtime.mode_runtime.profile_for(LifecycleState.ACTIVE),
+            trace=runtime.trace, runtime=runtime, progress_epochs=epochs,
+        )
+        call_id = "captured-stop-call"
+        try:
+            await epochs.open(SimpleNamespace(output=[SimpleNamespace(
+                type="function_call", call_id=call_id, name=tool.name,
+            )]))
+            result = await asyncio.wait_for(sdk_tool_for(tool).on_invoke_tool(
+                SimpleNamespace(context=context, tool_call_id=call_id),
+                json.dumps({"intent": "complete the requested body step"}),
+            ), 4)
+            if result.get("reason") == "running_in_background":
+                async def wait_for_settlement():
+                    while runtime.background_calls:
+                        await asyncio.sleep(.01)
+                await asyncio.wait_for(wait_for_settlement(), 4)
+            receipts = [e for e in runtime.trace.events
+                        if e.get("event") == "tool_result"
+                        and e.get("tool_call_id") == call_id]
+            assert len(receipts) == 1
+            receipt = receipts[0]["full_result"]
+            assert receipt["success"] is False
+            assert receipt["reason"] == "stopped_by_decision"
+            assert receipt["metrics"]["direct_call_handoff"]["settlement"]["settled"]
+            assert not [e for e in runtime.trace.events if e.get("event") == "tool_exception"]
+        finally:
+            await runtime.aclose()
+
+    asyncio.run(run())
+
+
+def test_sdk_epoch_preserves_missing_intent_rejection_without_running_body():
+    from minebot.app.runner import ProgressEpochAdapter, RuntimeRunContext, sdk_tool_for
+    from minebot.brain.lifecycle import LifecycleState
+
+    async def run():
+        runtime, _ = make_runtime(ResetGenericCallIpc(progressing=False))
+        invoked = []
+        tool = RegisteredTool(
+            "captured_admission", "A body call requiring intent.",
+            {"type": "object", "properties": {}, "additionalProperties": False},
+            lambda params: invoked.append(params),
+            ToolSidecar("captured_admission", True, source="test", body_scope=("moveTo",)),
+        )
+        runtime.registry.register(tool)
+        epochs = ProgressEpochAdapter(runtime=runtime, run_id="captured-admission")
+        context = RuntimeRunContext(
+            agent_context=runtime.agent_context, weld_context=runtime.weld_context,
+            profile=runtime.mode_runtime.profile_for(LifecycleState.ACTIVE),
+            trace=runtime.trace, runtime=runtime, progress_epochs=epochs,
+        )
+        call_id = "captured-admission-call"
+        try:
+            await epochs.open(SimpleNamespace(output=[SimpleNamespace(
+                type="function_call", call_id=call_id, name=tool.name,
+            )]))
+            result = await sdk_tool_for(tool).on_invoke_tool(
+                SimpleNamespace(context=context, tool_call_id=call_id), "{}",
+            )
+            assert result["success"] is False
+            assert result["reason"] == "missing_intent"
+            assert not invoked
+            receipts = [e for e in runtime.trace.events
+                        if e.get("event") == "tool_result"
+                        and e.get("tool_call_id") == call_id]
+            assert len(receipts) == 1
+            assert receipts[0]["full_result"]["reason"] == "missing_intent"
+            assert not [e for e in runtime.trace.events if e.get("event") == "tool_exception"]
+        finally:
+            await runtime.aclose()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("settling", [False, True])
+def test_sdk_threat_admission_timeout_is_a_busy_receipt_without_recovery(settling):
+    from minebot.app.runner import ProgressEpochAdapter, RuntimeRunContext, sdk_tool_for
+    from minebot.brain.lifecycle import LifecycleState
+
+    async def run():
+        runtime, _ = make_runtime(ResetGenericCallIpc(progressing=False))
+        invoked = []
+        tool = RegisteredTool(
+            "waiting_agent_call", "An Agent call arriving during protection.",
+            {"type": "object", "properties": {}, "additionalProperties": False},
+            lambda params: invoked.append(params),
+            ToolSidecar("waiting_agent_call", True, source="test", body_scope=("moveTo",), timeout_s=.02),
+        )
+        runtime.registry.register(tool)
+        epochs = ProgressEpochAdapter(runtime=runtime, run_id="threat-busy")
+        context = RuntimeRunContext(
+            agent_context=runtime.agent_context, weld_context=runtime.weld_context,
+            profile=runtime.mode_runtime.profile_for(LifecycleState.ACTIVE),
+            trace=runtime.trace, runtime=runtime, progress_epochs=epochs,
+        )
+        owner = runtime.body_control.claim("protective-call", holder="threat")
+        if settling:
+            owner = runtime.body_control.mark_stopping("protective-call")
+        call_id = "waiting-agent-call"
+        try:
+            await epochs.open(SimpleNamespace(output=[SimpleNamespace(
+                type="function_call", call_id=call_id, name=tool.name,
+            )]))
+            result = await sdk_tool_for(tool).on_invoke_tool(
+                SimpleNamespace(context=context, tool_call_id=call_id),
+                json.dumps({"intent": "reach the requested position"}),
+            )
+            assert result["success"] is False
+            assert result["reason"] == "body_busy"
+            assert result["canRetry"] is True
+            assert runtime.body_control.snapshot() == owner
+            assert not invoked
+            assert not runtime.direct_call_handoffs
+            receipts = [e for e in runtime.trace.events if e.get("event") == "tool_result"
+                        and e.get("tool_call_id") == call_id]
+            assert len(receipts) == 1
+            assert not [e for e in runtime.trace.events
+                        if e.get("event") in {"body_recovery_required", "body_recovery_started", "execution_cancel_requested"}]
+        finally:
+            runtime.body_control.settle(claim_id="protective-call")
+            await runtime.aclose()
+
+    asyncio.run(run())
+
+
+def test_agent_call_runs_after_threat_owner_settles():
+    async def run():
+        runtime, _ = make_runtime(ResetGenericCallIpc(progressing=False))
+        invoked = []
+        tool = RegisteredTool(
+            "after_protection", "An Agent call that waits for protection.",
+            {"type": "object", "properties": {}, "additionalProperties": False},
+            lambda params: (invoked.append(params) or ToolResult(True, "completed", False)),
+            ToolSidecar("after_protection", True, source="test", body_scope=("moveTo",), timeout_s=1),
+        )
+        owner = runtime.body_control.claim("protection", holder="threat")
+        job = asyncio.create_task(runtime.run_tool(
+            tool, execute_tool, tool, {"intent": "reach the requested position"},
+            runtime.weld_context, timeout_s=1, tool_call_id="after-protection",
+        ))
+        try:
+            for _ in range(20):
+                if any(e["event"] == "body_call_waiting" for e in runtime.trace.events):
+                    break
+                await asyncio.sleep(.001)
+            assert not invoked
+            assert runtime.body_control.snapshot() == owner
+            runtime.body_control.settle(claim_id="protection")
+            result = await asyncio.wait_for(job, 2)
+            assert result["success"] is True
+            assert len(invoked) == 1
+        finally:
+            if not job.done():
+                job.cancel()
+            await asyncio.gather(job, return_exceptions=True)
+            await runtime.aclose()
+
+    asyncio.run(run())
+
+
 def test_plan_reports_blocked_when_a_call_is_cancelled_underneath_it():
     from minebot.app.work_runtime import WorkPlanExecutor
 
@@ -904,4 +1097,101 @@ def test_plan_reports_blocked_when_a_call_is_cancelled_underneath_it():
         result = await WorkPlanExecutor(plan, call=call, emit=lambda event, **p: emitted.append((event, p))).run()
         assert result.status == "blocked"
         assert ("work_plan_blocked", {"reason": "call_cancelled"}) in emitted
+    asyncio.run(run())
+
+
+def test_direct_work_reclaims_body_after_protection_before_resuming(monkeypatch):
+    """A real run selected resume, then the old claim rejected the second write."""
+    from minebot.contract.execution import execution_checkpoint
+    from minebot.app.reflex_tools import ReflexManager
+
+    async def run():
+        runtime, _ = make_runtime(ResetGenericCallIpc(progressing=False))
+        runtime.reflex_manager = ReflexManager(runtime)
+        writes = []
+
+        def invoke(_params):
+            writes.append(runtime.body_control.snapshot())
+            if len(writes) == 1:
+                while True:
+                    execution_checkpoint()
+                    time.sleep(.001)
+            return ToolResult(True, "work_completed", False)
+
+        tool = RegisteredTool("resume_work", "A cancellable body operation.",
+            {"type": "object", "properties": {}, "additionalProperties": True}, invoke,
+            ToolSidecar("resume_work", True, source="test", body_scope=("moveTo",), timeout_s=2),
+            supervision_explanation="Work until the declared result is reached.")
+        runtime.registry.register(tool)
+        runtime.registry.register(RegisteredTool('go_to_surface', 'Swim up.',
+            tool.input_schema, lambda _: ToolResult(True, 'surface_reached', False),
+            ToolSidecar('go_to_surface', True, source='test', body_scope=('moveTo',), timeout_s=2)))
+        loop = runtime.body_loop
+        notifications = []
+        runtime.notify_reflex_fact = notifications.append
+
+        async def protect(choice, action, record=None, **kwargs):
+            # Exercise the actual settled Body claim boundary. The protective
+            # tool's claim has a new generation and is released when it ends.
+            runtime.body_control.claim("protective-call", holder="threat")
+            runtime.body_control.settle(claim_id="protective-call")
+            return choice, action, {"success": True, "reason": "surface_reached"}, "protective-call"
+
+        async def judge(call_id, selected_tool, params, execution, idle_s, **kwargs):
+            if kwargs['purpose'] == 'default_result_frame': return 'resume'
+            if kwargs['purpose'] == 'result_frame': return 'next_step'
+            return 'surface' if len(writes) == 1 else 'keep_going'
+
+        loop._execute_protection = protect
+        loop._read_idle_facts = lambda: asyncio.sleep(0, result={'position': [0, 5, 0], 'oxygen': 300})
+        loop.judge = judge
+        try:
+            result = await asyncio.wait_for(runtime.run_tool(tool, execute_tool, tool,
+                {"intent": "complete the work"}, runtime.weld_context,
+                tool_call_id="original", timeout_s=2), 3)
+            assert result['success'] is True
+            assert result['reason'] == 'work_completed'
+            assert len(writes) == 2
+            assert all(c.claim_id == 'original' and c.holder == 'agent_call' for c in writes)
+            assert writes[1].generation > writes[0].generation
+            assert runtime.body_control.snapshot().holder == 'none'
+            assert len(loop.recent_experiences) == 1
+            assert not [n for n in notifications if n.get('status') == 'default_action_completed']
+        finally:
+            await runtime.aclose()
+
+    monkeypatch.setattr(supervision_module, 'FAST_COMPLETION_GRACE_S', 0)
+    monkeypatch.setattr(supervision_module, 'FACT_FRAME_INTERVAL_S', .005)
+    asyncio.run(run())
+
+
+def test_stop_settles_on_the_native_stop_after_an_accepted_interrupt():
+    # Live step5-threat-claude4: the lane was idle in 42 ms while the native
+    # action was still stopping; one probe marked control unknown and the
+    # protective move away failed with BodyRecoveryRequired.
+    async def run():
+        runtime, _tool = make_runtime(GenericCallIpc())
+        probes = iter([{"native_stopped": False}, {"native_stopped": False}, {"native_stopped": True}])
+        runtime.body.confirm_control_idle = lambda: next(probes)
+        runtime.body.interrupt = lambda reason: SimpleNamespace(ok=True, accepted=True, complete=False)
+        try:
+            facts = await runtime.cancel_active_execution_with_facts("test")
+            assert facts["settled"] is True and facts["native_probe_checks"] == 3
+            assert not runtime.body_control.unknown
+        finally:
+            await runtime.aclose()
+    asyncio.run(run())
+
+
+def test_stop_without_an_accepted_interrupt_probes_once():
+    async def run():
+        runtime, _tool = make_runtime(GenericCallIpc())
+        probes = iter([{"native_stopped": False}, {"native_stopped": True}])
+        runtime.body.confirm_control_idle = lambda: next(probes)
+        runtime.body.interrupt = lambda reason: SimpleNamespace(ok=True, accepted=False, complete=False)
+        try:
+            facts = await runtime.cancel_active_execution_with_facts("test")
+            assert facts["settled"] is False and facts["native_probe_checks"] == 1
+        finally:
+            await runtime.aclose()
     asyncio.run(run())

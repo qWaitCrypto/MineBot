@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 BODY = ROOT / "minecraft/client/body"
 SOURCE = BODY / "build/upstream-baritone"
 REVISION = "016cc210434894f371baf0c327ac94907d12dcd3"
-VERSION = "1.18.0+minebot.1"
+VERSION = "1.18.0+minebot.2"
 PATCH = BODY / "baritone-patches/0001-preserve-descend-preparation.patch"
 OUTPUT = BODY / f"build/baritone/baritone-fabric-{VERSION}.jar"
 
@@ -41,10 +41,10 @@ def main():
     init = SOURCE.parent / "baritone-version.gradle"
     init.write_text("""gradle.allprojects { p ->
     p.afterEvaluate {
-        p.version = '1.18.0+minebot.1'
-        p.tasks.withType(Jar).configureEach { archiveVersion.set('1.18.0+minebot.1') }
+        p.version = '1.18.0+minebot.2'
+        p.tasks.withType(Jar).configureEach { archiveVersion.set('1.18.0+minebot.2') }
         p.tasks.matching { it.name == 'processResources' }.configureEach {
-            inputs.property('minebotPatchVersion', '1.18.0+minebot.1')
+            inputs.property('minebotPatchVersion', '1.18.0+minebot.2')
         }
     }
 }

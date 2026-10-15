@@ -1,0 +1,21 @@
+{
+  "code_commit": "7e4c1e683fdf45817c993ea9492d4914908f93bf",
+  "code_dirty": false,
+  "world": "step5-next-edc89ff-20261014",
+  "fresh_world": false,
+  "empty_inventory": false,
+  "ports": [
+    25569,
+    25579,
+    8771
+  ],
+  "bot": "Step5NextBot",
+  "server_pid": 1985116,
+  "launcher_pid": 2040837,
+  "owner_pid": 2040811,
+  "started_at": 1791944515.5439749,
+  "model": "deepseek-v4.1-flash",
+  "kernel": "sdk",
+  "goal": null,
+  "scope": "Retained artificial arena and player, new SDK state, hand-authored life profile. Natural spawning disabled; Visitor/time/teleport are controlled fixtures. Mid-run task uses /goal."
+}

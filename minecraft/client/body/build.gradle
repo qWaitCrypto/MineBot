@@ -17,7 +17,7 @@ java {
     withSourcesJar()
 }
 
-def baritoneVersion = "1.18.0+minebot.1"
+def baritoneVersion = "1.18.0+minebot.2"
 def baritoneJar = file("${buildDir}/baritone/baritone-fabric-${baritoneVersion}.jar")
 
 dependencies {

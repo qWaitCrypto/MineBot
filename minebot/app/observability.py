@@ -41,7 +41,12 @@ class JsonlObservationSink:
 
     def write(self, record: dict[str, object]) -> None:
         safe = sanitize_observation(record)
-        self._fh.write(json.dumps(safe, ensure_ascii=True, sort_keys=True, default=str) + "\n")
+        # Decision sees ordered objects. Preserve both the compiled question
+        # and its raw inputs so replay can reproduce that request after the
+        # trace has been written; sorting nested inventory/argument maps would
+        # change the sentences produced by the online compiler.
+        sort_keys = safe.get("event") != "call_supervision_request"
+        self._fh.write(json.dumps(safe, ensure_ascii=True, sort_keys=sort_keys, default=str) + "\n")
         self._fh.flush()
 
     def close(self) -> None:

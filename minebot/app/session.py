@@ -20,7 +20,7 @@ from uuid import uuid4
 
 from minebot.app.autonomy import AutonomyAction, AutonomyCoordinator
 from minebot.app.progress_epochs import ContinuationEpochBudget
-from minebot.app.body_events import event_matches_wait_conditions
+from minebot.app.body_events import agent_event_data, event_matches_wait_conditions
 from minebot.app.principals import AdmissionCapability, PrincipalRegistry
 from minebot.app.wiring import AgentRuntimeParts
 from minebot.app.runner import ModelTurnTransportError, RecoveryOutcome
@@ -1167,7 +1167,8 @@ class AgentSession:
             return []
         if intent.kind is WorkIntentKind.BODY_EVENT:
             task = self.task_workspace.current_task if self.task_workspace is not None else None
-            if task is not None and task.status in {TaskStatus.PAUSED, TaskStatus.YIELDED}:
+            native_lifecycle = (intent.payload.get("event") or {}).get("name") in {"death", "respawned"}
+            if task is not None and task.status in {TaskStatus.PAUSED, TaskStatus.YIELDED} and not native_lifecycle:
                 self._turn_pending = False
                 self._trace(
                     "body_event_intent_dropped",
@@ -1255,7 +1256,7 @@ class AgentSession:
                     "tick": event.tick,
                     "bot": event.bot,
                     "name": event.name,
-                    "data": event.data,
+                    "data": agent_event_data(event),
                 },
                 ensure_ascii=False,
                 sort_keys=True,
@@ -1266,11 +1267,12 @@ class AgentSession:
             self._trace(
                 "body_event_wake",
                 name=event.name,
-                seq=event.seq,
+                body_seq=event.seq,
                 tick=event.tick,
                 task_id=intent.task_id,
             )
-            return signalize_events([event])
+            return signalize_events([Event(seq=event.seq, tick=event.tick, bot=event.bot,
+                                          name=event.name, data=agent_event_data(event))])
 
         if intent.kind in {
             WorkIntentKind.TASK_BOUNDARY,
@@ -1468,6 +1470,13 @@ class AgentSession:
             return SessionStep(status, self.parts.lifecycle.state, f"startup_{decision}")
         return None
 
+    async def enter_world(self) -> None:
+        """Bind the runtime and start reflex supervision before any Agent turn."""
+        self._ensure_parts_for_runtime_intent()
+        body_loop = getattr(self.parts.runtime, "body_loop", None)
+        if body_loop is not None:
+            await body_loop.start()
+
     def _ensure_parts_for_runtime_intent(self) -> None:
         if self.parts is not None:
             self._bind_runtime_callbacks()
@@ -1489,6 +1498,23 @@ class AgentSession:
         setter = getattr(self.parts.runtime, "set_sdk_reflex_fact_listener", None)
         if callable(setter):
             setter(self._on_reflex_fact)
+        setter = getattr(self.parts.runtime, "set_sdk_body_event_listener", None)
+        if callable(setter):
+            setter(self._on_body_lifecycle_event)
+
+    def _on_body_lifecycle_event(self, event: Event) -> None:
+        """Native edges enter the existing material Body event path, even idle."""
+        assert self.work_queue is not None
+        if event.name == "death":
+            self._body_lifecycle_pending = True
+        self.work_queue.enqueue(
+            WorkIntentKind.BODY_EVENT, source="body_event",
+            payload={"event": {"seq": event.seq, "tick": event.tick, "bot": event.bot,
+                               "name": event.name, "data": dict(event.data)}},
+            dedupe_key=f"lifecycle:{event.data.get('native_epoch', self._scheduler_id)}:{event.seq}",
+            task_id=None,
+        )
+        self._trace("body_lifecycle_queued", name=event.name, body_seq=event.seq)
 
     def _reflex_fact_delivered(self, fact: dict[str, object]) -> None:
         delivered = getattr(self.parts.runtime, "reflex_fact_delivered", None) if self.parts is not None else None
@@ -1781,6 +1807,7 @@ class AgentSession:
             return SessionStep(step.status, self.parts.lifecycle.state, step.message,
                 progress_stop_reason=step.progress_stop_reason)
         if step.status == "completed_turn":
+            self._body_lifecycle_pending = False
             self._turn_pending = False
             self._active_turn_request = None
             self._suspended_turn_request = None
@@ -1819,12 +1846,19 @@ class AgentSession:
         if self.work_queue.pending_count() > 0:
             return
         task = self.task_workspace.current_task if self.task_workspace is not None else None
+        lifecycle_pending = getattr(self, "_body_lifecycle_pending", False)
         if task is not None:
             if task.status is not TaskStatus.RUNNING:
-                self._stand_down()
-                return
-            task_id = task.task_id
+                if not lifecycle_pending:
+                    self._stand_down()
+                    return
+                task_id = None
+            else:
+                task_id = task.task_id
         elif self._goal_active:
+            task_id = None
+        elif lifecycle_pending:
+            # A death is material even with no gameplay goal to resume.
             task_id = None
         else:
             self._stand_down()

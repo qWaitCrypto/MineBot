@@ -1314,10 +1314,10 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
         self.assertEqual(body_events[0]["events"][0]["name"], "moveDone")
         self.assertEqual(body_events[0]["events"][0]["data"], {"arrived": True})
 
-    def test_interactive_loop_keeps_open_task_pending_for_external_verification(self):
+    def test_interactive_loop_keeps_supported_goal_pending_when_body_checker_rejects(self):
         store = RuntimeStateStore(":memory:")
         workspace = TaskWorkspace(store, RuntimeScope("server", "world", "Bot1"))
-        task = workspace.start("prepare safely for the End", source="user")
+        task = workspace.start("collect 1 dirt", source="user")
         workspace.checkpoint(
             expected_task_revision=task.revision,
             disposition=CheckpointDisposition.COMPLETE,
@@ -1327,7 +1327,7 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
 
         class ModelCompleteSession:
             parts = None
-            current_goal = "prepare safely for the End"
+            current_goal = "collect 1 dirt"
             has_pending_work = True
             task_workspace = workspace
 
@@ -1569,6 +1569,9 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
             return type("Parts", (), {"runtime": Runtime()})()
 
         class FakeSession:
+            async def enter_world(self):
+                pass  # Lifecycle behavior is tested with the real AgentSession.
+
             parts = None
             current_goal = "collect 1 dirt"
 
@@ -1682,6 +1685,9 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
         parts = type("Parts", (), {"runtime": type("Runtime", (), {"trace": Trace()})()})()
 
         class FakeSession:
+            async def enter_world(self):
+                pass  # Lifecycle behavior is tested with the real AgentSession.
+
             current_goal = "collect 1 dirt"
 
             def __init__(self, make_parts):
@@ -1766,6 +1772,9 @@ class AgentRealServerEntrypointTests(unittest.TestCase):
         conversation = FakeConversation()
 
         class FakeSession:
+            async def enter_world(self):
+                pass  # Lifecycle behavior is tested with the real AgentSession.
+
             current_goal = "collect 1 dirt"
             parts = None
 

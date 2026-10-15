@@ -1,0 +1,44 @@
+[
+  {
+    "action_id": "99dfc9ed-f178-449a-876e-0c707967f786",
+    "action_kind": null,
+    "reason": "goal_reached",
+    "elapsed_ms": 880,
+    "sampled_at_ms": 1791946998661
+  },
+  {
+    "action_id": "030d740b-dc96-44d6-b9f1-21dc54fdc6a3",
+    "action_kind": "engageEntity",
+    "reason": "tool_broke",
+    "elapsed_ms": 269,
+    "sampled_at_ms": 1791947002587
+  },
+  {
+    "action_id": "a54e43c9-afc5-43df-8d07-dbb3b24bc9c6",
+    "action_kind": "engageEntity",
+    "reason": "cancel_requested",
+    "elapsed_ms": 473,
+    "sampled_at_ms": 1791947004482
+  },
+  {
+    "action_id": "363dc125-9b47-4f17-af0f-d6e717d1636d",
+    "action_kind": "engageEntity",
+    "reason": "cancel_requested",
+    "elapsed_ms": 458,
+    "sampled_at_ms": 1791947006673
+  },
+  {
+    "action_id": "6fc4267c-f247-4f11-9b42-689722bafee1",
+    "action_kind": "engageEntity",
+    "reason": "cancel_requested",
+    "elapsed_ms": 553,
+    "sampled_at_ms": 1791947008832
+  },
+  {
+    "action_id": "f45f083d-b76f-4021-95f3-46f7b36753ff",
+    "action_kind": "engageEntity",
+    "reason": "killed",
+    "elapsed_ms": 169,
+    "sampled_at_ms": 1791947010646
+  }
+]

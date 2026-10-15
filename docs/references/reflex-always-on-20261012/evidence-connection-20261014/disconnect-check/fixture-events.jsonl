@@ -1,0 +1,6 @@
+{"time": 1791948764.608064, "last_seq": 7, "kind": "first_idle_question", "matched_seq": 6}
+{"time": 1791948764.6481035, "last_seq": 7, "kind": "before_disconnect_health", "command": "data get entity Step5NextBot Health", "response": "Step5NextBot has the following entity data: 20.0f"}
+{"time": 1791948764.648989, "last_seq": 7, "kind": "disconnect_begin"}
+{"time": 1791948765.062467, "last_seq": 9, "kind": "server_kick", "command": "kick Step5NextBot controlled_disconnect_acceptance", "response": "Kicked Step5NextBot: controlled_disconnect_acceptance"}
+{"time": 1791948777.093772, "last_seq": 65, "kind": "disconnect_observation", "requests": [12, 17, 23, 28, 34, 40, 45, 51, 56, 62], "stops": [], "deaths": [], "lifecycle": []}
+{"time": 1791948777.0965414, "last_seq": 65, "kind": "user_message", "text": "/quit"}

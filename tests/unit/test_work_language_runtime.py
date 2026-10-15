@@ -1,5 +1,7 @@
 import asyncio
 import json
+import copy
+from pathlib import Path
 
 import pytest
 
@@ -35,15 +37,17 @@ async def _state():
     return {"bot": {"observed": True, "position": [0, 64, 0]}}
 
 
-def test_validate_accepts_repeat_but_keeps_interrupt_deferred():
+def test_validate_accepts_repeat_and_plan_interrupt_with_condition_and_handler():
     base = {"language": "minebot-work/0.2", "goal": "x", "timeout_s": 10,
             "work": {"kind": "wait", "condition": {"text": "x"}, "timeout_s": 1}}
     validate_plan(base)
     repeated = {**base, "work": {**base["work"], "repeat": {"again_when": {"text": "x"}, "until": {"text": "y"}}}}
     validate_plan(repeated)
-    interrupted = {**base, "work": {**base["work"], "interrupt_when": {"text": "stop"}}}
-    with pytest.raises(WorkPlanError, match="unsupported_in_slice2"):
-        validate_plan(interrupted)
+    interrupted = {**base, "interrupt_when": {"condition": {"text": "stop"},
+        "handler": {"kind": "call", "intent": "Reach shelter", "tool": "move_to", "arguments": {}}}}
+    validate_plan(interrupted)
+    with pytest.raises(WorkPlanError, match="condition and handler|invalid plan"):
+        validate_plan({**base, "interrupt_when": {"text": "stop"}})
 
 
 def test_sequence_batch_and_ref_are_executed_and_annotated():
@@ -139,28 +143,21 @@ def test_unknown_call_decision_does_not_advance_or_write_again():
     assert first.tree["work"]["_runtime"]["decision_pending"] is True
 
 
-def test_unknown_call_can_be_resolved_by_the_idle_supervisor_without_a_second_call():
+def test_unknown_call_waits_for_the_single_body_loop_without_a_second_call():
     plan = {"language": "minebot-work/0.2", "goal": "collect", "timeout_s": 10,
             "work": {"kind": "call", "id": "collect", "tool": "collect", "arguments": {}}}
     calls = []
     decisions = Decision("unknown")
-    idle_requests = []
 
     async def call(tool, arguments, *, call_id, timeout_s):
         calls.append(call_id)
         return {"success": False, "reason": "cancelled", "metrics": {}}
 
-    async def idle(tool, *, call_id, plan_context, options):
-        idle_requests.append((tool, call_id, plan_context, options))
-        return {"choice": "call_agent", "questions": 1, "unknown": 0}
-
     result = asyncio.run(WorkPlanExecutor(
         plan, call=call, state=lambda: _state(), decision=decisions,
-        idle_supervise=idle,
     ).run())
-    assert result.status == "blocked"
+    assert result.status == "waiting"
     assert calls == ["collect"]
-    assert idle_requests and "call_agent" in idle_requests[0][3]
 
 
 
@@ -401,3 +398,39 @@ def test_result_question_contains_recent_raw_history_without_running_execution_f
     assert "same_failure" in json.dumps(history, ensure_ascii=False)
     assert "current_work" not in payload["state"]
     assert "elapsed" not in json.dumps(payload, ensure_ascii=False).lower()
+
+
+def test_node_history_uses_native_state_fields_from_recorded_crafting_attempts():
+    """Stage-d table failed, then succeeded with a changed inventory."""
+    source = Path(__file__).parents[1] / "fixtures" / "reflex_step2_plan_result_frames.json"
+    cases = {case["seq"]: case for case in json.loads(source.read_text())['cases']}
+    attempts = [cases[1523]["raw_decision_facts"], cases[1538]["raw_decision_facts"]]
+    state = copy.deepcopy(attempts[0]["body_state"])
+    decision = Decision("repeat", "step_done")
+    calls = []
+
+    async def native_state():
+        return copy.deepcopy(state)
+
+    async def call(tool, arguments, *, call_id, timeout_s):
+        nonlocal state
+        attempt = attempts[len(calls)]
+        calls.append(call_id)
+        state = copy.deepcopy(attempt["body_state"])
+        return copy.deepcopy(attempt["tool_result"])
+
+    node = copy.deepcopy(cases[1523]["node"])
+    node.pop("next_call", None)
+    node["intent"] = cases[1523]["intents"][-1]
+    plan = {"language": "minebot-work/0.2", "goal": "make the crafting table",
+            "timeout_s": 10, "work": node}
+    executor = WorkPlanExecutor(plan, call=call, state=native_state, decision=decision)
+    outcome = asyncio.run(executor.run())
+    assert outcome.status == "completed"
+    history = executor._call_histories["table"]
+    assert history[0]["body"]["position"] == attempts[0]["body_state"]["pos"]
+    assert history[0]["body"]["inventory"] == attempts[0]["body_state"]["inventory_counts"]
+    assert history[1]["body"]["inventory"] == attempts[1]["body_state"]["inventory_counts"]
+    assert decision.payloads[-1]["state"]["earlier_attempts_of_this_call"] == [
+        "Attempt 1: failure: craft_recipe_failed:recipe_output_mismatch; inventory or position changed since."
+    ]

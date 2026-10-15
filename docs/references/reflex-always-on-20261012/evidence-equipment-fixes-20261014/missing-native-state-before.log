@@ -1,0 +1,112 @@
+FFFF                                                                     [100%]
+=================================== FAILURES ===================================
+______ test_reflex_facts_do_not_turn_unobserved_vitals_into_zero[sample0] ______
+
+sample = {'ready': False}
+
+    @pytest.mark.parametrize("sample", [{"ready": False}, {"position": [4, 70, 9]}])
+    def test_reflex_facts_do_not_turn_unobserved_vitals_into_zero(sample) -> None:
+        class MissingSampleIpc(FakeClientIpc):
+            def state(self):
+                return dict(sample)
+        body = RealClientBody("CapProbe2", MissingSampleIpc())
+        facts = body.get_reflex_facts()
+>       assert "health" not in facts
+E       AssertionError: assert 'health' not in {'bot': 'CapProbe2', 'pos': (0.0, 0.0, 0.0), 'yaw': None, 'pitch': None, ...}
+
+tests/unit/test_real_client_body.py:139: AssertionError
+______ test_reflex_facts_do_not_turn_unobserved_vitals_into_zero[sample1] ______
+
+sample = {'position': [4, 70, 9]}
+
+    @pytest.mark.parametrize("sample", [{"ready": False}, {"position": [4, 70, 9]}])
+    def test_reflex_facts_do_not_turn_unobserved_vitals_into_zero(sample) -> None:
+        class MissingSampleIpc(FakeClientIpc):
+            def state(self):
+                return dict(sample)
+        body = RealClientBody("CapProbe2", MissingSampleIpc())
+        facts = body.get_reflex_facts()
+>       assert "health" not in facts
+E       AssertionError: assert 'health' not in {'bot': 'CapProbe2', 'pos': (4.0, 70.0, 9.0), 'yaw': None, 'pitch': None, ...}
+
+tests/unit/test_real_client_body.py:139: AssertionError
+_______ test_reflex_facts_preserve_observed_zero_health_without_position _______
+
+    def test_reflex_facts_preserve_observed_zero_health_without_position() -> None:
+        class DeathSampleIpc(FakeClientIpc):
+            def state(self):
+                return {"health": 0, "ready": False}
+        facts = RealClientBody("CapProbe2", DeathSampleIpc()).get_reflex_facts()
+        assert facts["health"] == 0
+>       assert "pos" not in facts
+E       AssertionError: assert 'pos' not in {'bot': 'CapProbe2', 'pos': (0.0, 0.0, 0.0), 'yaw': None, 'pitch': None, ...}
+
+tests/unit/test_real_client_body.py:156: AssertionError
+_____ test_disconnected_native_sample_does_not_cancel_work_or_notify_death _____
+
+    def test_disconnected_native_sample_does_not_cancel_work_or_notify_death():
+        async def run():
+            class DisconnectedIpc(FakeClientIpc):
+                def state(self):
+                    return {"ready": False}
+            events, stops = [], []
+            owner = SimpleNamespace(decision_client=SimpleNamespace(),
+                trace=SimpleNamespace(emit=lambda *args, **kwargs: None),
+                notify_body_lifecycle_event=events.append)
+            async def stop(reason):
+                stops.append(reason)
+                return {"settled": True}
+            owner.cancel_active_execution_with_facts = stop
+            loop = BodyLoop(owner)
+            loop._set_state("work", "agent_call")
+            loop.current = {"cancel_requested": False}
+            facts = RealClientBody("Bot", DisconnectedIpc()).get_reflex_facts()
+            assert not await loop._process_lifecycle_events(facts)
+            assert loop.loop_state == "work"
+            assert not stops and not events
+            assert loop.current["cancel_requested"] is False
+            # Actual native death remains authoritative after a read gap.
+            loop._queue_lifecycle_event(death())
+            assert await loop._process_lifecycle_events()
+            assert stops == ["death"] and [e.name for e in events] == ["death"]
+>       asyncio.run(run())
+
+tests/unit/test_body_loop_step4.py:57: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+../miniconda3/lib/python3.13/asyncio/runners.py:195: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+../miniconda3/lib/python3.13/asyncio/runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+../miniconda3/lib/python3.13/asyncio/base_events.py:725: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    async def run():
+        class DisconnectedIpc(FakeClientIpc):
+            def state(self):
+                return {"ready": False}
+        events, stops = [], []
+        owner = SimpleNamespace(decision_client=SimpleNamespace(),
+            trace=SimpleNamespace(emit=lambda *args, **kwargs: None),
+            notify_body_lifecycle_event=events.append)
+        async def stop(reason):
+            stops.append(reason)
+            return {"settled": True}
+        owner.cancel_active_execution_with_facts = stop
+        loop = BodyLoop(owner)
+        loop._set_state("work", "agent_call")
+        loop.current = {"cancel_requested": False}
+        facts = RealClientBody("Bot", DisconnectedIpc()).get_reflex_facts()
+>       assert not await loop._process_lifecycle_events(facts)
+E       assert not True
+
+tests/unit/test_body_loop_step4.py:49: AssertionError
+=========================== short test summary info ============================
+FAILED tests/unit/test_real_client_body.py::test_reflex_facts_do_not_turn_unobserved_vitals_into_zero[sample0]
+FAILED tests/unit/test_real_client_body.py::test_reflex_facts_do_not_turn_unobserved_vitals_into_zero[sample1]
+FAILED tests/unit/test_real_client_body.py::test_reflex_facts_preserve_observed_zero_health_without_position
+FAILED tests/unit/test_body_loop_step4.py::test_disconnected_native_sample_does_not_cancel_work_or_notify_death
+4 failed, 73 deselected in 1.72s

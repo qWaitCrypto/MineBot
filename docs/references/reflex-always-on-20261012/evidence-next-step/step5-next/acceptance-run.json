@@ -1,0 +1,20 @@
+{
+  "code_commit": "edc89ff993e77a0870f529b32c294964fa61571e",
+  "world": "step5-next-edc89ff-20261014",
+  "fresh_world": true,
+  "empty_inventory": true,
+  "ports": [
+    25569,
+    25579,
+    8771
+  ],
+  "bot": "Step5NextBot",
+  "server_pid": 1985116,
+  "launcher_pid": 1986230,
+  "owner_pid": 1985085,
+  "scope": "New world/player, artificial platform/mobs/sword/damage; no initial Agent goal. Runtime threat evidence first, then real Agent patrol.",
+  "started_at": 1791942372.6115105,
+  "model": "deepseek-v4.1-flash",
+  "kernel": "sdk",
+  "goal": null
+}

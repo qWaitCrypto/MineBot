@@ -1,0 +1,18 @@
+{"time": 1791943269.5506077, "last_seq": 9, "kind": "first_question", "matched_seq": 6}
+{"time": 1791943269.5555065, "last_seq": 9, "kind": "fixture_position", "command": "tp Step5NextBot 220.5 121 220.5", "response": "Teleported Step5NextBot to 220.500000, 121.000000, 220.500000"}
+{"time": 1791943269.5595639, "last_seq": 9, "kind": "fixture_heal", "command": "effect give Step5NextBot minecraft:instant_health 1 10 true", "response": "Applied effect Instant Health to Step5NextBot"}
+{"time": 1791943269.5647073, "last_seq": 9, "kind": "fixture_empty_inventory", "command": "clear Step5NextBot", "response": "No items were found on player Step5NextBot"}
+{"time": 1791943269.5672724, "last_seq": 9, "kind": "fixture_no_regeneration", "command": "gamerule minecraft:natural_health_regeneration false", "response": "Gamerule natural_health_regeneration is now set to: false"}
+{"time": 1791943270.7824204, "last_seq": 14, "kind": "user_message", "text": "这是人工威胁恢复验收。把巡视路线交给 delegate_work：先到 [190,121,190]，再到 [250,121,250]，最后到 [220,121,220]。各步意图写到达目标位置。不采集、不建造、不破坏方块。临时威胁让反射层自行处理，不主动调用战斗工具，不轮询。完成后如实报告。"}
+{"time": 1791943283.75773, "last_seq": 223, "kind": "real_agent_work", "matched_seq": 220}
+{"time": 1791943283.7675102, "last_seq": 223, "kind": "fixture_damage", "command": "damage Step5NextBot 14 minecraft:generic", "response": "Applied 14.0 damage to Step5NextBot"}
+{"time": 1791943283.77715, "last_seq": 223, "kind": "ranged_begin"}
+{"time": 1791943283.7861047, "last_seq": 223, "kind": "fixture_ranged_skeleton", "command": "execute at Step5NextBot run summon minecraft:skeleton ~ ~ ~8 {PersistenceRequired:1b,Tags:[\"step5_next_resume\"]}", "response": "Summoned new Skeleton"}
+{"time": 1791943304.0556073, "last_seq": 537, "kind": "window_unavailable", "label": "escape_selected"}
+{"time": 1791943304.0727801, "last_seq": 537, "kind": "fixture_remove_while_escape_running", "command": "kill @e[tag=step5_next_resume]", "response": "Killed Skeleton"}
+{"time": 1791943304.0854154, "last_seq": 538, "kind": "threat_removed"}
+{"time": 1791943317.3245878, "last_seq": 657, "kind": "plan_terminal", "matched_seq": 657}
+{"time": 1791943317.3489656, "last_seq": 657, "kind": "fixture_final_health", "command": "data get entity Step5NextBot Health", "response": "Step5NextBot has the following entity data: 6.0f"}
+{"time": 1791943317.3747618, "last_seq": 657, "kind": "fixture_final_position", "command": "data get entity Step5NextBot Pos", "response": "Step5NextBot has the following entity data: [220.73370768797582d, 121.0d, 220.73408540330794d]"}
+{"time": 1791943317.4100904, "last_seq": 657, "kind": "fixture_complete", "deaths": []}
+{"time": 1791943317.430533, "last_seq": 657, "kind": "user_message", "text": "/quit"}

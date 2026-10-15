@@ -1,0 +1,9 @@
+{
+  "commit": "b0846095b5690ecf0876ccafbe22467ca54f782a",
+  "pid": 2322570,
+  "owner_pid": 2322349,
+  "started_at": 1791956352.746864,
+  "command": "pytest tests/unit -q --basetemp /dev/shm/minebot-unit-b084609",
+  "temporary_storage": "tmpfs; not a reboot durability test",
+  "concurrent_game_run": null
+}

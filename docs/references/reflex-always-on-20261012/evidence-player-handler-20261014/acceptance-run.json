@@ -1,0 +1,21 @@
+{
+  "code_commit": "5703f3f895c9dc84067193b75d66bf78e9a67136",
+  "code_dirty": false,
+  "world": "step5-next-edc89ff-20261014",
+  "fresh_world": false,
+  "empty_inventory": false,
+  "ports": [
+    25569,
+    25579,
+    8771
+  ],
+  "bot": "Step5NextBot",
+  "server_pid": 2249304,
+  "launcher_pid": 2249394,
+  "owner_pid": 2249027,
+  "started_at": 1791952610.051122,
+  "model": "deepseek-v4.1-flash",
+  "kernel": "sdk",
+  "goal": null,
+  "scope": "Short regression after player alias and handler continuation fixes; retained artificial platform, profile, fresh SDK state; controlled Visitor and real Agent patrol. Not thirty-minute acceptance."
+}

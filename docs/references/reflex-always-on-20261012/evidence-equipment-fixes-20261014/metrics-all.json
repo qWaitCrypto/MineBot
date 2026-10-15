@@ -1,0 +1,213 @@
+[
+  {
+    "run": "default-equipment-fixed",
+    "elapsed_s": 53.533791065216064,
+    "requests_by_purpose": {
+      "idle_frame": 20,
+      "running_frame": 30,
+      "plan_result_frame": 2,
+      "default_result_frame": 1
+    },
+    "answers": {
+      "stay": 9,
+      "keep_going": 15,
+      "next_step": 2,
+      "move_away": 1,
+      "resume": 1,
+      "engage": 11,
+      "call_agent": 9
+    },
+    "decision_ms_median": 131.0615,
+    "agent_delivery_counts": {
+      "reflex_fact_wake": 2
+    },
+    "agent_deliveries": [
+      {
+        "seq": 805,
+        "event": "reflex_fact_wake",
+        "reason": null,
+        "status": "completed",
+        "kind": null,
+        "activity_id": "activity-02c5594455c6429ca787c97ddd272ae4",
+        "body_event": null
+      },
+      {
+        "seq": 936,
+        "event": "reflex_fact_wake",
+        "reason": null,
+        "status": "handoff_requested",
+        "kind": null,
+        "activity_id": null,
+        "body_event": null
+      }
+    ],
+    "delegate_work": 1,
+    "read_reflex": 0,
+    "native_client_timing": {
+      "source": "client.log MINEBOT_PHASE_A terminal JSON, deduplicated by action_id",
+      "terminal_count": 15,
+      "observed_work_s": 22.79900050163269,
+      "remainder_s": 30.734790563583374,
+      "requests_during_work": {
+        "running_frame": 27
+      },
+      "requests_per_work_minute": {
+        "running_frame": 71.05574649572853
+      },
+      "limitation": "Only terminals with native timing are measured. Remainder includes startup and settlement; it is not proof of physical idleness."
+    }
+  },
+  {
+    "run": "idle-equipment-fixed",
+    "elapsed_s": 27.301568746566772,
+    "requests_by_purpose": {
+      "idle_frame": 14,
+      "running_frame": 8,
+      "plan_result_frame": 2,
+      "default_result_frame": 3
+    },
+    "answers": {
+      "stay": 11,
+      "keep_going": 1,
+      "next_step": 2,
+      "engage": 4,
+      "equip:stone_sword": 1,
+      "call_agent": 3,
+      "repeat": 1
+    },
+    "decision_ms_median": 129.324,
+    "agent_delivery_counts": {
+      "reflex_fact_wake": 2
+    },
+    "agent_deliveries": [
+      {
+        "seq": 318,
+        "event": "reflex_fact_wake",
+        "reason": null,
+        "status": "completed",
+        "kind": null,
+        "activity_id": "activity-e8928de529644a0c82c33b561d35b3a9",
+        "body_event": null
+      },
+      {
+        "seq": 457,
+        "event": "reflex_fact_wake",
+        "reason": null,
+        "status": "handoff_requested",
+        "kind": null,
+        "activity_id": null,
+        "body_event": null
+      }
+    ],
+    "delegate_work": 1,
+    "read_reflex": 0,
+    "native_client_timing": {
+      "source": "client.log MINEBOT_PHASE_A terminal JSON, deduplicated by action_id",
+      "terminal_count": 6,
+      "observed_work_s": 2.802000045776367,
+      "remainder_s": 24.499568700790405,
+      "requests_during_work": {
+        "running_frame": 4
+      },
+      "requests_per_work_minute": {
+        "running_frame": 85.65310352573593
+      },
+      "limitation": "Only terminals with native timing are measured. Remainder includes startup and settlement; it is not proof of physical idleness."
+    }
+  },
+  {
+    "run": "idle-equipment-context-fixed",
+    "elapsed_s": 21.763485431671143,
+    "requests_by_purpose": {
+      "idle_frame": 12,
+      "running_frame": 6,
+      "plan_result_frame": 2,
+      "default_result_frame": 4
+    },
+    "answers": {
+      "stay": 12,
+      "keep_going": 3,
+      "next_step": 2,
+      "engage": 1,
+      "equip:stone_sword": 1,
+      "repeat": 2
+    },
+    "decision_ms_median": 131.872,
+    "agent_delivery_counts": {
+      "reflex_fact_wake": 1
+    },
+    "agent_deliveries": [
+      {
+        "seq": 320,
+        "event": "reflex_fact_wake",
+        "reason": null,
+        "status": "completed",
+        "kind": null,
+        "activity_id": "activity-2b67194be2e848c984830c7c3c68e378",
+        "body_event": null
+      }
+    ],
+    "delegate_work": 1,
+    "read_reflex": 0,
+    "native_client_timing": {
+      "source": "client.log MINEBOT_PHASE_A terminal JSON, deduplicated by action_id",
+      "terminal_count": 3,
+      "observed_work_s": 2.7939999103546143,
+      "remainder_s": 18.96948552131653,
+      "requests_during_work": {
+        "running_frame": 3
+      },
+      "requests_per_work_minute": {
+        "running_frame": 64.42376727820096
+      },
+      "limitation": "Only terminals with native timing are measured. Remainder includes startup and settlement; it is not proof of physical idleness."
+    }
+  },
+  {
+    "run": "idle-equipment-dead-fixed",
+    "elapsed_s": 23.328023672103882,
+    "requests_by_purpose": {
+      "idle_frame": 12,
+      "running_frame": 6,
+      "plan_result_frame": 2,
+      "default_result_frame": 2
+    },
+    "answers": {
+      "stay": 12,
+      "keep_going": 3,
+      "next_step": 2,
+      "engage": 1,
+      "equip:stone_sword": 1
+    },
+    "decision_ms_median": 132.297,
+    "agent_delivery_counts": {
+      "reflex_fact_wake": 1
+    },
+    "agent_deliveries": [
+      {
+        "seq": 321,
+        "event": "reflex_fact_wake",
+        "reason": null,
+        "status": "completed",
+        "kind": null,
+        "activity_id": "activity-e3509674428a44d185b29426fedf51f9",
+        "body_event": null
+      }
+    ],
+    "delegate_work": 1,
+    "read_reflex": 0,
+    "native_client_timing": {
+      "source": "client.log MINEBOT_PHASE_A terminal JSON, deduplicated by action_id",
+      "terminal_count": 3,
+      "observed_work_s": 2.9609999656677246,
+      "remainder_s": 20.367023706436157,
+      "requests_during_work": {
+        "running_frame": 3
+      },
+      "requests_per_work_minute": {
+        "running_frame": 60.79027426108357
+      },
+      "limitation": "Only terminals with native timing are measured. Remainder includes startup and settlement; it is not proof of physical idleness."
+    }
+  }
+]

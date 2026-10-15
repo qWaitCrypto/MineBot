@@ -8,7 +8,7 @@ it never falls back to the server FakePlayer implementation.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 import hashlib
 import json
 import math
@@ -111,6 +111,44 @@ class RealClientBody:
         self._ready_lock = threading.Lock()
         self._ready = False
         self._container_pages: dict[tuple[int, int, int], dict[str, Any]] = {}
+        self._lifecycle_seen: set[tuple[str, int]] = set()
+        self._lifecycle_listeners: list[Any] = []
+        listener = getattr(self.ipc, "set_event_listener", None)
+        if callable(listener):
+            listener(self._on_lifecycle_event)
+
+    def add_lifecycle_listener(self, listener: Any) -> None:
+        with self._lock:
+            if listener not in self._lifecycle_listeners:
+                self._lifecycle_listeners.append(listener)
+            # Replay persisted native edges to a newly entered Body loop.
+            events = [event for event in self.event_log if event.name in {
+                "death", "respawned", "world_ready", "world_disconnected"}]
+        for event in events:
+            listener(event)
+
+    def remove_lifecycle_listener(self, listener: Any) -> None:
+        with self._lock:
+            if listener in self._lifecycle_listeners:
+                self._lifecycle_listeners.remove(listener)
+
+    def _on_lifecycle_event(self, payload: Mapping[str, Any]) -> None:
+        if payload.get("name") not in {"death", "respawned", "world_ready", "world_disconnected"}:
+            return
+        native_id = (str(payload.get("epoch") or ""), int(payload.get("seq") or 0))
+        with self._lock:
+            if native_id in self._lifecycle_seen:
+                return
+            self._lifecycle_seen.add(native_id)
+            event = Event(seq=self._next_seq(), tick=int(payload.get("tick") or 0),
+                          bot=self.bot_name, name=str(payload["name"]),
+                          data={**dict(payload.get("data") or {}), "native_epoch": native_id[0],
+                                "native_seq": native_id[1]})
+            self.event_log.append(event)
+            self._event_queue.append(event)
+            listeners = list(self._lifecycle_listeners)
+        for listener in listeners:
+            listener(event)
 
     @property
     def capabilities(self) -> Mapping[str, RealClientCapability]:
@@ -156,6 +194,28 @@ class RealClientBody:
         with self._lock:
             active = self._active is not None
         return _body_state(self.bot_name, cached, pending=active)
+
+    def get_reflex_facts(self) -> dict[str, Any]:
+        """Read existing native facts before the public BodyState projection.
+
+        Ground/contact facts belong to the reflex frame; they are not added
+        to tool receipts or the public BodyState contract.
+        """
+        raw = self._state_payload()
+        with self._lock:
+            active = self._active is not None
+        # Preserve the established pos/inventory_counts vocabulary for plan
+        # bindings while exposing ground/eye facts from the SAME sample.
+        projected = asdict(_body_state(self.bot_name, raw, pending=active))
+        # BodyState uses legacy sentinel values for missing observations.
+        # Reflex facts must not turn those sentinels into observed death,
+        # hunger, midnight or an origin position after leaving the world.
+        for key in ("health", "food", "oxygen", "time", "dimension"):
+            if key not in raw:
+                projected.pop(key, None)
+        if projected.get("missing"):
+            projected.pop("pos", None)
+        return {**projected, **raw}
 
     def _state_payload(self) -> dict[str, Any]:
         self._ensure_connected()

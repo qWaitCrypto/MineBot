@@ -1,0 +1,61 @@
+[
+  {
+    "id": "baseline",
+    "choice": "stay",
+    "recorded": "stay",
+    "matched": true
+  },
+  {
+    "id": "sixty_daytime_frames",
+    "first_seq": 6,
+    "last_seq": 313,
+    "switches": 0,
+    "choices": {
+      "stay": 60
+    },
+    "passed": true
+  },
+  {
+    "id": "time_day",
+    "choices": {
+      "stay": 12
+    },
+    "unique_orders": 24
+  },
+  {
+    "id": "time_dusk",
+    "choices": {
+      "go_home": 12
+    },
+    "unique_orders": 24
+  },
+  {
+    "id": "time_night",
+    "choices": {
+      "go_home": 12
+    },
+    "unique_orders": 24
+  },
+  {
+    "id": "player_2",
+    "source_seq": 582,
+    "choices": {
+      "look_player": 12
+    }
+  },
+  {
+    "id": "player_6",
+    "source_seq": 582,
+    "choices": {
+      "look_player": 12
+    }
+  },
+  {
+    "id": "player_20",
+    "source_seq": 582,
+    "choices": {
+      "stay": 10,
+      "look_player": 2
+    }
+  }
+]

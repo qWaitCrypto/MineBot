@@ -1,0 +1,117 @@
+{
+  "source": "/home/qwait/MineBot-always-on/logs/reflex-always-on-20261014-disconnect-check/trace.jsonl",
+  "seq_end": 77,
+  "elapsed_s": 14.464949607849121,
+  "requests_by_purpose": {
+    "idle_frame": 12
+  },
+  "requests_by_loop_state": {
+    "idle": 12
+  },
+  "requests_by_state_and_purpose": {
+    "idle / idle_frame": 12
+  },
+  "requests_per_session_minute_by_loop_state": {
+    "idle": 49.77549314166336
+  },
+  "requests_per_minute_buckets": [
+    {
+      "minute_from_trace_start": 0,
+      "observed_seconds": 14.464949607849121,
+      "counts_by_state_and_purpose": {
+        "idle / idle_frame": 12
+      }
+    }
+  ],
+  "loop_state_seconds": {
+    "idle": 14.464949607849121
+  },
+  "requests_per_session_minute_by_purpose": {
+    "idle_frame": 49.77549314166336
+  },
+  "requests_per_observed_body_work_minute_by_purpose": null,
+  "requests_during_observed_body_work_by_purpose": {},
+  "requests_during_observed_body_work_per_minute_by_purpose": null,
+  "rate_accounting": "Session-normalized rates include all requests. Total requests divided by observed work time measures overhead, not work cadence. The during-work rate restricts the numerator to requests inside observed native work intervals.",
+  "native_action_count": 0,
+  "observed_native_work_s": 0,
+  "idle_remainder_estimate_s": null,
+  "supervised_body_call_s": 0,
+  "outside_supervised_body_calls_s": 14.464949607849121,
+  "supervised_call_timing_method": "Union of completed supervised-call intervals; includes tool execution and its settlement, not proof of physical movement. Native terminals missing elapsed_ms are excluded from native work time, never treated as proof that the Body was idle.",
+  "timing_method": "Union of native terminal elapsed_ms intervals, deduplicated by action_id; IPC receipt is the end timestamp. Idle remainder and no-question gap are estimates; missing native terminals are not counted as work.",
+  "longest_estimated_idle_without_any_question_s": null,
+  "longest_idle_state_without_any_question_s": 1.2122986316680908,
+  "idle_state_gap_method": "idle is the loop state, and may contain life movement. This measurement excludes dead/work intervals but includes session startup.",
+  "largest_request_gaps": [
+    {
+      "before_seq": 6,
+      "after_seq": 12,
+      "seconds": 1.2122986316680908
+    },
+    {
+      "before_seq": 62,
+      "after_seq": 67,
+      "seconds": 1.186826467514038
+    },
+    {
+      "before_seq": 17,
+      "after_seq": 23,
+      "seconds": 1.1746373176574707
+    },
+    {
+      "before_seq": 23,
+      "after_seq": 28,
+      "seconds": 1.1736361980438232
+    },
+    {
+      "before_seq": 40,
+      "after_seq": 45,
+      "seconds": 1.1734373569488525
+    },
+    {
+      "before_seq": 34,
+      "after_seq": 40,
+      "seconds": 1.1725010871887207
+    },
+    {
+      "before_seq": 56,
+      "after_seq": 62,
+      "seconds": 1.162780523300171
+    },
+    {
+      "before_seq": 45,
+      "after_seq": 51,
+      "seconds": 1.1616668701171875
+    },
+    {
+      "before_seq": 12,
+      "after_seq": 17,
+      "seconds": 1.1613564491271973
+    },
+    {
+      "before_seq": 28,
+      "after_seq": 34,
+      "seconds": 1.1517200469970703
+    }
+  ],
+  "default_actions_requested": {},
+  "default_actions_finished": {},
+  "action_accounting": "Answers are semantic selections, default_requested is an attempted action dispatch, and native_action_count is observed execution. They are not interchangeable.",
+  "answers": {
+    "stay": 12
+  },
+  "unknown_ratio": 0.0,
+  "decision_ms_median": 127.4395,
+  "agent_delivery_counts": {},
+  "agent_deliveries": [],
+  "runtime_intent_wakes": [],
+  "wake_accounting": "reflex_death is a death observation, not a wake. agent_start counts launches/turn entries, not delivery events. Distinct deliveries can be coalesced into a model turn.",
+  "agent_start_count": 0,
+  "delegate_work": 0,
+  "read_reflex": 0,
+  "state_switches": 0,
+  "reaction_chains": [],
+  "deaths": [],
+  "last_body": {}
+}

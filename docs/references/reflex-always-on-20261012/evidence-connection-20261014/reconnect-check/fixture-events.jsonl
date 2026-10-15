@@ -1,0 +1,9 @@
+{"time": 1791949259.4908886, "last_seq": 8, "kind": "first_rejoined_idle", "matched_seq": 6}
+{"time": 1791949259.497031, "last_seq": 8, "kind": "rejoined_health", "command": "data get entity Step5NextBot Health", "response": "Step5NextBot has the following entity data: 20.0f"}
+{"time": 1791949259.5007784, "last_seq": 8, "kind": "rejoined_position_before", "command": "data get entity Step5NextBot Pos", "response": "Step5NextBot has the following entity data: [224.42375429572516d, 121.0d, 220.5d]"}
+{"time": 1791949259.5013163, "last_seq": 8, "kind": "user_message", "text": "/goal 请用 delegate_work 下发一个移动节点到[220,121,220]，intent写到达该位置。不破坏、不放置，不轮询；收到完成事实后报告并待命。"}
+{"time": 1791949272.7208927, "last_seq": 482, "kind": "rejoined_goal_terminal", "matched_seq": 482}
+{"time": 1791949272.7403674, "last_seq": 482, "kind": "rejoined_position_after", "command": "data get entity Step5NextBot Pos", "response": "Step5NextBot has the following entity data: [220.5d, 121.0d, 220.49967762212754d]"}
+{"time": 1791949272.7539492, "last_seq": 482, "kind": "rejoined_final_health", "command": "data get entity Step5NextBot Health", "response": "Step5NextBot has the following entity data: 20.0f"}
+{"time": 1791949272.7755291, "last_seq": 482, "kind": "rejoin_complete", "deaths": []}
+{"time": 1791949272.7816494, "last_seq": 482, "kind": "user_message", "text": "/quit"}
