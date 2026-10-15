@@ -1022,9 +1022,22 @@ class BodyLoop(CallSupervisor):
         )
         if after == "resume":
             self._set_state("work", "decision")
-            # Back to the earlier work; the Agent is not woken for this.
             record["resume_original"] = True
             self._remember_protection(action, default_result)
+            # The work goes on; the Agent hears of it asynchronously and may
+            # change the plan or take over at any time (user, 2026-10-15). It
+            # is told facts only: what stopped the work, what was done, where,
+            # and the recent interruptions of this same work.
+            notify_fact = getattr(self.runtime, "notify_reflex_fact", None)
+            if callable(notify_fact):
+                notify_fact({
+                    "kind": "protection", "status": "work_resumed_after_protection",
+                    "activity_id": f"protection-{call_id}-{record['history_total']}",
+                    "call_id": call_id, "work": rq.call_text(record["tool"], record["params"]),
+                    "default_action": handoff["default_action"],
+                    "interruptions_of_this_work": handoff["history"],
+                    "earlier_interruptions": handoff["history_earlier"],
+                })
         elif after == "call_agent" and not bool(record["supervision_context"].get("is_plan")):
             self._set_state("idle", "decision")
             notify_fact = getattr(self.runtime, "notify_reflex_fact", None)

@@ -745,7 +745,10 @@ def test_lifecycle_monitors_work_protection_and_switch_without_nested_consumer(m
                 assert terminal_consumers
                 assert all(task is loop._lifecycle_task for task in terminal_consumers)
             assert {name for name, _ in frames} >= {'collect_resource', 'go_to_surface'}
-            assert len(notifications) == (1 if verdict == 'call_agent' else 0)
+            handoffs = [n for n in notifications if n.get("kind") != "protection"]
+            resumed = [n for n in notifications if n.get("kind") == "protection"]
+            assert len(handoffs) == (1 if verdict == 'call_agent' else 0)
+            assert len(resumed) == (0 if verdict == 'call_agent' else 1)
             assert len(loop.recent_experiences) == (0 if verdict == 'call_agent' else 1)
             if loop.recent_experiences:
                 text = loop.recent_experiences[0]

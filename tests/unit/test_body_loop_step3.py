@@ -143,7 +143,11 @@ def test_direct_interruptions_reach_the_actual_result_question_and_agent_handoff
             record["cancel_requested"] = record["settling"] = False
             await loop._run_default_action(record, execution, "surface", action)
         assert len(stops) == 7 and all(s["invalidate_generation"] is False for s in stops)
-        assert len(notifications) == 1
+        # Six times back to the work, each told to the Agent as it happened; the
+        # seventh ends with the handoff.
+        resumed = [n for n in notifications if n.get("kind") == "protection"]
+        notifications = [n for n in notifications if n.get("kind") != "protection"]
+        assert len(resumed) == 6 and len(notifications) == 1
         assert record["history_total"] == 7 and len(record["history"]) == 5
         # The interruption history goes to the Agent with the handoff; the
         # result question carries how protection ended and the protection facts.
@@ -263,3 +267,41 @@ def test_interruption_history_keeps_five_recent_entries_and_reports_earlier_coun
     assert lines[0] == "There were 7 earlier attempts before these."
     assert lines[1].startswith("Attempt 8:") and lines[-1].startswith("Attempt 12:")
     assert "call Agent" not in " ".join(lines)
+
+
+def test_going_back_after_protection_tells_the_agent_while_the_work_goes_on():
+    """The Agent is live and asynchronous: it hears that protection stopped its
+    work and the Body went back, and may change the plan; the work is not stopped."""
+    async def run():
+        owner, _ = runtime()
+        owner.registry = SimpleNamespace(get=lambda name: SimpleNamespace(name=name))
+        notifications = []
+        owner.notify_reflex_fact = notifications.append
+        async def stop(*args, **kwargs):
+            return {"settled": True}
+        owner.cancel_active_execution_with_facts = stop
+        loop = BodyLoop(owner)
+        record = {"call_id": "mine", "tool": "collect_resource", "params": {"item": "logs", "count": 4},
+                  "supervision_context": {"intent": "Have four logs"}, "questions": 0,
+                  "cancel_requested": False, "timeout_s": None}
+        loop.current = record
+        async def run_tool(tool, *args, **kwargs):
+            record["result"] = {"success": False, "reason": "preempted", "canRetry": True}
+            return {"success": True, "reason": "surface_reached"}
+        owner.run_tool = run_tool
+        async def facts():
+            return {"health": 20, "food": 20, "oxygen": 300, "position": [1, 65, 2]}
+        loop._read_idle_facts = facts
+        async def judge(*args, **kwargs):
+            return "resume"
+        loop.judge = judge
+        await loop._run_default_action(record, {"tool": "collect_resource", "facts": {
+            "position": [1, 60, 2], "inventory": {}}}, "surface", ("go_to_surface", {}))
+        assert record["resume_original"] is True
+        [fact] = notifications
+        assert fact["status"] == "work_resumed_after_protection" and fact["kind"] == "protection"
+        assert fact["work"] == 'collect_resource(item="logs", count=4)'
+        assert fact["default_action"]["tool"] == "go_to_surface"
+        assert fact["interruptions_of_this_work"][0]["body"]["position"] == [1, 60, 2]
+        assert fact["activity_id"] != "mine"
+    asyncio.run(run())
