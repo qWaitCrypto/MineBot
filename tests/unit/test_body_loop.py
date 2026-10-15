@@ -4,6 +4,7 @@ import json
 import time
 from pathlib import Path
 from types import SimpleNamespace
+import pytest
 
 
 from minebot.app.body_loop import BodyLoop
@@ -860,6 +861,37 @@ def test_running_plan_verdict_releases_pending_slot_without_a_second_result_ques
             finally:
                 await loop.stop()
     asyncio.run(run())
+
+@pytest.mark.parametrize('grace', [0, 5])
+def test_plan_call_that_raises_releases_result_slot_and_idle_frames_go_on(monkeypatch, grace):
+    # Villa run 2026-10-15: explore_for raised inside a plan; its result slot
+    # was never released and no idle frame was asked for the rest of the run.
+    async def run():
+        runtime, trace, _ = _runtime()
+        runtime.direct_call_handoffs = {}
+        from minebot.app.execution_snapshot import ExecutionSnapshots
+        runtime.execution_snapshots = ExecutionSnapshots()
+        async def raising_lane(*args, **kwargs):
+            await asyncio.sleep(.01)
+            raise ValueError('observations exceeds 128 items')
+        runtime.execution_lane = SimpleNamespace(run=raising_lane)
+        loop = BodyLoop(runtime)
+        try:
+            with pytest.raises(ValueError):
+                await loop.run(SimpleNamespace(name='explore_for'), None, (),
+                               call_id='plan-raises', timeout_s=30,
+                               supervision_context={'is_plan': True, 'intent': 'find flat ground'})
+            await asyncio.sleep(.05)
+            assert not loop._result_pending
+            assert any(e['event'] == 'call_supervision_request' and e['purpose'] == 'idle_frame'
+                       for e in trace.events)
+        finally:
+            await loop.stop()
+    monkeypatch.setattr('minebot.app.direct_call_supervision.FAST_COMPLETION_GRACE_S', grace)
+    monkeypatch.setattr('minebot.app.direct_call_supervision.FACT_FRAME_INTERVAL_S', .001)
+    monkeypatch.setattr('minebot.app.body_loop.FACT_FRAME_INTERVAL_S', .001)
+    asyncio.run(run())
+
 
 def test_cancelled_plan_releases_result_slot_even_when_lifecycle_finishes_later(monkeypatch):
     async def run():

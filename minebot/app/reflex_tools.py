@@ -56,6 +56,9 @@ class ReflexActivity:
     project_id: str | None = None
     put_down: bool = False
     recorded: bool = False
+    # Set when the plan stopped because the code under it raised; the Agent
+    # sees it instead of a bare "blocked" with no facts.
+    error: str | None = None
 
 
 class ReflexManager:
@@ -124,6 +127,8 @@ class ReflexManager:
             "tree": self._shown_tree(activity),
             "facts": self._shown_facts(activity),
         }
+        if activity.error:
+            fact["error"] = activity.error
         wake = getattr(self.runtime, "notify_reflex_fact", None)
         if callable(wake):
             wake(fact)
@@ -293,6 +298,7 @@ class ReflexManager:
 
     async def _run(self, activity: ReflexActivity) -> None:
         run_revision = activity.revision
+        activity.error = None
         self._active_activity_id = activity.activity_id
         state_before = await self._progress_state()
 
@@ -407,6 +413,7 @@ class ReflexManager:
             if activity.revision != run_revision or activity.status in {"cancelled", "paused", "stopping", "updating"}:
                 return
             activity.status = "blocked"
+            activity.error = f"The plan stopped on an internal error, not on the world: {type(exc).__name__}: {str(exc)[:300]}"
             self.runtime.trace.emit("reflex_activity_failed", activity_id=activity.activity_id,
                                     error_type=type(exc).__name__, message=str(exc)[:400])
             self._finish(activity)
@@ -582,6 +589,7 @@ class ReflexManager:
                 "revision": activity.revision,
                 "tree": self._shown_tree(activity),
                 "facts": self._shown_facts(activity),
+                **({"error": activity.error} if activity.error else {}),
                 "execution": self._execution(),
                 "body_control": self.runtime.body_control.snapshot().to_payload(),
             }).to_payload()

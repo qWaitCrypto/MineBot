@@ -286,8 +286,12 @@ class BodyLoop(CallSupervisor):
         else:
             target = "work"
         self._set_state(target, "agent_call" if target == "work" else "decision")
+        raised = False
         try:
             return await super().run(tool, callback, args, **kwargs)
+        except BaseException:
+            raised = True
+            raise
         finally:
             # A protective terminal still awaits Decision's return/handoff
             # choice. Keep its survival/threat state through that result.
@@ -295,10 +299,13 @@ class BodyLoop(CallSupervisor):
                 self._set_state(previous, "call_ended")
             handoff = getattr(self.runtime, "direct_call_handoffs", {}).get(call_id, {})
             decided = handoff.get("facts", {}).get("decision", {}).get("choice")
-            if not context.get("is_plan") or decided in {"step_done", "next_step", "call_agent", "repeat", "interrupt"}:
+            if raised or not context.get("is_plan") or decided in {"step_done", "next_step", "call_agent", "repeat", "interrupt"}:
                 # WorkPlanExecutor consumes a running-frame verdict directly,
                 # without asking another result question. There is therefore
                 # no later decide_plan_result owner to release this slot.
+                # A call that raised has no result question either; keeping
+                # its slot stopped every idle frame for good (villa run
+                # 2026-10-15, no frame after 23:32:52).
                 self._release_result_pending(call_id)
             self._ensure_idle_task()
 

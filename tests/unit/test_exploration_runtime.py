@@ -896,6 +896,50 @@ class ExplorationTransactionsTests(unittest.TestCase):
         self.assertTrue(any(item.get("reason") == "scan_page_limit" for item in regions[0].uncertainty))
         self.assertFalse(navigator.calls)
 
+    def test_full_block_pages_plus_entities_fit_the_coverage_store(self):
+        # Villa run 2026-10-15: four full pages of grass plus nearby mobs went
+        # past the store's 128 items; the store raised and the plan died.
+        pages = {
+            start: _find_blocks_page(
+                blocks=tuple({"x": start * 32 + i, "y": 64, "z": 0, "type": "stone", "dist2": float(start * 32 + i)}
+                             for i in range(32)),
+                complete=False,
+                next_start=start + 1,
+            )
+            for start in range(4)
+        }
+        body = PagedFindBlocksBody(pages)
+        body.entities[(0, 0)] = (
+            {"id": "pig-1", "type": "pig", "pos": [2.0, 64.0, 3.0], "dist2": 5.0},
+            {"id": "pig-2", "type": "pig", "pos": [9.0, 64.0, 3.0], "dist2": 500.0},
+        )
+
+        class BoundedStore(MemoryExplorationCoverageStore):
+            def record_region(self, **kwargs):
+                if len(kwargs.get("observations") or ()) > 128:
+                    raise ValueError("observations exceeds 128 items")
+                return super().record_region(**kwargs)
+
+        coverage = BoundedStore()
+        runtime, _, _ = _runtime(body=body, coverage=coverage)
+
+        result = runtime.explore_for(
+            block_targets=("stone",),
+            entity_targets=("pig",),
+            max_regions=1,
+            return_policy="region_budget",
+        )
+
+        self.assertTrue(result.success, result.to_payload())
+        regions = coverage.list_regions("minecraft:overworld", result.metrics["targets"]["query_signature"])
+        self.assertEqual(len(regions[0].observations), 128)
+        # The nearest are kept: the close pig stays, the far one is dropped.
+        ids = {item.get("id") for item in regions[0].observations}
+        self.assertIn("pig-1", ids)
+        self.assertNotIn("pig-2", ids)
+        truncated = [item for item in regions[0].uncertainty if item.get("reason") == "observations_truncated"]
+        self.assertEqual(truncated, [{"reason": "observations_truncated", "kept": 128, "omitted": 2}])
+
     def test_mixed_scan_page_limit_with_positive_block_continues_frontier(self):
         pages = {
             start: _find_blocks_page(

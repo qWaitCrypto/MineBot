@@ -20,6 +20,7 @@ from minebot.brain.registry import RegisteredTool, ToolRegistry, ToolSidecar, We
 from minebot.brain.lifecycle import LifecycleState
 from minebot.contract import BodyState, PerceptionResult, ProgressAbort, Result, ToolResult
 from minebot.contract.tool_trace import canonical_args_hash, tool_tactic_signature
+from minebot.contract.results import RECIPE_SOURCE_UNLOCKED_BOOK
 
 # The old failure-storm threshold; the counter is a fact now, never a stop.
 FAILURES = 5
@@ -704,8 +705,28 @@ class AgentCompositionTests(unittest.TestCase):
         self.assertEqual(result.metrics["inventory_counts"], {})
         self.assertEqual(
             result.metrics["missing_materials"],
-            [{"item": "stone_pickaxe", "required": 1, "available": 0}],
+            [{"item": "stone_pickaxe", "required": 1, "available": 0, "recipe_known": False}],
         )
+        self.assertEqual(calls, [])
+
+    def test_ensure_tool_for_says_when_the_recipe_book_hides_the_recipe(self):
+        # Villa run 2026-10-15: logs only, stone_pickaxe's recipe not yet in
+        # the book; the result read as if the pickaxe itself were the material.
+        body = FakeBody()
+        body.inventory_counts = {"oak_log": 12}
+        registry = ToolRegistry()
+        register_inventory_tools(registry, body)
+        calls = register_fake_acquisition_leaf_tools(registry, body)
+        ctx, _trace_events = composition_context(body, registry, max_candidates=64)
+
+        def lookup(_item):
+            return None
+        lookup.recipe_source = RECIPE_SOURCE_UNLOCKED_BOOK
+
+        result = ensure_tool_for({"resource": "stone_pickaxe"}, ctx, lookup)
+
+        self.assertEqual(result.reason, "missing_materials")
+        self.assertIn("recipe book does not show a recipe for stone_pickaxe", result.next_suggestion)
         self.assertEqual(calls, [])
 
     def test_ensure_item_executes_resolver_plan_through_leaf_tools(self):

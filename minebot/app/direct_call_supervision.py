@@ -13,6 +13,7 @@ import copy
 import inspect
 import json
 import os
+import sys
 import time
 from uuid import uuid4
 from collections.abc import Callable, Mapping
@@ -745,6 +746,11 @@ class CallSupervisor:
             if caller is not None and caller.cancelling():
                 # A cancelled containing plan will never ask a result
                 # question. Its lifecycle completion must not reserve a slot.
+                record["result_abandoned"] = True
+                self._release_result_pending(str(record.get("call_id") or ""))
+            elif sys.exc_info()[0] is not None:
+                # The tool raised: no result question will follow, so neither
+                # this call nor its monitor may keep a result slot.
                 record["result_abandoned"] = True
                 self._release_result_pending(str(record.get("call_id") or ""))
             # Plan calls are judged by WorkPlanExecutor immediately after this
