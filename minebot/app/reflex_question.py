@@ -461,9 +461,28 @@ def equipment_candidates(facts: Mapping[str, Any], result: Mapping[str, Any]) ->
             and str(item).removeprefix("minecraft:") not in {held, source}}
 
 
+# Result reasons in which the Body reports that its tool was the problem.
+TOOL_FAILURE_REASONS = ("tool_broke", "missing_required_tool")
+
+
+def tool_failed(result: Mapping[str, Any]) -> bool:
+    """The result itself says the tool broke or was not the one needed."""
+    details = [result] + [d for d in (result.get("summary"), result.get("metrics")) if isinstance(d, Mapping)]
+    if any(isinstance(d.get("broken_item"), str) for d in details):
+        return True
+    reasons = [d.get("reason") for d in details if isinstance(d.get("reason"), str)]
+    return any(r in TOOL_FAILURE_REASONS or r.startswith("tool_equip_failed") for r in reasons)
+
+
 def equipment_options(facts: Mapping[str, Any], result: Mapping[str, Any], *, call: str) -> dict[str, str]:
-    """The same owned-tool alternatives for any failed terminal call."""
-    if result.get("success") is True:
+    """Owned tools of the same category, when a call failed because of its tool.
+
+    Offered for any failure, "equip the stone sword and run the same call
+    again" was chosen after a fight ended with its target gone and the sword
+    intact, 2 of 2 times (live step8-extra-claude3), and after a failed move
+    away (step8-extra-claude1). The user chose tool failures only (2026-10-15).
+    """
+    if result.get("success") is True or not tool_failed(result):
         return {}
     return {key: f"Equip {item} from the inventory and run the same call again: {call}."
             for key, item in equipment_candidates(facts, result).items()}

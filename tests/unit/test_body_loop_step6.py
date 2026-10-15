@@ -134,7 +134,10 @@ def test_interrupt_stop_preserves_plan_generation_and_does_not_notify_agent():
 
 def test_equipment_is_only_a_failed_result_option_for_an_owned_other_tool_of_same_category():
     body={'selected_item':'wooden_pickaxe','inventory':{'stone_pickaxe':1,'iron_sword':1,'iron_pickaxe':0}}
-    failed={'success':False,'reason':'target_unreachable'}
+    unrelated={'success':False,'reason':'target_unreachable'}
+    assert not {k for k in rq.frame_options(tool='collect_resource',params={'item':'stone'},intent='Collect stone',
+                                           facts=body,running=False,result=unrelated) if k.startswith('equip:')}
+    failed={'success':False,'reason':'missing_required_tool'}
     options=rq.frame_options(tool='collect_resource',params={'item':'stone'},intent='Collect stone',facts=body,running=False,result=failed)
     assert options['equip:stone_pickaxe']=='Equip stone_pickaxe from the inventory and run the same call again: collect_resource(item="stone").'
     assert not {k for k in rq.frame_options(tool='collect_resource',params={},intent='Collect stone',facts=body,running=True) if k.startswith('equip:')}
@@ -354,3 +357,17 @@ def test_equipment_respects_original_node_deadline_without_starting_write():
         assert await executor._handle_equipment(p['work'],'original','work',[],record)=='blocked'
         assert record.blocked['reason']=='node_timeout'
     asyncio.run(run())
+
+
+def test_a_fight_that_lost_its_target_does_not_offer_the_spare_sword():
+    """Target gone, sword intact: equipping the spare to fight nothing was
+    chosen 2 of 2 times (live step8-extra-claude3)."""
+    facts = {'selected_item': 'wooden_sword', 'inventory': {'wooden_sword': 1, 'stone_sword': 1}}
+    lost = {'success': False, 'reason': 'target_lost', 'canRetry': True}
+    options = rq.after_default_options(original_call='', intent='', default_call='engage_entity(target="id")',
+                                       result=lost, facts=facts, protective_choice='engage')
+    assert not any(k.startswith('equip:') for k in options)
+    broke = {'success': False, 'reason': 'tool_broke', 'metrics': {'broken_item': 'wooden_sword'}}
+    options = rq.after_default_options(original_call='', intent='', default_call='engage_entity(target="id")',
+                                       result=broke, facts=facts, protective_choice='engage')
+    assert 'equip:stone_sword' in options
