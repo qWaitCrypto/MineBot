@@ -635,22 +635,35 @@ def ensure_item(
                 # The Body cannot expand an unavailable recipe. Report the
                 # missing target and authoritative inventory, then leave the
                 # acquisition choice to the Agent.
+                unknown = _normalize_item(str(plan.detail.get("missing_recipe") or item))
+                if plan.detail.get("recipe_source") == RECIPE_SOURCE_UNLOCKED_BOOK:
+                    # Villa run 2026-10-15: with logs only, stone_pickaxe was
+                    # "missing materials: stone_pickaxe 1" six times; the real
+                    # reason is that its recipe was not in the book yet.
+                    suggestion = (
+                        f"The Body's recipe book does not show a recipe for {unknown} yet; a recipe appears "
+                        "once one of its ingredients has been held. Obtain the ingredients you know it needs "
+                        "(the Body cannot list them), then retry."
+                    )
+                else:
+                    suggestion = (
+                        f"The Body has no recipe or gathering route for {unknown}. "
+                        "Choose what materials to obtain, then retry."
+                    )
                 return ToolResult(
                     False,
                     "missing_materials",
                     False,
-                    next_suggestion=(
-                        f"The Body does not have the materials or an available recipe for {item}. "
-                        "Choose what materials to obtain, then retry."
-                    ),
+                    next_suggestion=suggestion,
                     metrics={
                         "item": item,
                         "target_count": count,
                         "inventory_counts": dict(counts),
                         "missing_materials": [{
-                            "item": item,
+                            "item": unknown,
                             "required": count,
-                            "available": int(counts.get(item, 0)),
+                            "available": int(counts.get(unknown, 0)),
+                            "recipe_known": False,
                         }],
                         "recipe_available": False,
                         "error": error,

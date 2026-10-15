@@ -62,8 +62,13 @@ class VitalWindow:
 
     def add(self, now: float, facts: Mapping[str, Any]) -> dict[str, Any]:
         """Record this frame and return the values from a few seconds ago."""
-        sample = {key: float(facts[key]) for key in ("health", "oxygen")
-                  if isinstance(facts.get(key), (int, float))}
+        sample: dict[str, Any] = {key: float(facts[key]) for key in ("health", "oxygen")
+                                  if isinstance(facts.get(key), (int, float))}
+        near = hostiles(facts)
+        if near and isinstance(near[0].get("id"), str) and near[0]["id"]:
+            # Comes back as hostile_id_before / hostile_dist_before.
+            sample["hostile_id"] = near[0]["id"]
+            sample["hostile_dist"] = near[0]["dist"]
         before: dict[str, Any] = {}
         oldest, newest = VITAL_BASELINE_S[1], VITAL_BASELINE_S[0]
         for stamp, values in self._samples:
@@ -225,6 +230,20 @@ def _main_hand(facts: Mapping[str, Any]) -> str | None:
 def _threat_sentence(facts: Mapping[str, Any]) -> str:
     near = hostiles(facts)
     if near:
+        now = round(near[0]["dist"])
+        before = facts.get("hostile_dist_before")
+        if (near[0].get("id") and near[0].get("id") == facts.get("hostile_id_before")
+                and isinstance(before, (int, float)) and round(before) - now >= 1):
+            # Said as a change (§6). As a still distance, a zombie walking in
+            # from 14 to 6 blocks was "safe" every frame and the Body was
+            # killed (villa run 2026-10-15); with this sentence those recorded
+            # frames were in danger 72/72, and still or retreating mobs stayed
+            # safe. Only "coming closer" is said: "moving away" turned a just
+            # hurt, knocked-back frame from in danger to safe.
+            age = facts.get("vital_age_s")
+            ago = f"{round(age)} seconds ago" if isinstance(age, (int, float)) else "a few seconds ago"
+            return (f"Nearest hostile mob: {near[0]['name']}, {now} blocks away and coming closer: "
+                    f"it was {round(before)} blocks away {ago}.")
         return f"Nearest hostile mob: {near[0]['name']}, {near[0]['dist']:.0f} blocks away."
     return "No hostile mob is in view."
 

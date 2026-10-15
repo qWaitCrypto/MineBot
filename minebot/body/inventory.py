@@ -1498,6 +1498,7 @@ def _choose_craft_plan(
                     "reason": "inputs_not_available",
                     "requires_table": variant.requires_table,
                     "output_count": variant.output_count,
+                    "missing": _missing_recipe_inputs(slots, variant, crafts),
                 }
             )
             continue
@@ -1538,13 +1539,60 @@ def _choose_craft_plan(
             inputs=tuple(inputs),
             remainders=tuple(remainders),
         )
+    metrics: dict[str, object] = {"item": item, "requested_count": count, "variant_failures": failures}
+    short = [failure for failure in failures if failure.get("missing")]
+    if short:
+        # Say what is missing: with only "gather the missing ingredients" the
+        # Agent guessed, re-read and retried for minutes over one plank
+        # (villa run 2026-10-15, wooden_pickaxe with 2 planks and 10 logs).
+        closest = min(short, key=lambda failure: sum(int(m["need"]) - int(m["have"]) for m in failure["missing"]))
+        metrics["missing"] = closest["missing"]
+        suggestion = (f"To craft {count} {item.removeprefix('minecraft:')} the inventory still lacks: "
+                      + "; ".join(_missing_text(entry) for entry in closest["missing"]) + ".")
+    else:
+        suggestion = "free inventory space, gather the missing ingredients, or adjust the requested craft count"
     return ToolResult(
         success=False,
         reason="craft_plan_not_available",
         can_retry=True,
-        next_suggestion="free inventory space, gather the missing ingredients, or adjust the requested craft count",
-        metrics={"item": item, "requested_count": count, "variant_failures": failures},
+        next_suggestion=suggestion,
+        metrics=metrics,
     )
+
+
+def _missing_recipe_inputs(
+    slots: list[InventorySlot],
+    variant: CraftRecipeVariant,
+    crafts: int,
+) -> list[dict[str, object]]:
+    """Each ingredient the inventory is short of, with how many it has."""
+    pool: dict[str, int] = {}
+    for slot in slots:
+        if 0 <= slot.slot < 36 and not slot.empty and slot.item:
+            key = _normalize_recipe_item(slot.item)
+            pool[key] = pool.get(key, 0) + slot.count
+    needed: dict[tuple[str, ...], int] = {}
+    for group in variant.ingredient_groups:
+        if group:
+            needed[group] = needed.get(group, 0) + crafts
+    missing: list[dict[str, object]] = []
+    for group, need in sorted(needed.items(), key=lambda entry: len(entry[0])):
+        have = 0
+        for option in group:
+            for key in list(pool):
+                if have < need and _same_item(key, option):
+                    taken = min(pool[key], need - have)
+                    pool[key] -= taken
+                    have += taken
+        if have < need:
+            missing.append({"any_of": list(group), "need": need, "have": have})
+    return missing
+
+
+def _missing_text(entry: dict[str, object]) -> str:
+    options = [str(option).removeprefix("minecraft:") for option in entry.get("any_of") or []]
+    name = options[0] if len(options) == 1 else f"{options[0]} or another of {len(options)} kinds" if options else "an ingredient"
+    return f"{int(entry['need']) - int(entry['have'])} more {name} (needs {entry['need']}, has {entry['have']})"
 
 
 def _allocate_recipe_inputs(

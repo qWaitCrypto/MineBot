@@ -87,6 +87,33 @@ def test_vital_window_gives_values_from_a_few_seconds_ago():
     assert window.add(30.0, {"health": 14}) == {}
 
 
+def _zombie(dist, mob_id="z1"):
+    return {"entities": [{"hostile": True, "id": mob_id, "name": "Zombie", "dist": dist}]}
+
+
+def test_approaching_hostile_is_said_as_a_change():
+    # Villa run 2026-10-15: "Zombie, 11 blocks away" as a still distance was
+    # judged safe all the way in to 3 blocks; said as coming closer, the
+    # recorded frames were in danger 72/72.
+    window = rq.VitalWindow()
+    window.add(0.0, {"health": 20, **_zombie(11.2)})
+    facts = {"health": 20, **_zombie(6.1)}
+    facts.update(window.add(3.0, facts))
+    assert rq._threat_sentence(facts) == (
+        "Nearest hostile mob: Zombie, 6 blocks away and coming closer: it was 11 blocks away 3 seconds ago.")
+
+
+@pytest.mark.parametrize("before,now,mob_id", [(6.0, 6.3, "z1"), (6.0, 10.0, "z1"), (11.0, 6.0, "other")])
+def test_still_retreating_or_other_hostile_keeps_the_plain_sentence(before, now, mob_id):
+    # "moving away" was not added: a just-hurt, knocked-back frame went from
+    # in danger to safe with it.
+    window = rq.VitalWindow()
+    window.add(0.0, {"health": 20, **_zombie(before)})
+    facts = {"health": 20, **_zombie(now, mob_id)}
+    facts.update(window.add(4.0, facts))
+    assert rq._threat_sentence(facts) == f"Nearest hostile mob: Zombie, {now:.0f} blocks away."
+
+
 def test_recorded_air_turnaround_uses_current_direction_and_its_own_age():
     recorded = json.loads((Path(__file__).parents[1] / "fixtures" / "reflex_step2_oxygen_direction.json").read_text())
     expected = {
