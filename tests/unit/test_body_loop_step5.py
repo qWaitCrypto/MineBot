@@ -228,3 +228,14 @@ def test_going_back_to_the_safe_place_is_not_offered_while_standing_there():
     assert "retreat_safe" not in rq.protective_options(raw)
     raw["safe_standing_position"] = [10, 64, 0]
     assert "retreat_safe" in rq.protective_options(raw)
+
+
+def test_the_ended_retreat_is_not_offered_again_while_standing_at_the_safe_place():
+    """Offered regardless of the facts, it was chosen 12 times in a row and
+    arrived at once each time (step5-threat-claude9)."""
+    raw = facts(3)
+    raw.update(health=12, health_before=20, safe_standing_position=[0.5, 64, 1.2])
+    options = rq.after_default_options(original_call="collect_resource()", intent="i",
+                                       default_call="move_to()", result={"success": True},
+                                       facts=raw, protective_choice="retreat_safe")
+    assert "retreat_safe" not in options and "move_away" in options

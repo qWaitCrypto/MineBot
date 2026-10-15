@@ -295,6 +295,8 @@ def test_protective_result_unknown_remains_cancellable(monkeypatch):
 def test_protective_retry_retains_its_action_identity_and_counts_only_real_attempts(monkeypatch):
     async def run():
         runtime, _trace, _decision = _runtime()
+        # Still short of air: swimming up again is an option only then.
+        runtime.last_known_body_state["oxygen"] = 150
         runtime.registry = SimpleNamespace(get=lambda name: SimpleNamespace(name=name))
         requests, writes = [], []
         replies = iter(("unknown", "surface", "resume"))

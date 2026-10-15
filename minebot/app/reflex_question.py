@@ -535,22 +535,22 @@ def after_default_options(
     facts: Mapping[str, Any] | None = None, protective_choice: str = "",
 ) -> dict[str, str]:
     """What the Body may do once a protective action has ended: go back (or
-    stay), any protective action again, including the one that just ended
-    under its own name, owned spare equipment, or the Agent.
+    stay), any protective action the facts allow now, owned spare equipment,
+    or the Agent.
 
     Offered as "Run the same call again", a fight refused at low health was
     repeated twelve times under a skeleton's arrows (step5-threat-claude4);
-    named beside the others, the replay chose to move away 18/18."""
+    named beside the others, the replay chose to move away 18/18.  The one
+    that just ended follows the same eligibility as the others: offered
+    anyway, going back to the safe place where the Body already stood was
+    chosen 12 times in a row (step5-threat-claude9)."""
     if dead(facts or {}):
         return {}
     result = result if isinstance(result, Mapping) else {}
     options = {
         "resume": f"Go back to the earlier work, {original_call}" + (f", for: “{intent}”" if intent else "."),
     } if original_call else {"stay": idle_options({})["stay"]}
-    protection = protective_options(facts or {})
-    if protective_choice and protective_choice not in protection:
-        protection = {protective_choice: DEFAULT_ACTION_INTENTS.get(protective_choice, protective_choice), **protection}
-    options.update(protection)
+    options.update(protective_options(facts or {}))
     options.update(equipment_options(facts or {}, result, call=default_call))
     options["call_agent"] = "Do not go back and hand control back to the Agent for a new plan."
     return options

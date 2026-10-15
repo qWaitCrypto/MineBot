@@ -317,18 +317,17 @@ def test_dead_entities_do_not_remain_actionable_hostiles_in_facts_or_options():
 
 
 def test_after_a_protective_action_the_body_may_go_back_to_its_work():
-    options = rq.after_default_options(
-        original_call='collect_resource(count=3, item="raw_iron")', intent="get 3 raw iron",
-        default_call="go_to_surface()", result={"success": True}, facts={"oxygen": 300},
-        protective_choice="surface",
-    )
+    common = dict(original_call='collect_resource(count=3, item="raw_iron")', intent="get 3 raw iron",
+                  default_call="go_to_surface()", result={"success": True}, protective_choice="surface")
     # The action that just ended is named beside the other protective actions,
-    # not "Run the same call again" (step5-threat-claude4: repeated 12 times).
-    assert options == {
+    # not "Run the same call again" (step5-threat-claude4: repeated 12 times),
+    # and only while the facts still allow it (step5-threat-claude9).
+    assert rq.after_default_options(facts={"oxygen": 120}, **common) == {
         "resume": 'Go back to the earlier work, collect_resource(count=3, item="raw_iron"), for: “get 3 raw iron”',
-        "surface": "Swim up to air.",
+        "surface": "Swim up to air now.",
         "call_agent": "Do not go back and hand control back to the Agent for a new plan.",
     }
+    assert list(rq.after_default_options(facts={"oxygen": 300}, **common)) == ["resume", "call_agent"]
     shot = rq.after_default_options(original_call="", intent="", default_call="engage_entity()",
         result={"success": False, "reason": "disengaged_low_health"}, protective_choice="engage",
         facts={"health": 6, "health_before": 20, "vital_age_s": 3, "selected_item": "iron_sword",
