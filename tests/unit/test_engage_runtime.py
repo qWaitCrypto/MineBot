@@ -128,6 +128,14 @@ class EngageRuntimeTests(unittest.TestCase):
         self.assertEqual(body.actions[0].params["attack_range"], 2.0)
         self.assertEqual(body.actions[0].params["disengage_health"], 6.0)
 
+    def test_registered_tool_keeps_an_explicit_zero_disengage_health(self):
+        from minebot.app.phase1_runtime import _engage_tool
+        for params, expected in (({"target": "nearest_hostile", "disengage_health": 0}, 0.0),
+                                 ({"target": "nearest_hostile"}, 6.0)):
+            body = FakeBody(terminal_reason="killed", terminal_attacks=5)
+            _engage_tool(CombatTransactions(body)).callable(params)
+            self.assertEqual(body.actions[0].params["disengage_health"], expected)
+
     def test_engage_entity_target_lost(self):
         body = FakeBody(terminal_reason="target_lost", terminal_attacks=0)
         result = CombatTransactions(body).engage_entity("Ghost", timeout_s=5.0)

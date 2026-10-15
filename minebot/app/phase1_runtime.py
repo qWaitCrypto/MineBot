@@ -1312,7 +1312,7 @@ def _engage_tool(combat: CombatTransactions) -> RegisteredTool:
             attack_range=float(params.get("attack_range") or 2.0),
             cooldown_ticks=int(params.get("cooldown_ticks") or 10),
             timeout_s=float(params.get("timeout_s") or 20.0),
-            disengage_health=float(params.get("disengage_health") or 6.0),
+            disengage_health=float(6.0 if params.get("disengage_health") is None else params["disengage_health"]),
         ),
         ToolSidecar(
             "engage_entity",

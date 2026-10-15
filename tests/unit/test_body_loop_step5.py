@@ -81,7 +81,8 @@ def test_threat_range_uses_one_eligibility_compiler_for_idle_and_work():
 def test_melee_and_ranged_bind_the_observed_uuid_not_a_reselected_nearest_target():
     raw = facts(inventory={"minecraft:crossbow": 1, "minecraft:arrow": 4})
     assert "crossbow" in rq.idle_options(raw)["ranged"]
-    assert CallSupervisor._default_action("engage", {"facts": raw}) == ("engage_entity", {"target": "near"})
+    assert CallSupervisor._default_action("engage", {"facts": raw}) == (
+        "engage_entity", {"target": "near", "disengage_health": 0})
     assert CallSupervisor._default_action("ranged", {"facts": raw}) == ("ranged_attack", {"target": "near", "weapon": "crossbow"})
     raw["inventory"].pop("minecraft:arrow")
     assert "ranged" not in rq.idle_options(raw)

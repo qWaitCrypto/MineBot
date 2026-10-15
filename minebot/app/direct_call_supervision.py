@@ -500,7 +500,10 @@ class CallSupervisor:
             target = near[0].get("id") if near else None
             if isinstance(target, str) and target:
                 if choice == "engage":
-                    return "engage_entity", {"target": target}
+                    # Decision chose to fight and is asked again whenever the Body
+                    # is hurt; the tool's own low-health default would refuse that
+                    # choice and leave the Body standing still (step5-threat-claude6).
+                    return "engage_entity", {"target": target, "disengage_health": 0}
                 inventory = rq._inventory(facts) or {}
                 weapon = next((item for item in ("bow", "crossbow")
                                if inventory.get(item, inventory.get("minecraft:" + item, 0)) > 0), None)
