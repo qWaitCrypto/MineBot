@@ -2004,6 +2004,10 @@ class AgentRuntime:
             # ordinary body_busy result.  Both paths use the existing stop and
             # claim records; no second admission lock is introduced.
             if claim_holder in {"agent_call", "agent_plan"}:
+                manager = getattr(self, "reflex_manager", None)
+                if manager is not None:
+                    # The Agent's own project yields too, not only its current call.
+                    manager.yield_life("agent_call_arrived", stop_body=False)
                 snapshot = control.snapshot()
                 if snapshot.holder == "life" and snapshot.stop_state == "running":
                     await self.cancel_active_execution_with_facts(
@@ -2300,6 +2304,12 @@ class AgentRuntime:
         }
         self.agent_context.acknowledge_turn_input(pending_input_count)
         self.agent_thinking = True
+        manager = getattr(self, "reflex_manager", None)
+        if manager is not None:
+            # While the Agent thinks only reversible life runs (frame-question
+            # doc §15.1); its own project stops and settles, as a chat that
+            # wakes it ends the field work in life-layer doc §7.2.
+            manager.yield_life("agent_thinking")
         try:
             if self.runner_run_streamed is not None:
                 streamed = self.runner_run_streamed(turn_agent, input_text, **runner_kwargs)

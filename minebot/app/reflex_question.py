@@ -688,18 +688,27 @@ def idle_options(facts: Mapping[str, Any]) -> dict[str, str]:
                 name = str(relationship.get("player") or "")
                 if name:
                     options.setdefault("seek_player", f"Search nearby for {name} and walk up to them.")
+        # The Agent's own projects: write work, so never while it thinks.
+        # Wording from bench-project2 (step7-life-claude2 frames, two routine
+        # wordings, 12 orders): "Leave what I am doing ... in my area" was
+        # chosen 72/72 by day and 0/72 at dusk at home; "Work on my project"
+        # 26/72 and "Go to my area" 62/72 at dusk.
+        for project in profile.get("projects") or []:
+            if isinstance(project, Mapping) and project.get("status") == "active" and project.get("id"):
+                options[f"project_{project['id']}"] = (
+                    f"Leave what I am doing and work on my project “{project['id']}” "
+                    f"in my area “{project.get('area', '')}”: {project.get('intent', '')}")
     options["stay"] = "Stay where the Body is and wait for the next step."
     options.update(protective_options(facts))
-    if profile:
+    # While the Agent is thinking it is already awake; calling it adds nothing.
+    if profile and not thinking:
         options["call_agent"] = "Hand control back to the Agent for a new direction."
     return options
 
 
-def idle_question(facts: Mapping[str, Any], options: Mapping[str, str]) -> dict[str, Any]:
-    """Compile idle prose here, alongside the work-frame prose."""
-    state: dict[str, Any] = {"body": _body_sentence(facts)}
-    if facts.get("life_intent"):
-        state["agent_intent"] = f"This is the idle-life intention: “{facts['life_intent']}”."
+def life_surroundings(facts: Mapping[str, Any]) -> dict[str, str]:
+    """Daylight and nearby players, said the same way in idle and project frames."""
+    state: dict[str, str] = {}
     clock = facts.get("time")
     if isinstance(clock, (int, float)):
         tick = clock % 24000
@@ -714,6 +723,30 @@ def idle_question(facts: Mapping[str, Any], options: Mapping[str, str]) -> dict[
             lines.append(f"Player {name} is {distance:.0f} blocks away." if distance is not None
                          else f"Player {name} is in view.")
         state["players"] = " ".join(lines)
+    return state
+
+
+def project_frame(state: Mapping[str, Any], options: Mapping[str, str],
+                  facts: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, str]]:
+    """A running frame of the Agent's own project: the work frame, plus the
+    life intention, daylight and players, and the option to put it down."""
+    shown = dict(state)
+    if facts.get("life_intent"):
+        shown["life_intent"] = f"This is the idle-life intention: “{facts['life_intent']}”."
+    shown.update(life_surroundings(facts))
+    put_down = "Stop the current action and put the project down for now; go back to everyday life."
+    if "call_agent" not in options:
+        return shown, {**options, "put_down": put_down}
+    ordered = {key: text for key, text in options.items() if key != "call_agent"}
+    return shown, {**ordered, "put_down": put_down, "call_agent": options["call_agent"]}
+
+
+def idle_question(facts: Mapping[str, Any], options: Mapping[str, str]) -> dict[str, Any]:
+    """Compile idle prose here, alongside the work-frame prose."""
+    state: dict[str, Any] = {"body": _body_sentence(facts)}
+    if facts.get("life_intent"):
+        state["agent_intent"] = f"This is the idle-life intention: “{facts['life_intent']}”."
+    state.update(life_surroundings(facts))
     threats = _threat_sentence(facts)
     if threats:
         state["threats"] = threats

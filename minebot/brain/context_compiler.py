@@ -61,6 +61,7 @@ class ContextFacts:
     session_messages: tuple[tuple[str, str], ...] = ()
     task_artifact: Mapping[str, object] | None = None
     conversation_summary: Mapping[str, object] | None = None
+    life: Mapping[str, object] | None = None
     body_state: BodyState | None = None
     profile: RuntimeProfile | None = None
     resume_facts: Mapping[str, object] | None = None
@@ -148,6 +149,12 @@ def _render_conversation_summary(facts: ContextFacts) -> str | None:
     return None
 
 
+def _render_life(facts: ContextFacts) -> str | None:
+    if facts.life is None:
+        return None
+    return "LIFE: " + json.dumps(facts.life, ensure_ascii=False, sort_keys=True)
+
+
 # A full player inventory holds at most 41 stacks.
 INVENTORY_KINDS_SHOWN = 48
 
@@ -210,6 +217,7 @@ SECTION_REGISTRY: tuple[SectionSpec, ...] = (
     SectionSpec(
         "conversation_summary", 3, _render_conversation_summary, provenance_required=True
     ),
+    SectionSpec("life", 2, _render_life, provenance_required=True),
     SectionSpec("body_state", 0, _render_body_state),
     SectionSpec("stance_profile", 1, _render_profile),
     SectionSpec("resume_facts", 1, _render_resume),
@@ -226,7 +234,7 @@ CONTEXT_PROFILES: Mapping[str, frozenset[str]] = {
     # Conversational turns without a durable goal: dialogue framing, no task
     # contract or stance machinery.
     "social": frozenset(
-        {"goal", "session_header", "session_messages", "conversation_summary", "body_state"}
+        {"goal", "session_header", "session_messages", "conversation_summary", "life", "body_state"}
     ),
     # Reflection/distillation: durable artifacts and summaries, no live
     # dialogue window or stance frame.

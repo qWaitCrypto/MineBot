@@ -61,6 +61,7 @@ def _full_context() -> AgentContext:
     ctx.observe_system_message("restart happened")
     ctx.observe_task({"task": {"task_id": "t1", "status": "running", "revision": 2}, "active": True})
     ctx.observe_conversation_summary({"compacted_turns": 3, "complete": True, "archive_revision": 7})
+    ctx.observe_life({"revision": 2, "routine": "Home before dark."})
     ctx.observe_state(_state())
     ctx.observe_profile(_profile())
     ctx.observe_resume(
@@ -86,6 +87,7 @@ GOLDEN_PROFILE = (
     "lifecycle=active focus=navigation,recovery model=primary effort=standard "
     "policy=mobility frame=Mobility terminal context"
 )
+GOLDEN_LIFE = 'LIFE: {"revision": 2, "routine": "Home before dark."}'
 GOLDEN_RESUME = "RESUME: reason=mobility_blocked goal=collect 64 logs last_progress={'pos': [1, 2, 3]}"
 GOLDEN_MESSAGES = (
     "SESSION_MESSAGES: user: qWait: hello there | assistant: on it | system: restart happened"
@@ -98,6 +100,7 @@ GOLDEN_FULL_WITH_MESSAGES = "\n".join(
         GOLDEN_TASK,
         GOLDEN_CONTRACT,
         GOLDEN_SUMMARY,
+        GOLDEN_LIFE,
         GOLDEN_STATE,
         GOLDEN_PROFILE,
         GOLDEN_RESUME,
@@ -176,7 +179,7 @@ class ProfileCompositionTests(unittest.TestCase):
         self.assertIn("RESUME:", compiled.text)  # one-shot facts survive terse
         self.assertNotIn("SESSION_MESSAGES:", compiled.text)
         self.assertNotIn("CONVERSATION_SUMMARY:", compiled.text)
-        self.assertEqual(set(compiled.excluded), {"session_messages", "conversation_summary"})
+        self.assertEqual(set(compiled.excluded), {"session_messages", "conversation_summary", "life"})
 
     def test_social_and_maintenance_compose_as_declared(self) -> None:
         facts = _full_context().snapshot_facts()
