@@ -2156,9 +2156,16 @@ def _queued_quarantine_control(queue: WorkIntentQueue | None) -> WorkIntent | No
 
 
 def _queued_preemption(queue: WorkIntentQueue, work_kind: str) -> tuple[str, bool] | None:
-    queued = queue.queued_intents()
+    queued = queued_intents = queue.queued_intents()
     if work_kind == "recovery":
         queued = [intent for intent in queued if intent.kind in CONTROL_INTENT_KINDS]
+    elif work_kind == "agent_turn":
+        # A reflex fact waits for the running turn instead of cancelling it.
+        # Cancelling dropped the turn's own tool call and result from the
+        # conversation, so the next turn did not know it had tried: the same
+        # ensure_tool_for went out three times in 36 s, each answer lost
+        # (villa run 2026-10-15, 20+ turns cancelled this way).
+        queued = [intent for intent in queued_intents if intent.kind is not WorkIntentKind.REFLEX_FACT]
     if not queued:
         return None
     intent = max(

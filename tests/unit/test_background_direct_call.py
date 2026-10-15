@@ -260,13 +260,17 @@ def test_current_context_is_read_again_before_every_request():
     assert "42" in second
 
 
-def test_an_execution_fact_preempts_the_running_turn_for_immediate_delivery():
+def test_an_execution_fact_waits_for_the_running_turn():
+    # Preempting for it (581d7f4) cancelled the turn and dropped the turn's
+    # own tool call and result; the next turn sent the same ensure_tool_for
+    # three times (villa run 2026-10-15). The running turn still sees the
+    # finished result: CURRENT_CONTEXT is read again before every request.
     from minebot.app.session import _queued_preemption
     from minebot.app.work_queue import MemoryWorkIntentQueue, WorkIntentKind
 
     queue = MemoryWorkIntentQueue()
     queue.enqueue(WorkIntentKind.REFLEX_FACT, source="reflex_activity", payload={"fact": {}})
-    assert _queued_preemption(queue, "agent_turn") is not None
+    assert _queued_preemption(queue, "agent_turn") is None
     queue.enqueue(WorkIntentKind.MESSAGE, source="player", payload={"text": "stop that"})
     assert _queued_preemption(queue, "agent_turn") is not None
 
