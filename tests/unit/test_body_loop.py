@@ -368,8 +368,8 @@ def test_plan_result_raw_facts_keep_their_protocol_with_correct_dispatch_intent(
             # The old request mistakenly inherited the enclosing plan intent.
             # Keep the historical fixture intact and permit only this repair
             # and the omitted, recorded main hand plus their character-count
-            # changes. Four failed frames now also offer their recorded
-            # owned spare pickaxe; keep every older option and fact intact.
+            # changes. Four failed frames (a stone_pickaxe in hand, a path
+            # failure) offer no spare tool: the tool was not the problem.
             expected = copy.deepcopy(case["expected_request"])
             old_intent = expected["state"]["agent_intent"]
             intent = case["node"]["arguments"]["intent"]
@@ -381,14 +381,7 @@ def test_plan_result_raw_facts_keep_their_protocol_with_correct_dispatch_intent(
             facts = case["raw_decision_facts"]["body_state"]
             expected = main_hand_beside_inventory(expected, facts)
             if case["seq"] in {3785, 3805, 3825, 3845}:
-                candidates = rq.equipment_candidates(facts, case["raw_decision_facts"]["tool_result"])
-                assert candidates == {"equip:wooden_pickaxe": "wooden_pickaxe"}
-                criteria = expected["questions"]["q"]["criteria"]
-                old = json.dumps(criteria, ensure_ascii=False, separators=(",", ":"))
-                agent = criteria.pop("call_agent")
-                criteria["equip:wooden_pickaxe"] = 'Equip wooden_pickaxe from the inventory and run the same call again: collect_resource(item="iron_ore", count=2).'
-                criteria["call_agent"] = agent
-                expected["state"]["request_chars"] += len(json.dumps(criteria, ensure_ascii=False, separators=(",", ":"))) - len(old)
+                assert not rq.tool_failed(case["raw_decision_facts"]["tool_result"])
             # The size is derived from the request above, as the executor does.
             expected["state"].pop("request_chars")
             expected["state"]["request_chars"] = len(json.dumps(
