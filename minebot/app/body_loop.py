@@ -17,6 +17,7 @@ from collections import deque
 from uuid import uuid4
 from dataclasses import asdict, is_dataclass, replace
 from typing import Any, Mapping
+from uuid import uuid4
 from minebot.contract import Action, Event, ToolResult
 
 from minebot.app import reflex_question as rq
@@ -60,8 +61,26 @@ class BodyLoop(CallSupervisor):
         self._reaction_event_loop: asyncio.AbstractEventLoop | None = None
         self._ambient_facts: dict[str, Any] = {}
         self._life_profile = load_profile()
+        self._life_store = None
+        self._life_version = None
         self._reflex_claim_holder = "threat"
         self._reflex_action_intent: str | None = None
+
+    def attach_life_store(self, store) -> None:
+        """Read the Agent's own profile for this world instead of the seed file."""
+        self._life_store = store
+        self._life_version = None
+        self._current_life_profile()
+
+    def _current_life_profile(self) -> dict[str, Any]:
+        """The profile as of this frame: the Agent's edits apply on the next frame."""
+        store = getattr(self, "_life_store", None)
+        if store is not None:
+            version = store.version()
+            if version != self._life_version:
+                self._life_version = version
+                self._life_profile = store.profile()
+        return self._life_profile
 
     def _queue_lifecycle_event(self, event: Event) -> None:
         if event.name == "world_ready":
@@ -167,9 +186,10 @@ class BodyLoop(CallSupervisor):
             if key in observed:
                 self._ambient_facts[key] = copy.deepcopy(observed[key])
         combined = {**copy.deepcopy(self._ambient_facts), **observed}
-        if self._life_profile:
-            combined["life_profile"] = copy.deepcopy(self._life_profile)
-            combined["life_intent"] = life_intent(self._life_profile)
+        profile = self._current_life_profile()
+        if profile:
+            combined["life_profile"] = copy.deepcopy(profile)
+            combined["life_intent"] = life_intent(profile)
         combined["agent_thinking"] = bool(getattr(self.runtime, "agent_thinking", False))
         previous = copy.deepcopy(self.safe_standing_position)
         frame = super()._frame({**execution, "facts": combined})
@@ -441,20 +461,28 @@ class BodyLoop(CallSupervisor):
                         "call_supervision_limit", tool_call_id=record["call_id"],
                         tool=getattr(tool, "name", "unknown"), kind="reads", limit=self.max_reads,
                     )
-                elif choice in {"step_done", "next_step", "call_agent", "interrupt"}:
+                elif choice in {"step_done", "next_step", "call_agent", "interrupt", "put_down"}:
                     record["decision"] = choice
                     plan = self._plan_context(
                         supervision_context=record["supervision_context"],
                         tool=tool, params=params,
                     )
-                    normalized_choice = "step_done" if choice in {"step_done", "next_step"} else choice
+                    if choice == "put_down":
+                        # The project ends here like a hand-off, but its record
+                        # says it was put down, so the Agent is not woken.
+                        manager = getattr(self.runtime, "reflex_manager", None)
+                        if manager is not None:
+                            manager.put_down_project()
+                    normalized_choice = ("step_done" if choice in {"step_done", "next_step"} else
+                                         "call_agent" if choice == "put_down" else choice)
                     record["decision"] = normalized_choice
                     reason = ("decision_step_done" if normalized_choice == "step_done" else
-                              "decision_interrupt" if choice == "interrupt" else "decision_call_agent")
+                              "decision_interrupt" if choice == "interrupt" else
+                              "decision_put_down" if choice == "put_down" else "decision_call_agent")
                     await self._handoff(
                         record, execution,
                         {"reason": reason, "confirmed": normalized_choice == "step_done"},
-                        decision=choice, plan=plan,
+                        decision=normalized_choice, plan=plan,
                     )
                     return
                 elif (choice in rq.PROTECTIVE or choice in {"go_to_surface", "eat"}
@@ -903,8 +931,9 @@ class BodyLoop(CallSupervisor):
             if self._protective_verdict == "call_agent":
                 notify = getattr(self.runtime, "notify_reflex_fact", None)
                 if callable(notify):
-                    notify({"call_id": call_id, "status": "handoff_requested",
-                            "reason": "decision_call_agent", "result": self._compact_result(result)})
+                    notify({"call_id": call_id, "activity_id": f"{call_id}-{uuid4().hex[:12]}",
+                        "kind": "life", "status": "handoff_requested",
+                        "reason": "decision_call_agent", "result": self._compact_result(result)})
             else:
                 self._remember_protection(action, result)
             self.runtime.trace.emit(
@@ -1419,9 +1448,10 @@ class BodyLoop(CallSupervisor):
                     self.runtime.trace.emit(
                         "reflex_idle_read_unknown", scope="nearbyEntities", error_type=type(exc).__name__
                     )
-        if self._life_profile:
-            facts["life_profile"] = copy.deepcopy(self._life_profile)
-            facts["life_intent"] = life_intent(self._life_profile)
+        profile = self._current_life_profile()
+        if profile:
+            facts["life_profile"] = copy.deepcopy(profile)
+            facts["life_intent"] = life_intent(profile)
         return facts
 
     async def _read_idle_facts(self) -> dict[str, Any]:
@@ -1487,7 +1517,8 @@ class BodyLoop(CallSupervisor):
             if after == "call_agent":
                 notify = getattr(self.runtime, "notify_reflex_fact", None)
                 if callable(notify):
-                    notify({"call_id": call_id, "status": "handoff_requested",
+                    notify({"call_id": call_id, "activity_id": f"{call_id}-{uuid4().hex[:12]}",
+                            "status": "handoff_requested",
                             "reason": "decision_call_agent", "result": self._compact_result(result)})
             else:
                 self._remember_protection(action, result)
@@ -1500,6 +1531,17 @@ class BodyLoop(CallSupervisor):
     @staticmethod
     def _default_action(choice: str, execution: Mapping[str, Any]) -> tuple[str, dict[str, Any]] | None:
         return CallSupervisor._default_action(choice, execution)
+
+    def _start_project(self, project_id: str, facts: Mapping[str, Any]) -> None:
+        """Hand the chosen project's tree to the plan executor as idle life."""
+        profile = facts.get("life_profile") if isinstance(facts.get("life_profile"), Mapping) else {}
+        project = next((item for item in profile.get("projects") or []
+                        if isinstance(item, Mapping) and item.get("id") == project_id), None)
+        manager = getattr(self.runtime, "reflex_manager", None)
+        if project is None or manager is None:
+            return
+        if manager.start_project(dict(project)) is None:
+            self.runtime.trace.emit("life_project_not_started", project=project_id, reason="activity_running")
 
     async def _idle_frames(self) -> None:
         """Produce idle facts at the same cadence as running frames.
@@ -1549,6 +1591,10 @@ class BodyLoop(CallSupervisor):
                     continue
                 snapshots = getattr(self.runtime, "execution_snapshots", None)
                 if snapshots is not None and snapshots.current() is not None:
+                    continue
+                manager = getattr(self.runtime, "reflex_manager", None)
+                if manager is not None and manager.life_project_running() is not None:
+                    # The project's own frames supervise the Body between its calls.
                     continue
                 facts = await self._read_idle_facts()
                 if await self._process_lifecycle_events(facts):
@@ -1609,10 +1655,13 @@ class BodyLoop(CallSupervisor):
                     self._protection_task = asyncio.create_task(self._run_idle_protection(choice, facts))
                 elif choice in {"go_home", "approach_player", "follow_player", "look_player", "seek_player"}:
                     self._protection_task = asyncio.create_task(self._run_idle_action(choice, facts))
+                elif choice.startswith("project_"):
+                    self._start_project(choice.removeprefix("project_"), facts)
                 elif choice == "call_agent":
                     notify = getattr(self.runtime, "notify_reflex_fact", None)
                     if callable(notify):
-                        notify({"call_id": "idle-loop", "status": "handoff_requested",
+                        notify({"call_id": "idle-loop", "activity_id": f"idle-{uuid4().hex[:12]}",
+                                "kind": "life", "status": "handoff_requested",
                                 "reason": "decision_call_agent", "facts": dict(facts)})
         except asyncio.CancelledError:
             raise

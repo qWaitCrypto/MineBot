@@ -1532,24 +1532,17 @@ class AgentSession:
         activity_id = str(fact.get("activity_id") or "unknown")
         status = str(fact.get("status") or "unknown")
         task = self.task_workspace.current_task if self.task_workspace is not None else None
-        if not self._goal_active and task is None:
-            if fact.get("kind") == "direct_call" and self.parts is not None:
-                # The Agent was promised this call's result. With no goal to
-                # wake, it still has to be there the next time the Agent looks.
-                self.parts.context.observe_system_message(
-                    "REFLEX_RESULT: " + json.dumps(fact, ensure_ascii=False, sort_keys=True)
-                )
-                self._reflex_fact_delivered(fact)
-                self._trace("reflex_fact_recorded", reason="no_active_goal", activity_id=activity_id)
-                return
-            self._reflex_fact_delivered(fact)
-            self._trace("reflex_fact_dropped", reason="no_active_goal", activity_id=activity_id)
-            return
+        # Dedupe keys are permanent in the durable queue. A direct-call hand-off
+        # carries only its call id; keyed as "unknown" every later hand-off was
+        # absorbed by the first one and the Agent was never woken again.
+        identity = fact.get("activity_id") or fact.get("call_id")
+        # No goal is the Agent's own life, not a reason to stay asleep: idle
+        # hand-offs, project results and direct-call results all wake it.
         self.work_queue.enqueue(
             WorkIntentKind.REFLEX_FACT,
             source="reflex_activity",
             payload={"fact": dict(fact)},
-            dedupe_key=f"reflex-fact:{activity_id}:{status}",
+            dedupe_key=None if not identity else f"reflex-fact:{identity}:{status}",
             task_id=None if task is None else task.task_id,
             generation=(None if self.parts is None else self.parts.authority.current_generation()),
         )
