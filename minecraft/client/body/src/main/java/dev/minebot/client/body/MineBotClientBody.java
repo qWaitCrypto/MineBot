@@ -3182,11 +3182,26 @@ public final class MineBotClientBody implements ClientModInitializer {
                     if (scaffoldItems.contains(stack.getItem())) scaffoldBlocks += stack.getCount();
                 }
             }
+            // Items in an open crafting grid or on the cursor are still the
+            // player's (closing the menu gives them back). Counting only the 36
+            // slots, a craft in progress read as missing its inputs: 4 oak_log
+            // showed as 1 while two sat in the grid (step5-threat-claude8).
+            List<ItemStack> held = new ArrayList<>();
+            held.add(client.player.containerMenu.getCarried());
+            if (client.player.containerMenu instanceof AbstractCraftingMenu crafting) {
+                for (var slot : crafting.getInputGridSlots()) held.add(slot.getItem());
+            }
+            for (ItemStack stack : held) {
+                if (!stack.isEmpty()) {
+                    String item = BuiltInRegistries.ITEM.getKey(stack.getItem()).getPath();
+                    inventory.addProperty(item, (inventory.has(item) ? inventory.get(item).getAsInt() : 0) + stack.getCount());
+                }
+            }
             state.add("inventory", inventory);
             state.addProperty("scaffold_blocks", scaffoldBlocks);
             state.addProperty("inventory_complete", true);
             state.addProperty("inventory_includes_selected", true);
-            state.addProperty("inventory_count_scope", "all_player_inventory_slots_including_selected_hotbar");
+            state.addProperty("inventory_count_scope", "all_player_inventory_slots_including_selected_hotbar_crafting_grid_and_cursor");
             state.add("inventory_slots", inventorySlots(client));
             JsonArray entities = new JsonArray();
             var nearby = client.level.getEntities(

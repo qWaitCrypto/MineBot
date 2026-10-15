@@ -431,10 +431,10 @@ class CallSupervisor:
         context = record.get("supervision_context")
         context = context if isinstance(context, Mapping) else {}
         if context.get("is_life_action") and not terminal:
-            options = rq.idle_options(cls._facts_for_options(current),
-                                      current=rq.call_text(str(record.get("tool")), record.get("params")))
-            options.pop(str(context.get("reflex_action_choice")), None)
-            return options
+            # Chosen again under its own name, the running action carries on
+            # (BodyLoop._continues_protection); another option switches.
+            return rq.life_running_options(cls._facts_for_options(current),
+                                           str(context.get("reflex_action_choice") or ""))
         reflex_choice = context.get("reflex_action_choice")
         if context.get("is_reflex_action") and not terminal and isinstance(reflex_choice, str):
             # The protective choice again, the running action one option of it.
@@ -524,13 +524,17 @@ class CallSupervisor:
             profile = facts.get("life_profile")
             home = profile.get("home") if isinstance(profile, Mapping) else None
             pos = home.get("pos") if isinstance(home, Mapping) else None
+            # Arrival within 1 block lands inside rq.AT_PLACE_BLOCKS. With
+            # radius 2 (counted on block cells) the walk ended 2.3 blocks
+            # away, still "not home", and was asked and re-run every 1.5 s
+            # (step8-extra-claude3).
             if isinstance(pos, (list, tuple)) and len(pos) == 3:
-                return "move_to", {"pos": list(pos), "radius": 2, "timeout_s": 60.0}
+                return "move_to", {"pos": list(pos), "radius": 1, "timeout_s": 60.0}
         if choice == "approach_player":
             players = rq.nearby_players(facts)
             if players:
                 player = players[0]
-                return "move_to", {"pos": player.get("pos"), "radius": 2, "timeout_s": 60.0}
+                return "move_to", {"pos": player.get("pos"), "radius": 1, "timeout_s": 60.0}
         if choice == "follow_player":
             players = rq.nearby_players(facts)
             if players and players[0].get("id"):
