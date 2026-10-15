@@ -948,10 +948,8 @@ class WorkPlanExecutor:
             repeat = node.get("repeat")
             repeat_note = ""
             if isinstance(repeat, dict):
-                repeat_note = (
-                    f"Repeat when: {self._repeat_text(repeat.get('again_when', ''))}; "
-                    f"stop when: {self._repeat_text(repeat.get('until', ''))}."
-                )
+                repeat_note = rq.repeat_note(self._repeat_text(repeat.get("again_when", "")),
+                                             self._repeat_text(repeat.get("until", "")))
             try:
                 choice = await self.result_judge(
                     call_id=node_key,

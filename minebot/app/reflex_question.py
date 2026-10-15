@@ -25,6 +25,11 @@ DEFAULT_ACTION_INTENTS = {
     "move_away": "Move away from the nearby hostile mob.",
     "engage": "Fight back against the selected hostile mob.",
     "ranged": "Shoot the selected hostile mob.",
+    "go_home": "Walk to the home position.",
+    "approach_player": "Walk to the nearby player.",
+    "follow_player": "Follow the nearby player.",
+    "look_player": "Look toward the nearby player.",
+    "seek_player": "Find the player named in the life profile.",
 }
 # A health change smaller than this is regeneration noise, not an injury.
 HURT_MARGIN = 0.4
@@ -463,6 +468,11 @@ def equipment_options(facts: Mapping[str, Any], result: Mapping[str, Any], *, ca
 
 def equipment_intent(item: str) -> str:
     return f"Hold {item} in the main hand."
+
+
+def repeat_note(again_when: str, until: str) -> str:
+    """The Agent's own repeat conditions, said beside the same-call option."""
+    return f"Repeat when: {again_when}; stop when: {until}."
 
 
 def protective_options(facts: Mapping[str, Any], *, stop: str = "") -> dict[str, str]:

@@ -183,3 +183,38 @@ def test_running_life_actions_are_still_asked_every_frame():
                                       "reflex_action_choice": "look_player"}}
     assert BodyLoop._protection_frame_due(record, {"facts": {"health": 20}})
     assert BodyLoop._protection_frame_due(record, {"facts": {"health": 20}})
+
+
+def test_a_protective_action_chosen_again_is_bound_to_the_current_facts(monkeypatch):
+    """Re-running the ended call kept the old danger position: move_away
+    answered already_safe 40 times while the zombie followed (step5-threat-claude7)."""
+    from minebot.app.decision_client import DecisionAnswer
+
+    async def run():
+        writes, requests = [], []
+        replies = iter(("move_away", "resume"))
+
+        class Decision:
+            async def ask(self, request, *, priority=None):
+                requests.append(request)
+                return DecisionAnswer("unknown", {"answers": {"q": {"choice": next(replies)}}}, .001, len(requests))
+
+        async def run_tool(*args, **kwargs):
+            writes.append(args[3])
+            return {"success": True, "reason": "moved_away"}
+
+        runtime = SimpleNamespace(
+            trace=SimpleNamespace(emit=lambda *a, **k: None), decision_client=Decision(),
+            last_known_body_state=facts(3), execution_snapshots=SimpleNamespace(current=lambda: None),
+            registry=SimpleNamespace(get=lambda name: SimpleNamespace(name=name)), run_tool=run_tool)
+        loop = BodyLoop(runtime)
+        record = {"call_id": "work", "tool": "move_to", "params": {}, "questions": 0, "unknown_answers": 0,
+                  "supervision_context": {"intent": "reach the requested position"}}
+        monkeypatch.setattr("minebot.app.body_loop.FACT_FRAME_INTERVAL_S", .001)
+        ended = ("move_away", {"danger_pos": [20.0, 64.0, 0.0], "min_distance": 9.0})
+        choice = await loop._after_default_action(record, ended, {"success": True, "reason": "already_safe"},
+                                                  "away-call", protective_choice="move_away")
+        assert choice == "resume"
+        assert writes == [{"danger_pos": [3.0, 64.0, 0.0], "min_distance": 11.0}]
+
+    asyncio.run(run())

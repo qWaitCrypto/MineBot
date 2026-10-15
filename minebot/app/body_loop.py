@@ -377,11 +377,10 @@ class BodyLoop(CallSupervisor):
                             supplied=self._tree_options(record["supervision_context"]),
                             execution=execution,
                         )
-                        if not self._protection_frame_due(record, execution):
-                            pass
-                        elif decision_task is not None and not decision_task.done():
+                        due = self._protection_frame_due(record, execution)
+                        if due and decision_task is not None and not decision_task.done():
                             pending = frame
-                        elif decision_task is None and execution.get("state") not in {"succeeded", "failed", "cancelled", "unknown"}:
+                        elif due and decision_task is None and execution.get("state") not in {"succeeded", "failed", "cancelled", "unknown"}:
                             decision_revision = revision
                             decision_execution = execution
                             decision_task = asyncio.create_task(self._judge_frame(
@@ -897,13 +896,7 @@ class BodyLoop(CallSupervisor):
         previous_holder = getattr(self, "_reflex_claim_holder", "threat")
         previous_intent = getattr(self, "_reflex_action_intent", None)
         self._reflex_claim_holder = "life"
-        self._reflex_action_intent = {
-            "go_home": "Walk to the home position.",
-            "approach_player": "Walk to the nearby player.",
-            "follow_player": "Follow the nearby player.",
-            "look_player": "Look toward the nearby player.",
-            "seek_player": "Find the player named in the life profile.",
-        }.get(choice, choice)
+        self._reflex_action_intent = rq.DEFAULT_ACTION_INTENTS.get(choice, choice)
         try:
             choice, action, result, call_id = await self._execute_protection(
                 choice, action, call_id=f"reflex-life-{self._idle_sequence}")
@@ -1184,14 +1177,18 @@ class BodyLoop(CallSupervisor):
                     reflex_action_choice=protective_choice)
                 if choice == "call_agent":
                     return choice
-            if choice == protective_choice:
-                choice = "repeat"
-            switched = (self._default_action(choice, execution)
-                        if choice in options and choice in rq.PROTECTIVE + ("eat",) else None)
-            if switched is not None:
-                # Another protective action: it replaces the one that ended.
-                protective_choice, action = choice, switched
+            # The option was compiled from these facts, so the chosen
+            # protective action (the same one again or another) is bound to
+            # them too. Re-running the ended call kept its old danger position
+            # and distance: move_away answered already_safe 40 times in 18 s
+            # while the zombie followed (step5-threat-claude7).
+            rebound = (self._default_action(choice, execution)
+                       if choice in options and choice in rq.PROTECTIVE + ("eat",) else None)
+            if rebound is not None:
+                protective_choice, action = choice, rebound
                 default_tool = registry.get(action[0]) if registry is not None else None
+                choice = "repeat"
+            elif choice == protective_choice:
                 choice = "repeat"
             if choice != "repeat":
                 # A missing/illegal/late answer is no choice. Keep the
