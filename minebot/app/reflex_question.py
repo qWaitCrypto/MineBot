@@ -33,6 +33,9 @@ DEFAULT_ACTION_INTENTS = {
 }
 # A health change smaller than this is regeneration noise, not an injury.
 HURT_MARGIN = 0.4
+# Within this many blocks of a place the Body is at it (the task book's
+# "beside the player" / "at home"): an option to go there is not offered.
+AT_PLACE_BLOCKS = 2
 VITAL_BASELINE_S = (3.0, 8.0)
 
 _ARGS_NOT_SHOWN = {"timeout_s", "segment_timeout_s", "max_segments", "intent"}
@@ -502,7 +505,11 @@ def protective_options(facts: Mapping[str, Any], *, stop: str = "") -> dict[str,
             if weapon and held.get("arrow", 0) > 0:
                 options["ranged"] = text(f"shoot the {near[0]['name']} with the {weapon} from the inventory.")
         options["move_away"] = text(f"move away from the {near[0]['name']}.")
-    if hurt and _position(facts.get("safe_standing_position", facts.get("last_safe_position"))):
+    safe = facts.get("safe_standing_position", facts.get("last_safe_position"))
+    away = player_distance({"pos": safe}, facts) if _position(safe) else None
+    # Standing there already, going back is no move at all: chosen again and
+    # again, it arrived at once 11 times in 7 s (step5-threat-claude8).
+    if hurt and _position(safe) and (away is None or away > AT_PLACE_BLOCKS):
         options["retreat_safe"] = text("go back to the last place where the Body stood safely.")
     return options
 
@@ -639,7 +646,7 @@ def idle_options(facts: Mapping[str, Any], *, current: str = "") -> dict[str, st
     home_pos = _position(home.get("pos")) if isinstance(home, Mapping) else None
     at_home = False
     if home_pos and position:
-        at_home = player_distance({"pos": home.get("pos")}, facts) <= 2
+        at_home = player_distance({"pos": home.get("pos")}, facts) <= AT_PLACE_BLOCKS
     if home_pos and position and not at_home and not thinking:
         options["go_home"] = f"Walk to the home position {home_pos}."
     if not thinking:

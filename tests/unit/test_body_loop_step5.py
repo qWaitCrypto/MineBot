@@ -218,3 +218,13 @@ def test_a_protective_action_chosen_again_is_bound_to_the_current_facts(monkeypa
         assert writes == [{"danger_pos": [3.0, 64.0, 0.0], "min_distance": 11.0}]
 
     asyncio.run(run())
+
+
+def test_going_back_to_the_safe_place_is_not_offered_while_standing_there():
+    """Chosen while already there, retreat_safe arrived at once 11 times in 7 s
+    (step5-threat-claude8)."""
+    raw = facts(3)
+    raw.update(health=6, health_before=20, safe_standing_position=[0, 64, 0])
+    assert "retreat_safe" not in rq.protective_options(raw)
+    raw["safe_standing_position"] = [10, 64, 0]
+    assert "retreat_safe" in rq.protective_options(raw)
