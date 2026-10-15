@@ -108,3 +108,14 @@ def test_following_a_walking_player_is_offered_as_itself_and_carries_on():
     loop = BodyLoop.__new__(BodyLoop)
     assert loop._continues_protection(record, "follow_player", {"facts": facts})
     assert not loop._continues_protection(record, "approach_player", {"facts": facts})
+
+
+def test_a_walk_home_or_to_a_player_ends_inside_the_at_place_band():
+    """Radius 2 on block cells ended the walk 2.3 blocks from home, still
+    offered "go home", re-run every 1.5 s (step8-extra-claude3)."""
+    from minebot.app.direct_call_supervision import CallSupervisor
+    facts = {"position": [10, 64, 0], "life_profile": {"home": {"pos": [0, 64, 0]}},
+             "nearby_entities": [{"type": "player", "name": "Visitor", "id": "p1", "pos": [20, 64, 0]}]}
+    for choice in ("go_home", "approach_player"):
+        tool, args = CallSupervisor._default_action(choice, {"facts": facts})
+        assert tool == "move_to" and args["radius"] < rq.AT_PLACE_BLOCKS
