@@ -21,7 +21,6 @@ from minebot.app.progress_epochs import ContinuationEpochBudget, ProgressEpochAr
 from minebot.brain.feedback import failure_evidence_key
 from minebot.brain.progress import ProgressStep, combat_progress_evidence, material_progress_evidence
 from minebot.contract import (
-    REVIEWABLE_STOP_REASONS,
     BodyState,
     JsonObject,
     ProgressAbort,
@@ -64,8 +63,6 @@ class _ProgressEpochMember:
     pending_abort: ProgressAbort | None = None
     failure_evidence_key: str | None = None
     material_evidence: tuple[str, ...] = ()
-    budget_denied: bool = False
-    progress_denied: bool = False
 
 
 @dataclass
@@ -150,14 +147,6 @@ class ProgressEpochAdapter:
         self._active: _ProgressEpoch | None = None
         self._members: dict[str, _ProgressEpochMember] = {}
         self._seen_epistemic_keys: set[str] = set()
-        # Carry an actual stop, not raw high counters: first-seen evidence can
-        # legitimately admit an alternative before the authority stops work.
-        self.work_stop = (
-            runtime._progress_work_stop
-            if "checkpoint_task" in runtime.registry and _task_closure_tool(runtime, "checkpoint_task")
-            else None
-        )
-        self.reviewable_abort: ProgressAbort | None = None
 
     async def open(self, response: Any) -> None:
         calls = [
@@ -177,10 +166,10 @@ class ProgressEpochAdapter:
             if task_identity_bound else None
         )
         work_calls = [call for call in calls if not _task_closure_tool(self.runtime, call.tool_name)]
-        budget_denied = (
-            self.work_stop is None and self.budget is not None and bool(work_calls)
-            and not await self.runtime.run_read(self.budget.reserve, epoch_id)
-        )
+        if self.budget is not None and work_calls:
+            # A record of the work run under this continuation, not a permit:
+            # the Agent stays live however many epochs it spends.
+            await self.runtime.run_read(self.budget.reserve, epoch_id)
         pre_state = await self.runtime.read_progress_state()
         pre_fingerprint = None if pre_state is None else self.runtime.authority.fingerprint(pre_state)
         strategy_epoch_condition = _strategy_epoch_condition(self.runtime)
@@ -203,8 +192,6 @@ class ProgressEpochAdapter:
                 arguments=call.arguments,
                 strategy_epoch_condition=strategy_epoch_condition,
                 conflict=call.tool_call_id in conflicting_ids,
-                budget_denied=budget_denied and call in work_calls,
-                progress_denied=self.work_stop is not None and call in work_calls,
             )
             for index, call in enumerate(calls)
         ]
@@ -233,7 +220,6 @@ class ProgressEpochAdapter:
             strategy_epoch_condition=strategy_epoch_condition,
             pre_body_fingerprint=pre_fingerprint,
             budget_checkpoint_id=epoch.budget_checkpoint_id,
-            budget_denied=budget_denied,
         )
 
     @property
@@ -435,7 +421,7 @@ class ProgressEpochAdapter:
         steps = [step for member in ordered for step in member.progress_steps]
         committed_steps = _collapsed_epoch_progress_steps(ordered)
         closure_only = not committed_steps and all(
-            member.budget_denied or member.progress_denied or _task_closure_tool(self.runtime, member.tool_name)
+            _task_closure_tool(self.runtime, member.tool_name)
             for member in ordered
         )
         post_fingerprint = next(
@@ -510,7 +496,7 @@ class ProgressEpochAdapter:
                 "pending_stop_reasons": [
                     member.pending_abort.stop_reason.value
                     for member in ordered if member.pending_abort is not None
-                ] + ([] if self.work_stop is None else [self.work_stop.stop_reason.value]),
+                ],
             },
         }
         cursor: int | None = None
@@ -535,21 +521,17 @@ class ProgressEpochAdapter:
                 )
         self._seen_epistemic_keys.update(epistemic_keys)
 
-        progress_abort: ProgressAbort | None = None
-        try:
-            # Bookkeeping and rejected work do not consume an admitted review.
-            # Pending hard stops still participate in arbitration below.
-            if not closure_only:
-                self.runtime.authority.commit_steps(
-                    committed_steps,
-                    self.runtime.agent_context.goal_text,
-                    novel_epistemic_keys=novel_epistemic_keys,
-                    material_changed=material_changed,
-                )
-        except ProgressAbort as exc:
-            progress_abort = exc
+        # Bookkeeping and rejected work do not move the counters. The counters
+        # never stop work; only hard stops (transport, unknown) arbitrate below.
+        if not closure_only:
+            self.runtime.authority.commit_steps(
+                committed_steps,
+                self.runtime.agent_context.goal_text,
+                novel_epistemic_keys=novel_epistemic_keys,
+                material_changed=material_changed,
+            )
         progress_abort = dominant_progress_abort(
-            progress_abort, archive_abort, self.work_stop, *(member.pending_abort for member in ordered),
+            archive_abort, *(member.pending_abort for member in ordered),
         )
         record["epistemic_steps"] = self.runtime.authority.epistemic_steps
         if progress_abort is not None and self.archive is not None:
@@ -580,28 +562,6 @@ class ProgressEpochAdapter:
         )
         self._members = {}
         self._active = None
-        self.reviewable_abort = None
-        if (
-            progress_abort is not None
-            and progress_abort.stop_reason in REVIEWABLE_STOP_REASONS
-            and "checkpoint_task" in self.runtime.registry
-            and _task_closure_tool(self.runtime, "checkpoint_task")
-            and all(
-                member.status in {"success", "progress_denied", "budget_denied"}
-                or (_task_closure_tool(self.runtime, member.tool_name) and member.reason in {
-                    "task_checkpoint_rejected", "task_plan_rejected", "invalid_tool_json", "invalid_tool_input",
-                })
-                or (member.status == "failure" and (
-                    member.failure_evidence_key is not None
-                    or (member.pending_abort is not None
-                        and member.pending_abort.stop_reason in REVIEWABLE_STOP_REASONS)
-                ))
-                for member in ordered
-            )
-        ):
-            self.work_stop = progress_abort
-            self.runtime._progress_work_stop = progress_abort
-            self.reviewable_abort = progress_abort
         return progress_abort
 
 

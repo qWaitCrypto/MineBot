@@ -18,6 +18,7 @@ import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from uuid import uuid4
 
 from minebot.app.config import AppConfigError, agent_language_from_env, provider_registry_from_env
 from minebot.app.body_provider import (
@@ -34,6 +35,7 @@ from minebot.app.progress_epochs import PersistentProgressEpochArchive
 from minebot.app.exploration import PersistentExplorationCoverageStore
 from minebot.app.observability import JsonlObservationSink
 from minebot.app.phase1_runtime import Phase1RuntimeConfig, build_phase1_agent_runtime, inventory_count
+from minebot.app.life_profile import LifeStore
 from minebot.app.memory import MemoryWorkspace
 from minebot.app.skills import (
     SkillCatalog,
@@ -75,6 +77,8 @@ class RealServerConfig:
     server_id: str
     world_id_override: str | None
     state_db_path: Path
+    life_dir: Path | None = None
+    life_seed_path: str | None = None
     body_provider: str = "java"
     real_client_host: str = "127.0.0.1"
     real_client_port: int = 8768
@@ -542,6 +546,9 @@ def real_server_config_from_env(env: Mapping[str, str] | None = None) -> RealSer
         server_id=server_id,
         world_id_override=world_id_override,
         state_db_path=state_db_path,
+        # Beside the state database, so it persists exactly as long as memory.
+        life_dir=Path(env.get("MINEBOT_LIFE_DIR") or state_db_path.parent / "life"),
+        life_seed_path=(env.get("MINEBOT_LIFE_PROFILE") or "").strip() or None,
         body_provider=requested_provider,
         real_client_host=real_client_host,
         real_client_port=real_client_port,
@@ -744,6 +751,10 @@ async def run_real_server_interactive(
             state_store.register_scope(scope)
             task_workspace = TaskWorkspace(state_store, scope)
             memory_workspace = MemoryWorkspace(state_store, scope)
+            life_store = (
+                None if config.life_dir is None
+                else LifeStore(config.life_dir, scope, seed_path=config.life_seed_path)
+            )
             skill_workspace = SkillWorkspace(
                 state_store,
                 scope,
@@ -839,6 +850,7 @@ async def run_real_server_interactive(
                     progress_epoch_archive=progress_epoch_archive,
                     exploration_coverage_store=exploration_coverage_store,
                     memory_workspace=memory_workspace,
+                    life_store=life_store,
                     skill_workspace=skill_workspace,
                     wiki_knowledge=wiki_knowledge,
                 ),
@@ -873,6 +885,13 @@ async def run_real_server_interactive(
             ),
         )
         await session.enter_world()
+        if not goal and life_store is not None and not life_store.profile():
+            # A world without the Agent's own profile: wake it once to write one.
+            session.parts.runtime.notify_reflex_fact({
+                "activity_id": f"life-profile-missing-{uuid4().hex[:12]}", "kind": "life",
+                "status": "life_profile_missing",
+                "note": "You have no life profile in this world yet. Look around and write one with update_life.",
+            })
         if goal:
             if task_workspace.current_task is None:
                 session.submit(SessionCommand.start(goal))

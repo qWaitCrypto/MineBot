@@ -747,7 +747,6 @@ class BlockWorkTests(unittest.TestCase):
         self.assertEqual(result.reason, "block_candidates_found")
         self.assertEqual(navigator.calls, [])
         self.assertEqual(progress.failure_steps, 0)
-        progress.require_can_continue("next independent move")
 
     def test_search_for_block_reports_body_owned_time_budget_exhaustion(self):
         class SlowStateBody(FakeBody):

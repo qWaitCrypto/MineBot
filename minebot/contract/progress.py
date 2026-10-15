@@ -8,10 +8,6 @@ from typing import Any, Protocol
 
 from .messages import BodyState
 
-STAGNATION_LIMIT = 3
-STALL_LIMIT = 8
-FAILURE_STORM_LIMIT = 5
-
 
 class ProgressStopReason(str, Enum):
     UNKNOWN = "unknown"
@@ -20,11 +16,10 @@ class ProgressStopReason(str, Enum):
     BODY_TRANSPORT = "body_transport"
 
 
-# A stop cause is reviewable only when it means "this approach is not working",
-# so a model may deliberate over it and, at a separate boundary, buy one
-# execution admission for a different approach. Transport instability and
-# unclassified aborts are not strategy exhaustion: they stay terminal for
-# execution. One definition, because every gate must agree on it.
+# "This approach is not working" stops. The progress counters no longer stop
+# work (the Agent stays live and judges its approach from them), so these
+# reasons only appear in epochs recorded before 2026-10-15; restoring one never
+# closes work again.
 REVIEWABLE_STOP_REASONS = frozenset(
     {ProgressStopReason.NO_PROGRESS, ProgressStopReason.EPISTEMIC_BUDGET}
 )
@@ -42,17 +37,6 @@ class ProgressFacts:
     recent_events: list[str] = field(default_factory=list)
     epistemic_steps: int = 0
     last_epistemic_keys: tuple[str, ...] = ()
-
-    def stop_reason(self) -> ProgressStopReason:
-        if self.epistemic_steps >= STALL_LIMIT:
-            return ProgressStopReason.EPISTEMIC_BUDGET
-        if (
-            self.stagnant_steps >= STAGNATION_LIMIT
-            or self.stalled_steps >= STALL_LIMIT
-            or self.failure_steps >= FAILURE_STORM_LIMIT
-        ):
-            return ProgressStopReason.NO_PROGRESS
-        return ProgressStopReason.UNKNOWN
 
 
 class ProgressAbort(Exception):
@@ -98,7 +82,6 @@ class ProgressController(Protocol):
         neutral: bool = False,
     ) -> None: ...
     def facts(self, goal_text: str) -> ProgressFacts: ...
-    def require_can_continue(self, goal_text: str) -> None: ...
 
 
 class LocalProgressController:
@@ -180,18 +163,3 @@ class LocalProgressController:
             current_fingerprint=self.current_fingerprint,
             recent_events=list(self.recent_events),
         )
-
-    def require_can_continue(self, goal_text: str) -> None:
-        if (
-            self.stagnant_steps >= STAGNATION_LIMIT
-            or self.stalled_steps >= STALL_LIMIT
-            or self.failure_steps >= FAILURE_STORM_LIMIT
-        ):
-            facts = self.facts(goal_text)
-            raise ProgressAbort(
-                "progress authority yielded: "
-                f"goal={facts.goal!r} stagnant={facts.stagnant_steps} "
-                f"stalled={facts.stalled_steps} failures={facts.failure_steps}",
-                facts=facts,
-                stop_reason=facts.stop_reason(),
-            )

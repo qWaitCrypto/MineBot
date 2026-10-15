@@ -73,11 +73,12 @@ def test_durable_commit_inputs_reproduce_authority_without_success_inference(tmp
     assert commit["apply"] is not closure
     if case == "epistemic":
         assert record["novel_epistemic_keys"] == ["new-evidence"]
-        assert abort.stop_reason is ProgressStopReason.EPISTEMIC_BUDGET
+        # High counters are recorded, never a stop (the Agent stays live).
+        assert abort is None and final_facts.epistemic_steps == 8
     if case == "duplicate":
         assert record["epistemic_keys"] == ["new-evidence"]
         assert record["novel_epistemic_keys"] == []
-        assert abort.stop_reason is ProgressStopReason.NO_PROGRESS
+        assert abort is None and final_facts.failure_steps == 5
     if case == "material":
         assert record["material_changed"] is True
         assert final_facts.failure_steps == final_facts.epistemic_steps == 0
@@ -196,12 +197,12 @@ def test_run_turn_restores_before_model_and_only_new_task_identity_resets(tmp_pa
         try:
             assert asyncio.run(runtime.run_turn()).status == "completed_turn"
             assert observed == [2, 3]
-            assert asyncio.run(runtime.run_turn()).progress_stop_reason is ProgressStopReason.NO_PROGRESS
+            # Five failures in a row are a fact, not a stop.
+            assert asyncio.run(runtime.run_turn()).status == "completed_turn"
             assert observed == [2, 3, 4]
             assert runtime.authority.failure_steps == 5
             replacement = workspace.replace("collect", source="user")
             assert replacement.task_id != task.task_id
-            runtime.lifecycle.resume()
             assert asyncio.run(runtime.run_turn()).status == "completed_turn"
             assert observed == [2, 3, 4, 0]
             runtime.agent_context.set_goal("reworded collect goal")

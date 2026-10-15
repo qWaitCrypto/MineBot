@@ -19,6 +19,7 @@ from minebot.app.client_body_tools import client_body_tools
 from minebot.app.spatial_exploration import SpatialExploration, spatial_exploration_tools
 from minebot.app.model_provider import ModelProviderRegistry
 from minebot.app.conversation_tools import register_conversation_archive_tools
+from minebot.app.life_profile import LifeStore, life_summary, register_life_tools
 from minebot.app.memory import MemoryWorkspace, register_memory_tools
 from minebot.app.skills import SkillWorkspace, register_skill_tools
 from minebot.app.wiki import WikiKnowledge, register_wiki_tools
@@ -87,6 +88,7 @@ class Phase1RuntimeConfig:
     observation_archive: ToolObservationArchive | None = None
     progress_epoch_archive: ProgressEpochArchive | None = None
     memory_workspace: MemoryWorkspace | None = None
+    life_store: LifeStore | None = None
     skill_workspace: SkillWorkspace | None = None
     wiki_knowledge: WikiKnowledge | None = None
     exploration_coverage_store: ExplorationCoverageStore | None = None
@@ -174,7 +176,6 @@ def build_phase1_agent_runtime(
             body_fingerprint=lambda: _task_body_fingerprint(body, authority),
             evidence_cursor=parts.runtime.current_run_evidence_cursor,
             generation=authority.current_generation,
-            review_stop=parts.runtime.current_progress_work_stop,
         )
     if (
         config.conversation_session is not None
@@ -186,6 +187,17 @@ def build_phase1_agent_runtime(
         register_tool_observation_tools(registry, config.observation_archive)
     if config.memory_workspace is not None:
         register_memory_tools(registry, config.memory_workspace)
+    if config.life_store is not None:
+        life_store = config.life_store
+        register_life_tools(registry, life_store)
+        parts.runtime.life_store = life_store
+        parts.runtime.body_loop.attach_life_store(life_store)
+
+        def sync_life(context: AgentContext) -> None:
+            context.observe_life(life_summary(life_store.read(), life_store.project_results))
+
+        sync_life(parts.context)
+        parts.runtime.add_context_refresher(sync_life)
     if config.skill_workspace is not None:
         register_skill_tools(registry, config.skill_workspace)
     if config.wiki_knowledge is not None:

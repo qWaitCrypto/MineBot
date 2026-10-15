@@ -11,11 +11,7 @@ from typing import Any, Literal
 
 from minebot.contract import (
     BodyState,
-    FAILURE_STORM_LIMIT,
-    ProgressAbort,
     ProgressFacts,
-    STAGNATION_LIMIT,
-    STALL_LIMIT,
 )
 
 
@@ -240,28 +236,6 @@ class ProgressAuthority:
         self.last_action = action_key
         self.last_fingerprint = fingerprint
 
-    def should_yield(self) -> bool:
-        return (
-            self.stagnant_steps >= STAGNATION_LIMIT
-            or self.stalled_steps >= STALL_LIMIT
-            or self.failure_steps >= FAILURE_STORM_LIMIT
-            or self.epistemic_steps >= STALL_LIMIT
-        )
-
-    def require_can_continue(self, goal_text: str) -> None:
-        if self._active_capture() is not None:
-            return
-        if self.should_yield():
-            facts = self.facts(goal_text)
-            raise ProgressAbort(
-                "progress authority yielded: "
-                f"goal={facts.goal!r} stagnant={facts.stagnant_steps} "
-                f"stalled={facts.stalled_steps} failures={facts.failure_steps} "
-                f"epistemic={facts.epistemic_steps}",
-                facts=facts,
-                stop_reason=facts.stop_reason(),
-            )
-
     @contextmanager
     def capture_steps(self) -> Iterator[list[ProgressStep]]:
         stack = self._capture_stack()
@@ -296,6 +270,8 @@ class ProgressAuthority:
                 step.fingerprint,
                 neutral=step.neutral,
             )
+        # The counters are facts about the run, not a stop: the Agent stays
+        # live and decides from them whether its approach is working.
         epistemic_keys = tuple(dict.fromkeys(str(key) for key in novel_epistemic_keys if str(key)))
         if material_changed:
             self.epistemic_steps = 0
@@ -309,9 +285,6 @@ class ProgressAuthority:
             self.recent_events.append(
                 f"epistemic_progress:{self.epistemic_steps}:{len(epistemic_keys)}"
             )
-            if self.epistemic_steps < STALL_LIMIT:
-                return
-        self.require_can_continue(goal_text)
 
     def _capture_stack(self) -> list[list[ProgressStep]]:
         stack = getattr(self._captures, "stack", None)

@@ -57,6 +57,7 @@ class AgentContext:
     _resume_facts: dict[str, object] | None = field(default=None, repr=False)
     _task_artifact: dict[str, object] | None = field(default=None, repr=False)
     _conversation_summary: dict[str, object] | None = field(default=None, repr=False)
+    _life: dict[str, object] | None = field(default=None, repr=False)
     _skill_catalog_revision: str | None = field(default=None, repr=False)
     _skill_descriptors: list[dict[str, object]] = field(default_factory=list, repr=False)
     _available_skills_rendered: str = field(default="", repr=False)
@@ -119,6 +120,14 @@ class AgentContext:
             return
         self._task_artifact = json.loads(
             json.dumps(artifact, ensure_ascii=False, sort_keys=True)
+        )
+
+    def observe_life(self, summary: dict[str, object] | None) -> None:
+        """Inject the Agent's own life profile summary for this world."""
+        self._life = (
+            None
+            if summary is None
+            else json.loads(json.dumps(summary, ensure_ascii=False, sort_keys=True))
         )
 
     def observe_conversation_summary(self, summary: dict[str, object] | None) -> None:
@@ -300,6 +309,7 @@ class AgentContext:
             session_messages=tuple(self._session_messages),
             task_artifact=self._task_artifact,
             conversation_summary=self._conversation_summary,
+            life=self._life,
             body_state=self._last_state,
             profile=self._last_profile,
             resume_facts=self._resume_facts,

@@ -427,6 +427,13 @@ class PersistentWorkIntentQueue:
                 _intent_from_row(row)
                 for row in self.store.abandon_leased_work_intents(scope)
             )
+            # A quit ends the process that received it. One an earlier process
+            # left queued (the launcher sends its own /quit after forwarding
+            # the user's) ended the next session the moment it started
+            # (life-stage-20261015 session b).
+            self.stale_quits = self.store.supersede_queued_work_intents(
+                scope, kinds={WorkIntentKind.QUIT.value}, reason="earlier_process_quit",
+            )
             self._refresh_available()
         except Exception:
             self.close()

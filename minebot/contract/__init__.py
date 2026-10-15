@@ -52,7 +52,6 @@ from .execution import (
     execution_checkpoint,
 )
 from .progress import (
-    FAILURE_STORM_LIMIT,
     LocalProgressController,
     REVIEWABLE_STOP_REASONS,
     ProgressAbort,
@@ -60,8 +59,6 @@ from .progress import (
     ProgressFacts,
     ProgressStopReason,
     dominant_progress_abort,
-    STAGNATION_LIMIT,
-    STALL_LIMIT,
 )
 from .results import body_rejection_to_tool_result, terminal_event_to_tool_result
 
@@ -96,12 +93,9 @@ __all__ = [
     "REVIEWABLE_STOP_REASONS",
     "dominant_progress_abort",
     "LocalProgressController",
-    "FAILURE_STORM_LIMIT",
     "Region",
     "Result",
     "ToolResult",
-    "STAGNATION_LIMIT",
-    "STALL_LIMIT",
     "StructureRiskAssessment",
     "StructureRiskLevel",
     "TOOL_TIER_ORDER",

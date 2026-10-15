@@ -27,7 +27,6 @@ from minebot.app.runner import ModelTurnTransportError, RecoveryOutcome
 from minebot.app.runtime_state import (
     CheckpointDisposition,
     CompletionAuthority,
-    TaskRecord,
     TaskStatus,
 )
 from minebot.app.skills import SkillWorkspace
@@ -43,7 +42,7 @@ from minebot.app.work_queue import (
 )
 from minebot.brain.lifecycle import LifecycleError, LifecycleState
 from minebot.brain.modes import AgentSignal, signalize_events
-from minebot.contract import REVIEWABLE_STOP_REASONS, Event, ProgressStopReason
+from minebot.contract import Event, ProgressStopReason
 
 DEFAULT_RUNAWAY_STEP_LIMIT = 100_000
 EXECUTION_QUARANTINE_POLL_S = 0.25
@@ -489,7 +488,6 @@ class AgentSession:
                     intent_kind=intent.kind.value,
                     has_durable_goal=self.has_active_goal,
                     continuation_budget=continuation_budget,
-                    review_grant_stop_epoch_id=self._continuation_review_grant(intent),
                 ),
                 work_kind="agent_turn",
                 admission_version=admission_version,
@@ -539,23 +537,6 @@ class AgentSession:
         if not checkpoint_id:
             return None
         return ContinuationEpochBudget(self.task_workspace.store, self.task_workspace.scope, str(checkpoint_id))
-
-    def _continuation_review_grant(self, intent: WorkIntent) -> str | None:
-        """The stop epoch this admitted continuation paid an allowance to review.
-
-        Only a task continuation can carry one: the continuation gate already
-        checked that this exact approach debited one non-renewable task
-        allowance for that stop and that every stop in the window was
-        reviewable. The successor run uses it to open the work lane it closed.
-        """
-        if self.task_workspace is None or intent.kind is not WorkIntentKind.TASK_CONTINUE:
-            return None
-        budget = self._continuation_budget(intent)
-        if budget is None:
-            return None
-        return self.task_workspace.store.checkpoint_review_grant(
-            self.task_workspace.scope, checkpoint_id=budget.checkpoint_id,
-        )
 
     def _schedule_model_recovery(self, exc: ModelTurnTransportError, *, intent: WorkIntent) -> SessionStep:
         assert self.parts is not None
@@ -1188,19 +1169,6 @@ class AgentSession:
                     current_task_id=None if task is None else task.task_id,
                 )
                 return []
-            if (
-                intent.generation is not None
-                and self.parts is not None
-                and not self.parts.authority.generation_current(intent.generation)
-            ):
-                self._turn_pending = False
-                self._trace(
-                    "body_event_intent_dropped",
-                    reason="runtime_generation_changed",
-                    intent_generation=intent.generation,
-                    current_generation=self.parts.authority.current_generation(),
-                )
-                return []
             raw = intent.payload.get("event")
             if not isinstance(raw, dict):
                 raise ValueError("body_event intent is missing event payload")
@@ -1295,14 +1263,9 @@ class AgentSession:
                 )
                 return []
             if intent.kind is WorkIntentKind.TASK_BOUNDARY:
-                if (
-                    intent.task_id != task.task_id
-                    or task.status is not TaskStatus.RUNNING
-                    or (
-                        intent.generation is not None
-                        and not self.parts.authority.generation_current(intent.generation)
-                    )
-                ):
+                # The Body moving since the boundary was queued (the reflex
+                # moves it all the time) does not make the boundary stale.
+                if intent.task_id != task.task_id or task.status is not TaskStatus.RUNNING:
                     self._turn_pending = False
                     self._trace(
                         "task_boundary_dropped",
@@ -1310,8 +1273,6 @@ class AgentSession:
                         intent_task_id=intent.task_id,
                         current_task_id=task.task_id,
                         task_status=task.status.value,
-                        intent_generation=intent.generation,
-                        current_generation=self.parts.authority.current_generation(),
                     )
                     return []
             if intent.kind is WorkIntentKind.TASK_CONTINUE:
@@ -1333,9 +1294,6 @@ class AgentSession:
                     or checkpoint.disposition is not CheckpointDisposition.CONTINUE
                     or checkpoint.continuation is None
                     or checkpoint.continuation.generation != intent.generation
-                    or not self.parts.authority.generation_current(
-                        checkpoint.continuation.generation
-                    )
                 ):
                     self._turn_pending = False
                     self._trace(
@@ -1574,24 +1532,17 @@ class AgentSession:
         activity_id = str(fact.get("activity_id") or "unknown")
         status = str(fact.get("status") or "unknown")
         task = self.task_workspace.current_task if self.task_workspace is not None else None
-        if not self._goal_active and task is None:
-            if fact.get("kind") == "direct_call" and self.parts is not None:
-                # The Agent was promised this call's result. With no goal to
-                # wake, it still has to be there the next time the Agent looks.
-                self.parts.context.observe_system_message(
-                    "REFLEX_RESULT: " + json.dumps(fact, ensure_ascii=False, sort_keys=True)
-                )
-                self._reflex_fact_delivered(fact)
-                self._trace("reflex_fact_recorded", reason="no_active_goal", activity_id=activity_id)
-                return
-            self._reflex_fact_delivered(fact)
-            self._trace("reflex_fact_dropped", reason="no_active_goal", activity_id=activity_id)
-            return
+        # Dedupe keys are permanent in the durable queue. A direct-call hand-off
+        # carries only its call id; keyed as "unknown" every later hand-off was
+        # absorbed by the first one and the Agent was never woken again.
+        identity = fact.get("activity_id") or fact.get("call_id")
+        # No goal is the Agent's own life, not a reason to stay asleep: idle
+        # hand-offs, project results and direct-call results all wake it.
         self.work_queue.enqueue(
             WorkIntentKind.REFLEX_FACT,
             source="reflex_activity",
             payload={"fact": dict(fact)},
-            dedupe_key=f"reflex-fact:{activity_id}:{status}",
+            dedupe_key=None if not identity else f"reflex-fact:{identity}:{status}",
             task_id=None if task is None else task.task_id,
             generation=(None if self.parts is None else self.parts.authority.current_generation()),
         )
@@ -1757,17 +1708,6 @@ class AgentSession:
             return None
         return self.parts.skill_workspace
 
-    def _reconsideration_granted(self, task: TaskRecord) -> bool:
-        """Did the closing checkpoint buy execution with a task allowance?"""
-        assert self.task_workspace is not None
-        checkpoint = self.task_workspace.store.get_latest_checkpoint(task.task_id)
-        if checkpoint is None or checkpoint.disposition is not CheckpointDisposition.CONTINUE:
-            return False
-        return self.task_workspace.store.checkpoint_review_grant(
-            self.task_workspace.scope,
-            checkpoint_id=checkpoint.checkpoint_id,
-        ) is not None
-
     def _finish_step(
         self,
         step: SessionStep,
@@ -1777,35 +1717,6 @@ class AgentSession:
     ) -> SessionStep:
         if self.parts is None:
             return step
-        if step.progress_stop_reason in REVIEWABLE_STOP_REASONS:
-            self._turn_pending = False
-            self._active_turn_request = None
-            self._suspended_turn_request = None
-            task = None if self.task_workspace is None else self.task_workspace.current_task
-            if task is not None and task.status is TaskStatus.RUNNING:
-                if self._reconsideration_granted(task):
-                    # The model reviewed this stop and bought a different
-                    # approach with one non-renewable task allowance. Let the
-                    # normal continuation gates judge it instead of discarding
-                    # the decision; if they admit it, the successor run opens a
-                    # fresh window for that approach alone. The allowance stays
-                    # spent and this stop can never be bought again.
-                    self._apply_task_checkpoint_lifecycle(
-                        intent=intent,
-                        checkpoint_before=checkpoint_before,
-                    )
-                    self._sync_task_context()
-                    return SessionStep(step.status, self.parts.lifecycle.state, step.message,
-                        progress_stop_reason=step.progress_stop_reason)
-                self.task_workspace.reject_continuation(
-                    reason="progress_work_stopped",
-                    evidence=(f"progress_stop_reason={step.progress_stop_reason.value}",),
-                    body_fingerprint=self._current_body_fingerprint(),
-                )
-            self._stand_down()
-            self._sync_task_context()
-            return SessionStep(step.status, self.parts.lifecycle.state, step.message,
-                progress_stop_reason=step.progress_stop_reason)
         if step.status == "completed_turn":
             self._body_lifecycle_pending = False
             self._turn_pending = False
@@ -1965,7 +1876,6 @@ class AgentSession:
                 )
                 return
             decision = self.autonomy_coordinator.decide(
-                current_generation=self.parts.authority.current_generation(),
                 body_fingerprint=self._current_body_fingerprint(),
                 lifecycle=self.parts.lifecycle.state,
                 handoff_only=True,
@@ -2010,7 +1920,6 @@ class AgentSession:
             self._stand_down()
             return
         decision = self.autonomy_coordinator.decide(
-            current_generation=self.parts.authority.current_generation(),
             body_fingerprint=self._current_body_fingerprint(),
             lifecycle=self.parts.lifecycle.state,
         )

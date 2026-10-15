@@ -7,14 +7,12 @@ from enum import Enum
 
 from minebot.app.progress_epochs import ProgressEpochArchive
 from minebot.app.runtime_state import (
-    REVIEWABLE_STOP_REASONS,
     CheckpointDisposition,
-    ContinuationOperationClass,
     TaskStatus,
 )
 from minebot.app.tasks import TaskWorkspace
 from minebot.app.work_queue import WorkIntent, WorkIntentQueue, WorkIntentState
-from minebot.brain.feedback import FAILURE_EVIDENCE_PREFIX, failure_evidence_key
+from minebot.brain.feedback import failure_evidence_key
 from minebot.brain.lifecycle import LifecycleState
 
 
@@ -52,7 +50,6 @@ class AutonomyCoordinator:
     def decide(
         self,
         *,
-        current_generation: int,
         body_fingerprint: dict[str, object] | None,
         lifecycle: LifecycleState,
         handoff_only: bool = False,
@@ -60,9 +57,8 @@ class AutonomyCoordinator:
         """Validate a checkpoint and optionally issue its successor intent.
 
         ``handoff_only`` is used while a process is already shutting down. It
-        settles the exact same durable evidence and budget as a normal
-        continuation, but neither reuses the old process lease nor lets a
-        normal shutdown generation change invalidate a material handoff.
+        settles the same durable evidence as a normal continuation but does
+        not reuse the old process lease.
         """
         task = self.workspace.current_task
         if task is None:
@@ -85,20 +81,11 @@ class AutonomyCoordinator:
             return AutonomyDecision(AutonomyAction.PARK, f"lifecycle_not_active:{lifecycle.value}")
         if body_fingerprint is None or body_fingerprint.get("missing") is True:
             return AutonomyDecision(AutonomyAction.PARK, "continuation_body_unavailable")
-        checkpoint_dimension = (
-            None
-            if checkpoint.body_fingerprint is None
-            else checkpoint.body_fingerprint.get("dimension")
-        )
-        current_dimension = body_fingerprint.get("dimension")
-        if (
-            checkpoint_dimension is not None
-            and current_dimension is not None
-            and str(checkpoint_dimension) != str(current_dimension)
-        ):
-            return AutonomyDecision(AutonomyAction.YIELD, "continuation_dimension_changed")
-        if not handoff_only and contract.generation != int(current_generation):
-            return AutonomyDecision(AutonomyAction.YIELD, "continuation_generation_changed")
+        # The Agent is always live: a continuation it wrote is admitted on its
+        # own say-so. Generation and dimension changes (the reflex moves the
+        # Body all the time; a respawn changes dimension), spent epochs,
+        # earlier stops and the kind of evidence are facts handed to the next
+        # turn, never a reason to refuse it.
         try:
             epochs = []
             cursor = contract.evidence_cursor
@@ -113,48 +100,10 @@ class AutonomyCoordinator:
                 cursor = next_cursor
         except Exception:
             return AutonomyDecision(AutonomyAction.PARK, "continuation_evidence_unavailable")
-        aborted = [epoch for epoch in epochs if bool(epoch.get("progress_aborted"))]
-        # Once work is closed, the closure batch that records the plan inherits
-        # the same stop. It executed nothing, so it re-records the reviewed stop
-        # rather than introducing a new one; the stop under review is the last
-        # aborted epoch that actually ran work.
-        reviewed = _reviewed_stop_epoch(aborted)
-        # An aborted epoch executes again only if this exact approach paid a task
-        # allowance to review that stop, and every stop in the reviewed window
-        # was a reviewable one. Transport and unclassified aborts, and any
-        # un-granted approach, stay terminal.
-        review_grant = (
-            self.workspace.store.approach_review_grant(
-                self.workspace.scope,
-                task_id=task.task_id,
-                approach_key=contract.approach_key,
-            )
-            if aborted
-            else None
-        )
-        reconsidered = bool(
-            aborted
-            and reviewed is not None
-            and review_grant is not None
-            and review_grant == str(reviewed.get("epoch_id") or "")
-            and all(
-                str(epoch.get("progress_stop_reason") or "") in {
-                    reason.value for reason in REVIEWABLE_STOP_REASONS
-                }
-                for epoch in aborted
-            )
-        )
-        # Work up to and including the reviewed stop belongs to the exhausted
-        # approach and was accounted there. The reviewed evidence still has to
-        # stay visible below, so narrow the charge window, not the evidence one.
-        charge_floor = int(reviewed["cursor"]) if reconsidered else 0
-        # Successor work was debited to its incoming checkpoint before execution.
-        # Do not charge it again to a model-authored outgoing strategy.
         # Explicit task-only batches do not execute work. Historical/unknown
-        # member metadata stays chargeable; never infer exemptions from names.
+        # member metadata counts as work; never infer exemptions from names.
         consumed = sum(
-            int(epoch["cursor"]) > charge_floor
-            and epoch.get("budget_checkpoint_id") is None
+            epoch.get("budget_checkpoint_id") is None
             and any(member.get("task_closure") is not True for member in (epoch.get("members") or [{}]))
             for epoch in epochs
         )
@@ -187,39 +136,7 @@ class AutonomyCoordinator:
             "material_changed": material_changed,
             "novel_epistemic_keys": novel_keys,
         }
-        if consumed > contract.bounded_epoch_budget:
-            return AutonomyDecision(
-                AutonomyAction.YIELD,
-                "continuation_epoch_budget_exhausted",
-                **facts,
-            )
-        if aborted and not reconsidered:
-            return AutonomyDecision(
-                AutonomyAction.YIELD,
-                "continuation_progress_aborted",
-                **facts,
-            )
-        if remaining < 1:
-            return AutonomyDecision(
-                AutonomyAction.YIELD,
-                "continuation_epoch_budget_exhausted",
-                **facts,
-            )
         failure_keys = _novel_failure_keys(epochs, novel_keys)
-        observation_keys = tuple(
-            key for key in novel_keys if not key.startswith(FAILURE_EVIDENCE_PREFIX)
-        )
-        qualifies = bool(failure_keys) or {
-            ContinuationOperationClass.MATERIAL: material_changed,
-            ContinuationOperationClass.EPISTEMIC: bool(observation_keys),
-            ContinuationOperationClass.MIXED: material_changed or bool(observation_keys),
-        }[contract.operation_class]
-        if not qualifies:
-            return AutonomyDecision(
-                AutonomyAction.YIELD,
-                "continuation_without_qualifying_evidence",
-                **facts,
-            )
         if handoff_only:
             return AutonomyDecision(
                 AutonomyAction.CONTINUE,
@@ -286,23 +203,6 @@ class AutonomyCoordinator:
             intent=intent,
             **facts,
         )
-
-
-def _reviewed_stop_epoch(
-    aborted: list[dict[str, object]],
-) -> dict[str, object] | None:
-    """The last aborted epoch that executed work, i.e. the stop under review.
-
-    Epochs whose every member is a task-closure call ran no work; when they are
-    marked aborted they carry the stop that closed the lane before them. An
-    epoch with no member metadata counts as work, so unknown history can never
-    be mistaken for bookkeeping.
-    """
-    for epoch in reversed(aborted):
-        members = epoch.get("members") or [{}]
-        if any(member.get("task_closure") is not True for member in members):
-            return epoch
-    return None
 
 
 def _novel_failure_keys(

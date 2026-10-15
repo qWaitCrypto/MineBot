@@ -14,6 +14,7 @@ from uuid import uuid4
 
 from minebot.app.decision_client import DecisionClient
 from minebot.app.projection import answer_value
+from minebot.app.life_profile import project_plan
 from minebot.app.work_runtime import NodeRecord, WorkPlanError, WorkPlanExecutor, WorkRunResult, validate_plan
 from minebot.brain.progress import material_progress_evidence
 from minebot.brain.registry import RegisteredTool, ToolRegistry, ToolSidecar, execute_tool
@@ -49,6 +50,12 @@ class ReflexActivity:
     # Projected call results already shown to the Agent, so repeated reads of
     # one tree do not store the same original again.
     shown: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # The Agent's plans hold the Body as ``agent_plan``; the Agent's own
+    # projects run in idle life as ``life`` and yield to any Agent call.
+    holder: str = "agent_plan"
+    project_id: str | None = None
+    put_down: bool = False
+    recorded: bool = False
 
 
 class ReflexManager:
@@ -156,6 +163,7 @@ class ReflexManager:
             validate_plan(plan)
         except WorkPlanError as exc:
             return ToolResult(False, "invalid_plan", True, metrics={"error": str(exc)}).to_payload()
+        self.yield_life("agent_plan_arrived")
         with self._lock:
             active = next((item for item in self._activities.values() if item.status in {"accepted", "running", "waiting"}), None)
             if active is not None:
@@ -172,6 +180,90 @@ class ReflexManager:
             "status": activity.status,
             "tree": self._shown_tree(activity),
         }).to_payload()
+
+    def start_project(self, project: dict[str, Any]) -> str | None:
+        """Walk one of the Agent's own projects as idle life (holder ``life``).
+
+        The tree starts from the top every time; steps already shown by the
+        facts pass quickly through the "is it done" question.
+        """
+        plan = project_plan(project)
+        with self._lock:
+            if self._loop is None or any(item.status in {"accepted", "running", "waiting", "stopping", "updating"}
+                                         for item in self._activities.values()):
+                return None
+            activity = ReflexActivity(f"project-{project['id']}-{uuid4().hex[:12]}", copy.deepcopy(plan),
+                                      holder="life", project_id=str(project["id"]))
+            self._activities[activity.activity_id] = activity
+            activity.status = "running"
+            activity.task = self._submit(self._run(activity))
+        self.runtime.trace.emit("life_project_started", activity_id=activity.activity_id,
+                                project=activity.project_id)
+        return activity.activity_id
+
+    def life_project_running(self) -> str | None:
+        """The project walking its tree now; a project in a wait node is not."""
+        with self._lock:
+            return next((item.project_id for item in self._activities.values()
+                         if item.holder == "life" and item.status in {"accepted", "running"}), None)
+
+    def yield_life(self, reason: str, *, stop_body: bool = True) -> bool:
+        """An Agent call or plan arrived: a running life project stops.
+
+        The project is revoked first so no late Decision answer admits its
+        next write; then the Body gets the ordinary real stop, which settles
+        the life claim (``stop_body=False`` when the caller stops it itself).
+        """
+        with self._lock:
+            life = next((item for item in self._activities.values()
+                         if item.holder == "life" and item.status in {"accepted", "running", "waiting"}), None)
+        if life is None:
+            return False
+        self.request_cancel(reason)
+        snapshot = self.runtime.body_control.snapshot()
+        if stop_body and snapshot.holder == "life":
+            self._submit(self.runtime.cancel_active_execution_with_facts(
+                reason, invalidate_generation=False, cancel_reflex=False))
+        return True
+
+    def put_down_project(self) -> None:
+        """Decision chose to put the running project down for now."""
+        with self._lock:
+            for item in self._activities.values():
+                if item.holder == "life" and item.status in {"accepted", "running", "waiting"}:
+                    item.put_down = True
+
+    def _holder(self) -> str:
+        activity = self._activities.get(self._active_activity_id or "")
+        return "agent_plan" if activity is None else activity.holder
+
+    def _settle_project(self, activity: ReflexActivity) -> None:
+        """Record how the project run ended; wake the Agent when it is done or stuck."""
+        activity.recorded = True
+        outcome = "put_down" if activity.put_down else activity.status
+        result = activity.result
+        facts = {} if result is None else self._shown_facts(activity)
+        row = {"outcome": outcome, "activity_id": activity.activity_id,
+               "duration_s": round(time.time() - activity.created_at, 1)}
+        if activity.cancel_reason:
+            row["reason"] = activity.cancel_reason
+        for key in ("reason", "position", "inventory", "inventory_counts"):
+            if key in facts and key not in row:
+                row[key] = facts[key]
+        store = getattr(self.runtime, "life_store", None)
+        if store is not None:
+            try:
+                store.record_project_result(str(activity.project_id), row)
+            except OSError as exc:
+                self.runtime.trace.emit("life_project_record_failed", project=activity.project_id,
+                                        error_type=type(exc).__name__)
+        self.runtime.trace.emit("life_project_finished", project=activity.project_id, **row)
+        if outcome in {"completed", "blocked"}:
+            wake = getattr(self.runtime, "notify_reflex_fact", None)
+            if callable(wake):
+                wake({"activity_id": activity.activity_id, "kind": "life_project",
+                      "project": activity.project_id, "status": outcome,
+                      "tree": self._shown_tree(activity), "facts": facts})
 
     async def _progress_state(self) -> Any:
         read = getattr(self.runtime, "read_progress_state", None)
@@ -230,7 +322,7 @@ class ReflexManager:
                 # reacquires the claim only for the next real call/choice.
                 while True:
                     try:
-                        self.runtime.body_control.claim(activity.activity_id, holder="agent_plan")
+                        self.runtime.body_control.claim(activity.activity_id, holder=activity.holder)
                         break
                     except RuntimeError as exc:
                         reason = str(exc)
@@ -266,7 +358,7 @@ class ReflexManager:
                                 activity_id=activity.activity_id,
                                 reason="control_unknown",
                             )
-                            self._notify_activity(activity)
+                            self._finish(activity)
                             return
                         if activity.revision != run_revision:
                             return
@@ -303,8 +395,9 @@ class ReflexManager:
                                     status=result.status, tree=result.tree)
             # The fact goes out with the status it reports; the counters are
             # brought up to date long before the woken Agent can act on it.
-            self._notify_activity(activity)
-            await self._note_plan_outcome(activity, result.status, state_before)
+            self._finish(activity)
+            if activity.project_id is None:
+                await self._note_plan_outcome(activity, result.status, state_before)
         except asyncio.CancelledError:
             if activity.revision == run_revision and activity.status not in {"paused", "cancelled", "updating"}:
                 activity.status = "cancelled"
@@ -316,15 +409,24 @@ class ReflexManager:
             activity.status = "blocked"
             self.runtime.trace.emit("reflex_activity_failed", activity_id=activity.activity_id,
                                     error_type=type(exc).__name__, message=str(exc)[:400])
-            self._notify_activity(activity)
+            self._finish(activity)
         finally:
             if self._active_activity_id == activity.activity_id:
                 self._active_activity_id = None
+            if activity.project_id is not None and not activity.recorded:
+                # Preempted or revoked: every project run leaves one record.
+                self._settle_project(activity)
             if (
                 activity.status not in {"stopping", "cancelled", "paused", "updating"}
                 and self.runtime.body_control.owns(activity.activity_id)
             ):
                 self.runtime.body_control.settle(claim_id=activity.activity_id)
+
+    def _finish(self, activity: ReflexActivity) -> None:
+        if activity.project_id is not None:
+            self._settle_project(activity)
+        else:
+            self._notify_activity(activity)
 
     async def _state(self) -> dict[str, Any]:
         try:
@@ -376,7 +478,7 @@ class ReflexManager:
                 self.runtime.weld_context,
                 timeout_s=getattr(tool.sidecar, "timeout_s", 20.0),
                 tool_call_id=f"plan-observe-{self._active_activity_id or 'unknown'}",
-                claim_holder="agent_plan",
+                claim_holder=self._holder(),
                 body_claim_id=self._active_activity_id,
                 retain_claim=True,
             )
@@ -402,6 +504,9 @@ class ReflexManager:
         timeout_s: float | None, supervision_context: dict[str, Any],
     ) -> dict[str, Any]:
         tool = self.runtime.registry.get(tool_name)
+        holder = self._holder()
+        if holder == "life":
+            supervision_context = {**supervision_context, "is_life_project": True}
         raw = await self.runtime.run_tool(
             tool,
             _execute_plan_call,
@@ -410,7 +515,7 @@ class ReflexManager:
             self.runtime.weld_context,
             timeout_s=timeout_s or tool.sidecar.timeout_s,
             tool_call_id=f"plan-{call_id}",
-            claim_holder="agent_plan",
+            claim_holder=holder,
             body_claim_id=self._active_activity_id,
             retain_claim=self._active_activity_id is not None,
             return_execution_receipt=True,

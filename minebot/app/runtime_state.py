@@ -15,7 +15,7 @@ import threading
 from pathlib import Path
 from uuid import uuid4
 
-from minebot.contract import REVIEWABLE_STOP_REASONS, ProgressStopReason
+from minebot.contract import ProgressStopReason
 from minebot.app.recovery_admission import confirmed_recovery_payload, next_recovery_admission, reconciled_recovery_payload
 from minebot.contract import BodyState
 
@@ -89,15 +89,9 @@ from minebot.app.runtime_state_mapping import (
 RUNTIME_SCHEMA_VERSION = 20
 DEFAULT_RUNTIME_STATE_DB = Path("var/minebot/agent-state.sqlite3")
 
-# How many times one task may convert a reviewable progress stop into a
-# genuinely different approach. Owned by the task row, debited once per grant,
-# and never incremented: a restart, a renamed approach, or a fresh in-memory
-# authority cannot restore a spent allowance. Restating the goal creates a new
-# task, which is a user authorization event rather than a refill.
+# Initial value of the historical ``tasks.reconsiderations_remaining`` column.
+# Nothing reads it since the Agent stays live (2026-10-15); kept for the schema.
 TASK_RECONSIDERATION_ALLOWANCE = 3
-
-# ``REVIEWABLE_STOP_REASONS`` is owned by the progress contract and imported
-# above; the store and its callers gate on that one definition.
 
 
 
@@ -552,165 +546,6 @@ class RuntimeStateStore:
             ).fetchall()
         return [_checkpoint_from_row(row) for row in rows]
 
-    def continuation_approach_remaining(
-        self,
-        scope: RuntimeScope,
-        *,
-        task_id: str,
-        approach_key: str,
-        requested_budget: int,
-    ) -> int:
-        with self._lock:
-            self._require_open()
-            row = self._connection.execute(
-                """
-                SELECT budget_limit, consumed_epochs
-                FROM continuation_approaches
-                WHERE scope_key = ? AND task_id = ? AND approach_key = ?
-                """,
-                (scope.key, task_id, approach_key),
-            ).fetchone()
-        if row is None:
-            return max(0, int(requested_budget))
-        remaining = max(0, int(row["budget_limit"]) - int(row["consumed_epochs"]))
-        return min(max(0, int(requested_budget)), remaining)
-
-    def task_reconsiderations_remaining(self, scope: RuntimeScope, *, task_id: str) -> int:
-        with self._lock:
-            self._require_open()
-            row = self._connection.execute(
-                """
-                SELECT reconsiderations_remaining FROM tasks
-                WHERE task_id = ? AND scope_key = ?
-                """,
-                (task_id, scope.key),
-            ).fetchone()
-        return 0 if row is None else max(0, int(row["reconsiderations_remaining"]))
-
-    def admit_reconsidered_approach(
-        self,
-        scope: RuntimeScope,
-        *,
-        task_id: str,
-        approach_key: str,
-        budget_limit: int,
-        stop_epoch_id: str,
-        stop_reason: ProgressStopReason,
-    ) -> dict[str, int] | None:
-        """Debit one non-renewable allowance so a new approach may execute.
-
-        The grant is stamped with the stop epoch it reviewed, which makes the
-        admission idempotent for that stop and refuses every already-attempted
-        approach: a renamed objective hashes to the same key and finds a row
-        whose grant belongs to a different stop. Nothing here clears a counter,
-        raises an allowance, or admits a non-reviewable stop cause.
-        """
-        if ProgressStopReason(stop_reason) not in REVIEWABLE_STOP_REASONS:
-            return None
-        epoch_id = _required_text("stop_epoch_id", stop_epoch_id, max_length=256)
-        key = _required_text("approach_key", approach_key, max_length=256)
-        now = _utc_now()
-        with self._lock, self._connection:
-            self._require_open()
-            self._connection.execute("BEGIN IMMEDIATE")
-            existing = self._connection.execute(
-                """
-                SELECT budget_limit, consumed_epochs, review_grant_stop_epoch_id
-                FROM continuation_approaches
-                WHERE scope_key = ? AND task_id = ? AND approach_key = ?
-                """,
-                (scope.key, task_id, key),
-            ).fetchone()
-            if existing is not None:
-                # Only re-entry for the very same reviewed stop is idempotent.
-                if existing["review_grant_stop_epoch_id"] != epoch_id:
-                    return None
-                limit = int(existing["budget_limit"])
-                return {
-                    "budget_limit": limit,
-                    "remaining_epochs": max(0, limit - int(existing["consumed_epochs"])),
-                    "reconsiderations_remaining": self._task_allowance(scope, task_id),
-                }
-            debited = self._connection.execute(
-                """
-                UPDATE tasks SET reconsiderations_remaining = reconsiderations_remaining - 1
-                WHERE task_id = ? AND scope_key = ? AND reconsiderations_remaining > 0
-                """,
-                (task_id, scope.key),
-            )
-            if debited.rowcount != 1:
-                return None
-            limit = max(1, int(budget_limit))
-            self._connection.execute(
-                """
-                INSERT INTO continuation_approaches (
-                    scope_key, task_id, approach_key, budget_limit,
-                    consumed_epochs, review_grant_stop_epoch_id, updated_at
-                ) VALUES (?, ?, ?, ?, 0, ?, ?)
-                """,
-                (scope.key, task_id, key, limit, epoch_id, now),
-            )
-            return {
-                "budget_limit": limit,
-                "remaining_epochs": limit,
-                "reconsiderations_remaining": self._task_allowance(scope, task_id),
-            }
-
-    def _task_allowance(self, scope: RuntimeScope, task_id: str) -> int:
-        row = self._connection.execute(
-            "SELECT reconsiderations_remaining FROM tasks WHERE task_id = ? AND scope_key = ?",
-            (task_id, scope.key),
-        ).fetchone()
-        return 0 if row is None else max(0, int(row["reconsiderations_remaining"]))
-
-    def approach_review_grant(
-        self, scope: RuntimeScope, *, task_id: str, approach_key: str,
-    ) -> str | None:
-        """The stop epoch that bought this approach its execution admission."""
-        with self._lock:
-            self._require_open()
-            row = self._connection.execute(
-                """
-                SELECT review_grant_stop_epoch_id FROM continuation_approaches
-                WHERE scope_key = ? AND task_id = ? AND approach_key = ?
-                """,
-                (scope.key, task_id, approach_key),
-            ).fetchone()
-        if row is None or row["review_grant_stop_epoch_id"] is None:
-            return None
-        return str(row["review_grant_stop_epoch_id"])
-
-    def checkpoint_review_grant(
-        self, scope: RuntimeScope, *, checkpoint_id: str,
-    ) -> str | None:
-        """Grant stop epoch for a checkpoint's own continuation approach."""
-        with self._lock:
-            self._require_open()
-            row = self._connection.execute(
-                """
-                SELECT c.continuation_json, c.task_id
-                FROM task_checkpoints c
-                JOIN tasks t ON t.task_id = c.task_id
-                WHERE c.checkpoint_id = ? AND t.scope_key = ?
-                """,
-                (checkpoint_id, scope.key),
-            ).fetchone()
-            if row is None:
-                return None
-            contract = _continuation_from_json(row["continuation_json"])
-            if contract is None:
-                return None
-            grant = self._connection.execute(
-                """
-                SELECT review_grant_stop_epoch_id FROM continuation_approaches
-                WHERE scope_key = ? AND task_id = ? AND approach_key = ?
-                """,
-                (scope.key, row["task_id"], contract.approach_key),
-            ).fetchone()
-        if grant is None or grant["review_grant_stop_epoch_id"] is None:
-            return None
-        return str(grant["review_grant_stop_epoch_id"])
-
     def settle_continuation_approach(
         self,
         scope: RuntimeScope,
@@ -944,32 +779,8 @@ class RuntimeStateStore:
             contract = _continuation_from_json(row["continuation_json"])
             if contract is None or contract.generation != int(generation):
                 return None
-            settlement = self._connection.execute(
-                """
-                SELECT consumed_epochs FROM continuation_settlements
-                WHERE checkpoint_id = ? AND scope_key = ? AND task_id = ?
-                  AND approach_key = ?
-                """,
-                (checkpoint_id, scope.key, task_id, contract.approach_key),
-            ).fetchone()
-            if (
-                settlement is None
-                or int(settlement["consumed_epochs"]) >= contract.bounded_epoch_budget
-            ):
-                return None
-            approach = self._connection.execute(
-                """
-                SELECT budget_limit, consumed_epochs
-                FROM continuation_approaches
-                WHERE scope_key = ? AND task_id = ? AND approach_key = ?
-                """,
-                (scope.key, task_id, contract.approach_key),
-            ).fetchone()
-            if (
-                approach is None
-                or int(approach["consumed_epochs"]) >= int(approach["budget_limit"])
-            ):
-                return None
+            # Spent epochs are facts in the payload, not a reason to refuse
+            # the Agent's continuation (the Agent stays live).
             existing = self._connection.execute(
                 """
                 SELECT * FROM work_intents

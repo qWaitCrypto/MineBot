@@ -243,6 +243,8 @@ class CallSupervisor:
                 intent=intent, facts=facts, running=running,
                 result=result if isinstance(result, Mapping) else None,
             )
+        if running and (supervision_context or {}).get("is_life_project"):
+            state, options = rq.project_frame(state, options, facts)
         request: dict[str, Any] = {"state": state, "questions": rq.frame_questions(
             options, protecting=bool((supervision_context or {}).get("is_reflex_action")),
             acting_for_intent=running and bool(intent),
