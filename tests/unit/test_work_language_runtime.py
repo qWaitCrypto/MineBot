@@ -74,7 +74,33 @@ def test_wait_unknown_is_waiting_and_does_not_call_body():
     result, decision = asyncio.run(run_plan(plan, answers=("unknown",), calls=[]))
     assert result.status == "waiting"
     assert result.tree["work"]["_runtime"]["status"] == "waiting"
-    assert decision.payloads[0]["state"]["intent_chain"] == ["wait for player"]
+    state = decision.payloads[0]["state"]
+    assert state["condition"] == "player is here"
+    # The player binding was not read: it is shown as an unread object.
+    assert state["other_objects"]["qwait"]["observed"] is False
+    assert state["unknown_fields"] == [{"object": "qwait", "reason": "no_observation"}]
+
+
+def test_wait_condition_says_the_body_in_frame_sentences():
+    # Villa run 2026-10-15: with the raw Body state (clock as a tick number)
+    # "daytime has begun" was answered unknown 49 times in full daylight;
+    # with these sentences the same recorded frames gave satisfied 48/48 and
+    # night controls never did.
+    async def state():
+        return {"health": 20.0, "food": 20, "oxygen": 300, "time": 991, "pos": [-5.5, 72.0, 7.5],
+                "inventory_counts": {}, "inventory_complete": True, "selected_item": "", "selected_item_known": True}
+    plan = {"language": "minebot-work/0.2", "goal": "wait for day", "timeout_s": 10,
+            "work": {"kind": "wait", "id": "day", "intent": "wait for day", "timeout_s": 3,
+                     "condition": {"text": "Minecraft daytime has begun and the bot health is above 0"}}}
+    decision = Decision("satisfied")
+    result = asyncio.run(WorkPlanExecutor(plan, call=None, state=state, decision=decision).run())
+    assert result.status == "completed"
+    shown = decision.payloads[0]["state"]
+    assert shown["condition"] == "Minecraft daytime has begun and the bot health is above 0"
+    assert shown["daylight"] == "It is day."
+    assert shown["body"].startswith("Health is 20 of 20.")
+    assert "facts" not in shown and "field_vocabulary" not in shown and "intent_chain" not in shown
+    assert "991" not in json.dumps(shown)
 
 
 def test_choice_and_requires_need_all_satisfied():
@@ -258,7 +284,7 @@ def test_requires_pending_wins_and_does_not_release_body_write():
     assert len(decision.payloads) == 2
 
 
-def test_condition_request_contains_body_state_facts_and_vocabulary():
+def test_condition_request_says_the_bound_body_in_sentences():
     plan = {"language": "minebot-work/0.2", "goal": "observe", "timeout_s": 2,
             "work": {"kind": "wait", "id": "ready", "intent": "wait", "timeout_s": 1,
                       "condition": {"text": "the bot is ready", "bindings": {"bot": "bot"}}}}
@@ -277,10 +303,10 @@ def test_condition_request_contains_body_state_facts_and_vocabulary():
     result = asyncio.run(executor.run())
     payload = decision.payloads[0]["state"]
     assert result.status == "waiting"
-    assert payload["facts"]["bot"]["observed"] is True
-    assert payload["facts"]["bot"]["values"]["inventory_counts"] == {"minecraft:stone": 4}
-    assert "inventory_complete" in payload["field_vocabulary"]
-    assert payload["unknown_fields"] == []
+    assert "stone 4" in payload["inventory"]
+    assert payload["daylight"] == "It is day."
+    assert payload["position"] == "now at [1.0, 64.0, 2.0]."
+    assert "facts" not in payload and "field_vocabulary" not in payload and "unknown_fields" not in payload
 
 
 def test_changed_obligation_with_same_id_cannot_inherit_done():

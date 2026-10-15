@@ -777,6 +777,31 @@ def life_surroundings(facts: Mapping[str, Any]) -> dict[str, str]:
     return state
 
 
+def body_condition_facts(facts: Mapping[str, Any]) -> dict[str, str]:
+    """The Body facts a plan condition is judged on, as sentences.
+
+    A plan's wait condition used to get the raw Body state (20k characters,
+    the clock as a tick number). "Minecraft daytime has begun" was answered
+    unknown 49 times in a row in full daylight (villa run 2026-10-15); the
+    frames of the same run said "It is day." and were read correctly.
+    """
+    state: dict[str, str] = {"body": _body_sentence(facts)}
+    state.update(life_surroundings(facts))
+    threats = _threat_sentence(facts)
+    if threats:
+        state["threats"] = threats
+    inventory = _inventory(facts)
+    if inventory is not None:
+        state["inventory"] = ", ".join(f"{k} {v}" for k, v in inventory.items()) or "empty"
+    hand = _main_hand(facts)
+    if hand:
+        state["main_hand"] = hand
+    position = _position(facts.get("position", facts.get("pos")))
+    if position:
+        state["position"] = f"now at {position}."
+    return state
+
+
 def project_frame(state: Mapping[str, Any], options: Mapping[str, str],
                   facts: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, str]]:
     """A running frame of the Agent's own project: the work frame, plus the

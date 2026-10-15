@@ -1083,23 +1083,30 @@ class WorkPlanExecutor:
         state = await self.state()
         observations = await self.observe(condition) if self.observe is not None else {}
         compiled_facts, unknown_fields = _condition_facts(state, condition, observations)
+        # The Body is said in the same sentences as every frame (§3 of the
+        # frame-question doc); other bound objects keep their own read.
+        body_keys = [key for key, fact in compiled_facts.items()
+                     if isinstance(fact, dict) and fact.get("source") == "latest_body_state"]
+        body_said = rq.body_condition_facts(_state_payload(state)) if body_keys else {}
+        other_objects = {key: fact for key, fact in compiled_facts.items() if key not in body_keys}
         requirements = condition.get("requires") or [condition]
         statuses: list[str] = []
         evidence: list[Any] = []
         for requirement in requirements:
             about = requirement.get("about") if isinstance(requirement, dict) else None
             text_value = requirement.get("text") if isinstance(requirement, dict) else str(requirement)
+            shown: dict[str, Any] = {"condition": text_value}
+            if about:
+                shown["about"] = about
+            shown.update(body_said)
+            if other_objects:
+                shown["other_objects"] = other_objects
+                shown["field_vocabulary"] = WORK_FIELD_VOCABULARY
+            if unknown_fields:
+                shown["unknown_fields"] = unknown_fields
+            shown["evidence_scope"] = "Only supplied facts are known; omitted facts are unknown."
             payload = {
-                "state": {
-                    "protocol": "minebot-decision-context/0.3.1",
-                    "intent_chain": intents,
-                    "condition": text_value,
-                    "about": about,
-                    "facts": compiled_facts,
-                    "unknown_fields": unknown_fields,
-                    "field_vocabulary": WORK_FIELD_VOCABULARY,
-                    "evidence_scope": "Only supplied facts are known; omitted facts are unknown.",
-                },
+                "state": shown,
                 "questions": {"q": {"type": "choice", "instructions": "Choose satisfied, pending, or unknown.",
                     "criteria": {"satisfied": "The condition is supported by the supplied facts.",
                                  "pending": "The condition is not yet true, but the facts are sufficient to say so.",
