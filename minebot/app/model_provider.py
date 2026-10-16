@@ -29,6 +29,7 @@ from httpx import AsyncClient, Limits, Timeout, TransportError
 from openai import APIConnectionError, APIError, APIStatusError, APITimeoutError, AsyncOpenAI
 
 from minebot.app.chat_usage import CacheUsageChatCompletionsModel
+from minebot.app.request_layout import LayoutReportingResponsesModel, RequestLayoutTracker
 from minebot.brain.provider import ApiShape, Capabilities, ProviderConfig, ProviderKind
 
 __all__ = [
@@ -310,7 +311,9 @@ class ModelProviderRegistry(ModelProvider):
         if cfg.kind == "openai_chat":
             return CacheUsageChatCompletionsModel(model=cfg.model, openai_client=self._client(cfg))
         if cfg.kind == "openai_responses":
-            return OpenAIResponsesModel(model=cfg.model, openai_client=self._client(cfg))
+            client = self._client(cfg)
+            return LayoutReportingResponsesModel(
+                model=cfg.model, openai_client=client, tracker=client.minebot_layout)
         if cfg.kind == "anthropic_messages":
             from minebot.app.anthropic_model import AnthropicMessagesModel
 
@@ -352,6 +355,11 @@ class ModelProviderRegistry(ModelProvider):
             credential = self._api_key(cfg)
         read_timeout = _request_timeout_s(cfg)
         from minebot.app.responses_observation import observe_http_request, observe_http_response
+        layout = RequestLayoutTracker()
+
+        async def note_layout(request):
+            layout.observe(request)
+
         client = AsyncOpenAI(
             api_key=credential,
             base_url="https://api.openai.com/v1" if cfg.auth == "chatgpt" else cfg.base_url,
@@ -362,8 +370,9 @@ class ModelProviderRegistry(ModelProvider):
                             write=min(30.0, read_timeout), pool=min(10.0, read_timeout)),
             http_client=AsyncClient(proxy=self.responses_proxy, trust_env=not bool(self.responses_proxy),
                 limits=Limits(keepalive_expiry=120.0),
-                event_hooks={"request": [observe_http_request], "response": [observe_http_response]}),
+                event_hooks={"request": [note_layout, observe_http_request], "response": [observe_http_response]}),
         )
+        client.minebot_layout = layout
         self._clients.append(client)
         return client
 
