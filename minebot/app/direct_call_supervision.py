@@ -343,6 +343,23 @@ class CallSupervisor:
         )
         return choice
 
+    async def _register_monitor(
+        self, record: dict[str, Any], tool: Any, params: Mapping[str, Any],
+        wake: asyncio.Event, worker: asyncio.Task[Any],
+    ) -> asyncio.Task[Any] | None:
+        """Hand a live call to the monitor, or stop it.
+
+        A call nobody supervises must not keep writing to the world while the
+        Agent is told it failed: the 2026-10-16 run kept placing blocks from
+        place_block calls that had already returned "active monitor" errors.
+        """
+        try:
+            return self._start_monitor(record, tool, params, wake, worker)
+        except BaseException:
+            worker.cancel()
+            await asyncio.gather(worker, return_exceptions=True)
+            raise
+
     async def _judge_frame(
         self, call_id: str, tool: Any, params: Mapping[str, Any],
         execution: Mapping[str, Any], idle_s: float, *, purpose: str,
@@ -686,10 +703,10 @@ class CallSupervisor:
                 if grace:
                     done, _ = await asyncio.wait({worker}, timeout=grace)
                     if not done:
-                        monitor = self._start_monitor(record, tool, params, wake, worker)
+                        monitor = await self._register_monitor(record, tool, params, wake, worker)
                         record["monitor_task"] = monitor
                 else:
-                    monitor = self._start_monitor(record, tool, params, wake, worker)
+                    monitor = await self._register_monitor(record, tool, params, wake, worker)
                     record["monitor_task"] = monitor
                 try:
                     result = await worker

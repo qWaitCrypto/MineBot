@@ -29,6 +29,11 @@ from minebot.app.direct_call_supervision import (
 from minebot.app.life_profile import load_profile, life_intent
 from minebot.app.execution_snapshot import TERMINAL_STATES
 
+# How long the lifecycle task waits before it restarts after an error, and the
+# longest it waits when errors follow each other.
+LIFECYCLE_RESTART_DELAY_S = 1.0
+LIFECYCLE_RESTART_MAX_DELAY_S = 30.0
+
 
 class BodyLoop(CallSupervisor):
     """Own supervision for work calls and the Body's idle lifecycle."""
@@ -419,7 +424,12 @@ class BodyLoop(CallSupervisor):
             if finished_decision is not None:
                 try:
                     choice = finished_decision.result()
-                except Exception:
+                except (Exception, asyncio.CancelledError):
+                    # A Decision task the call's own wrap-up cancelled
+                    # (CallSupervisor.run, when the Agent stops the activity)
+                    # is no answer. ``.result()`` raises CancelledError for it,
+                    # which is not an Exception; letting it out ended the one
+                    # lifecycle task for good (villa run 2026-10-16, 12:41).
                     choice = "unknown"
                 if decision_task is finished_decision:
                     decision_task = None
@@ -1348,8 +1358,41 @@ class BodyLoop(CallSupervisor):
             self._native_lifecycle = True
             register(receive)
         self.runtime.trace.emit("reflex_loop_started", loop_state=self.loop_state)
-        self._lifecycle_task = asyncio.create_task(self._idle_frames())
+        self._lifecycle_task = asyncio.create_task(self._run_lifecycle())
         self._lifecycle_task.add_done_callback(self._restart_after_world_ready)
+
+    async def _run_lifecycle(self) -> None:
+        """Keep the one lifecycle consumer alive until ``stop`` ends it.
+
+        An error that left ``_idle_frames`` used to end the task silently while
+        ``_lifecycle_started`` stayed set: nothing asked another frame, no
+        successor started, and every later call that needed a monitor failed
+        with "BodyLoop already has an active monitor" (69 failures in two hours
+        of the 2026-10-16 DeepSeek run). The layer reports the failure and goes
+        on, waiting longer after each failure that follows closely on the last.
+        """
+        delay = LIFECYCLE_RESTART_DELAY_S
+        while True:
+            started = time.monotonic()
+            try:
+                return await self._idle_frames()
+            except asyncio.CancelledError:
+                task = asyncio.current_task()
+                if (task is not None and task.cancelling()) or not self._lifecycle_started:
+                    raise
+                error_type, message = "CancelledError", "raised by a child task, not a stop request"
+            except Exception as exc:
+                error_type, message = type(exc).__name__, str(exc)[:200]
+            self.runtime.trace.emit(
+                "reflex_loop_failed", loop_state=self.loop_state,
+                error_type=error_type, message=message, restart_in_s=delay,
+            )
+            if time.monotonic() - started > 60.0:
+                delay = LIFECYCLE_RESTART_DELAY_S
+            await asyncio.sleep(delay)
+            delay = min(delay * 2.0, LIFECYCLE_RESTART_MAX_DELAY_S)
+            if not self._lifecycle_started:
+                return
 
     def _restart_after_world_ready(self, task: asyncio.Task[Any]) -> None:
         # A rapid reconnect may arrive while the old consumer is settling.
