@@ -404,6 +404,9 @@ class AgentSession:
             if command is not None
             else await self._apply_runtime_intent(intent)
         )
+        if (self.parts is not None and self._turn_pending
+                and intent.kind in _TELLS_WAITING_FACTS):
+            self._deliver_waiting_reflex_facts()
         self._begin_skill_owner(intent)
         if intent.kind is WorkIntentKind.RECOVERY_RECONCILE and intent.source == "startup_reconcile":
             reconciled = await self._run_supervised(
@@ -1137,17 +1140,15 @@ class AgentSession:
                 self._turn_pending = False
                 self._trace("reflex_fact_dropped", reason="invalid_payload")
                 return []
-            label = "HEARTBEAT" if fact.get("kind") == "heartbeat" else "REFLEX_RESULT"
-            self.parts.context.observe_system_message(
-                f"{label}: " + json.dumps(fact, ensure_ascii=False, sort_keys=True)
-            )
-            self._reflex_fact_delivered(fact)
+            self._deliver_reflex_fact(fact)
+            drained = self._deliver_waiting_reflex_facts()
             self._turn_pending = True
             self._resume_if_waiting()
             self._trace(
                 "reflex_fact_wake",
                 activity_id=fact.get("activity_id"),
                 status=fact.get("status"),
+                also_delivered=drained,
             )
             return []
         if intent.kind is WorkIntentKind.BODY_EVENT:
@@ -1477,6 +1478,30 @@ class AgentSession:
             task_id=None,
         )
         self._trace("body_lifecycle_queued", name=event.name, body_seq=event.seq)
+
+    def _deliver_waiting_reflex_facts(self) -> int:
+        """Tell the turn that is starting every fact still waiting in the queue.
+
+        One fact per turn put the Agent behind its own queue: the median fact
+        was read 17 minutes after it happened, and each turn re-sent the whole
+        history (villa run 2026-10-16). Any turn that takes a model request
+        reads them all, whatever woke it.
+        """
+        delivered = 0
+        while (waiting := self.work_queue.lease_next(kind=WorkIntentKind.REFLEX_FACT)) is not None:
+            fact = waiting.payload.get("fact")
+            if isinstance(fact, dict):
+                self._deliver_reflex_fact(fact)
+                delivered += 1
+            self.work_queue.complete(waiting)
+        return delivered
+
+    def _deliver_reflex_fact(self, fact: dict[str, object]) -> None:
+        label = "HEARTBEAT" if fact.get("kind") == "heartbeat" else "REFLEX_RESULT"
+        self.parts.context.observe_system_message(
+            f"{label}: " + json.dumps(fact, ensure_ascii=False, sort_keys=True)
+        )
+        self._reflex_fact_delivered(fact)
 
     def _reflex_fact_delivered(self, fact: dict[str, object]) -> None:
         delivered = getattr(self.parts.runtime, "reflex_fact_delivered", None) if self.parts is not None else None
@@ -2155,17 +2180,41 @@ def _queued_quarantine_control(queue: WorkIntentQueue | None) -> WorkIntent | No
     return min(controls, key=lambda intent: (-intent.priority, intent.intent_id))
 
 
+# A turn woken by one of these also reads the reflex facts that are waiting.
+_TELLS_WAITING_FACTS = frozenset({
+    WorkIntentKind.MESSAGE,
+    WorkIntentKind.CONTINUE,
+    WorkIntentKind.BODY_EVENT,
+    WorkIntentKind.TASK_CONTINUE,
+    WorkIntentKind.TASK_BOUNDARY,
+})
+
+_WAITS_FOR_RUNNING_TURN = frozenset({
+    WorkIntentKind.REFLEX_FACT,
+    WorkIntentKind.TASK_CONTINUE,
+    WorkIntentKind.TASK_BOUNDARY,
+    WorkIntentKind.MAINTENANCE,
+})
+
+
 def _queued_preemption(queue: WorkIntentQueue, work_kind: str) -> tuple[str, bool] | None:
     queued = queued_intents = queue.queued_intents()
     if work_kind == "recovery":
         queued = [intent for intent in queued if intent.kind in CONTROL_INTENT_KINDS]
     elif work_kind == "agent_turn":
-        # A reflex fact waits for the running turn instead of cancelling it.
-        # Cancelling dropped the turn's own tool call and result from the
-        # conversation, so the next turn did not know it had tried: the same
-        # ensure_tool_for went out three times in 36 s, each answer lost
-        # (villa run 2026-10-15, 20+ turns cancelled this way).
-        queued = [intent for intent in queued_intents if intent.kind is not WorkIntentKind.REFLEX_FACT]
+        # A running turn is cancelled only for the intent the queue leases
+        # next, and only when that intent cannot wait for the turn to end.
+        # A reflex fact waits: cancelling dropped the turn's own tool call and
+        # result, so the next turn did not know it had tried (villa run
+        # 2026-10-15, the same ensure_tool_for three times in 36 s). A task
+        # continuation, a boundary and maintenance wait too. Judging only the
+        # intents that may preempt let a queued task continuation (priority 50)
+        # cancel every turn for 3 hours while reflex facts (75) kept being
+        # leased ahead of it (villa run 2026-10-16: 292 of 345 turns).
+        if not queued_intents:
+            return None
+        head = max(enumerate(queued_intents), key=lambda item: (item[1].priority, -item[0]))[1]
+        queued = [] if head.kind in _WAITS_FOR_RUNNING_TURN else [head]
     if not queued:
         return None
     intent = max(

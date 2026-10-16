@@ -48,11 +48,15 @@ WORK_INTENT_PRIORITY: dict[WorkIntentKind, int] = {
     WorkIntentKind.PAUSE: 85,
     WorkIntentKind.RECOVERY_RECONCILE: 80,
     WorkIntentKind.COMPLETION_REVIEW: 80,
-    WorkIntentKind.BODY_EVENT: 75,
+    # Death and a person speaking are leased before a background result. A
+    # lower message waited behind every queued reflex fact, and a running turn
+    # was cancelled for it without it being the next thing leased (villa run
+    # 2026-10-16: 292 of 345 turns cancelled, the queue wait 17 minutes).
+    WorkIntentKind.BODY_EVENT: 77,
+    WorkIntentKind.MESSAGE: 76,
     WorkIntentKind.REFLEX_FACT: 75,
     WorkIntentKind.CONTINUE: 70,
     WorkIntentKind.START: 65,
-    WorkIntentKind.MESSAGE: 60,
     WorkIntentKind.TASK_BOUNDARY: 55,
     WorkIntentKind.TASK_CONTINUE: 50,
     WorkIntentKind.MAINTENANCE: 10,
