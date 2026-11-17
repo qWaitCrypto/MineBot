@@ -58,6 +58,28 @@ tasks.named("runClient").configure {
     def username = System.getenv().getOrDefault("MINEBOT_CLIENT_USERNAME", "MineBotPhaseA")
     // Minecraft 26.1 uses quickPlayMultiplayer for a direct server launch.
     args("--username", username, "--quickPlayMultiplayer", address)
+    // A fresh game directory opens Minecraft's first-launch screens (the accessibility
+    // welcome, the tutorial), and those block the direct server join. A bot never needs
+    // them, and it must not pause when its window loses focus.
+    doFirst {
+        // Loom's game directory; the task's workingDir is only set when it executes.
+        def runDir = file("run")
+        runDir.mkdirs()
+        def options = new File(runDir, "options.txt")
+        def wanted = [onboardAccessibility: "false", joinedFirstServer: "true",
+                      tutorialStep: "none", pauseOnLostFocus: "false"]
+        def seen = [] as Set
+        def lines = (options.exists() ? options.readLines("UTF-8") : []).collect { line ->
+            def key = line.split(":", 2)[0]
+            if (wanted.containsKey(key)) {
+                seen << key
+                return "${key}:${wanted[key]}".toString()
+            }
+            line
+        }
+        wanted.each { key, value -> if (!seen.contains(key)) lines << "${key}:${value}".toString() }
+        options.write(lines.join("\n") + "\n", "UTF-8")
+    }
     // Official (Microsoft) bot account: `minebot` hands the Minecraft token to this process only.
     def accessToken = System.getenv().get("MINEBOT_CLIENT_ACCESS_TOKEN")
     if (accessToken != null && !accessToken.isBlank()) {
