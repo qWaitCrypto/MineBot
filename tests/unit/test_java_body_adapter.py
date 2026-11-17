@@ -1,0 +1,2707 @@
+"""GovernanceAnswerer binds proposals to the real GovernancePolicy path,
+and JavaBodyClient drives the protocol into ToolResults over a fake duplex."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import threading
+import time
+
+import pytest
+
+from minebot.contract.governance import Region, StructureRiskAssessment, StructureRiskLevel
+from minebot.app.execution_lane import SerialExecutionLane
+from minebot.game.governance import GovernancePolicy
+from minebot.game.java_body_adapter import (
+    GovernanceAnswerer,
+    JavaBodyClient,
+    TransportClosed,
+)
+from minebot.game.errors import BodyActionTimeoutError, BodyProtocolError
+from minebot.game.java_body import JavaBody
+from minebot.game.java_body_protocol import ServerProposal
+
+
+HOSTILE_UUID = "11111111-1111-4111-8111-111111111111"
+GUIDE_UUID = "22222222-2222-4222-8222-222222222222"
+
+
+def _proposal(
+    kind: str = "break",
+    block_id: str = "minecraft:oak_log",
+    pos=(10, 64, 10),
+    *,
+    context: str | None = None,
+) -> ServerProposal:
+    return ServerProposal(
+        proposal_id="mp-1",
+        bot="Bot",
+        action_id="collect-1",
+        kind=kind,
+        x=pos[0],
+        y=pos[1],
+        z=pos[2],
+        block_id=block_id,
+        payload={},
+        context=context,
+    )
+
+
+def test_proposal_context_selects_the_governance_break_context() -> None:
+    policy = _policy()
+    proposal = _proposal(block_id="minecraft:stone")
+    proposal = ServerProposal(**{**proposal.__dict__, "context": "recovery"})
+
+    allow, reason = GovernanceAnswerer(policy).verdict(proposal)
+
+    assert isinstance(allow, bool)
+    assert reason
+
+
+def _policy() -> GovernancePolicy:
+    return GovernancePolicy(
+        natural_regions=[Region("probe-natural", (-64, 0, -64), (64, 200, 64))],
+        protected_regions=[Region("player-base", (30, 60, 30), (40, 80, 40))],
+    )
+
+
+def test_natural_collect_target_is_allowed_by_the_real_policy() -> None:
+    allow, reason = GovernanceAnswerer(_policy()).verdict(_proposal())
+    assert allow is True
+    assert reason
+
+
+def test_protected_region_is_denied_by_the_real_policy() -> None:
+    allow, reason = GovernanceAnswerer(_policy()).verdict(_proposal(pos=(35, 64, 35)))
+    assert allow is False
+    assert reason == "protected_region"
+
+
+def test_open_proposal_uses_interaction_governance() -> None:
+    allowed = _proposal(
+        kind="open",
+        block_id="minecraft:chest",
+        pos=(10, 64, 10),
+        context="activate",
+    )
+    protected = _proposal(
+        kind="open",
+        block_id="minecraft:chest",
+        pos=(35, 64, 35),
+        context="activate",
+    )
+
+    assert GovernanceAnswerer(_policy()).verdict(allowed) == (True, "allowed_interaction")
+    assert GovernanceAnswerer(_policy()).verdict(protected) == (False, "protected_region")
+
+
+def test_open_proposal_without_context_is_denied_never_guessed() -> None:
+    proposal = _proposal(kind="open", block_id="minecraft:chest")
+
+    assert GovernanceAnswerer(_policy()).verdict(proposal) == (
+        False,
+        "unsupported_interaction_context:None",
+    )
+
+
+@pytest.mark.parametrize("context", ["activate", "farm"])
+def test_interact_proposal_uses_interaction_governance(context: str) -> None:
+    allowed = _proposal(
+        kind="interact",
+        block_id="minecraft:farmland" if context == "farm" else "minecraft:air",
+        pos=(10, 64, 10),
+        context=context,
+    )
+    protected = ServerProposal(**{**allowed.__dict__, "x": 35, "z": 35})
+
+    assert GovernanceAnswerer(_policy()).verdict(allowed) == (True, "allowed_interaction")
+    assert GovernanceAnswerer(_policy()).verdict(protected) == (False, "protected_region")
+
+
+def test_place_proposal_uses_place_governance() -> None:
+    allowed = _proposal(
+        kind="place",
+        block_id="minecraft:cobblestone",
+        pos=(10, 64, 10),
+        context="work",
+    )
+    protected = _proposal(
+        kind="place",
+        block_id="minecraft:cobblestone",
+        pos=(35, 64, 35),
+        context="work",
+    )
+
+    assert GovernanceAnswerer(_policy()).verdict(allowed) == (True, "allowed_place")
+    assert GovernanceAnswerer(_policy()).verdict(protected) == (False, "protected_region")
+
+
+def test_place_proposal_without_context_is_denied_never_guessed() -> None:
+    proposal = _proposal(kind="place", block_id="minecraft:cobblestone")
+
+    assert GovernanceAnswerer(_policy()).verdict(proposal) == (
+        False,
+        "unsupported_place_context:None",
+    )
+
+
+def test_bot_ledger_governs_bot_placed_blocks() -> None:
+    policy = _policy()
+    policy.record_bot_placement((12, 64, 12), "minecraft:cobblestone", "bridge", "Bot")
+    allow, reason = GovernanceAnswerer(policy).verdict(
+        _proposal(block_id="minecraft:cobblestone", pos=(12, 64, 12))
+    )
+    # Whatever the ledger decides, the decision came from the real policy
+    # with a typed reason — never from an adapter-side shortcut.
+    assert isinstance(allow, bool)
+    assert reason
+
+
+def test_unmapped_mutation_kind_is_denied_never_guessed() -> None:
+    allow, reason = GovernanceAnswerer(_policy()).verdict(_proposal(kind="set_block"))
+    assert allow is False
+    assert reason == "unsupported_mutation_kind:set_block"
+
+
+# ---------------------------------------------------------------------------
+# JavaBodyClient over a reactive fake duplex.
+# ---------------------------------------------------------------------------
+
+
+def _inventory_slot_type(slot: int) -> str:
+    if slot <= 8:
+        return "hotbar"
+    if slot <= 35:
+        return "inventory"
+    if slot <= 39:
+        return "armor"
+    if slot == 40:
+        return "offhand"
+    return "aux"
+
+
+def _inventory_slot_label(slot: int) -> str:
+    if slot <= 8:
+        return f"hotbar.{slot}"
+    if slot <= 35:
+        return f"inventory.{slot - 9}"
+    return {
+        36: "armor.feet",
+        37: "armor.legs",
+        38: "armor.chest",
+        39: "armor.head",
+        40: "offhand",
+    }.get(slot, f"aux.{slot - 41}")
+
+
+def _fake_block_fact(
+    x: int,
+    y: int,
+    z: int,
+    *,
+    block: str = "minecraft:stone",
+    state: str = "SOLID",
+    properties: dict | None = None,
+) -> dict:
+    return {
+        "x": x,
+        "y": y,
+        "z": z,
+        "type": block,
+        "state": state,
+        "properties": dict(properties or {}),
+    }
+
+
+class FakeBodyServer:
+    """Reactive in-memory Body server driving one bot's protocol.
+
+    Implements the DuplexTransport the client drives: sent frames are reacted
+    to synchronously, enqueuing response and event frames the client then
+    recv()s. Per-bot event seq stays monotonic so the client sees no spurious
+    gaps.
+    """
+
+    CHANNEL = "fakeplayer-body"
+
+    def __init__(self, *, drop_after=None) -> None:
+        self._out: list[str] = []
+        self._seq = 0
+        self._tick = 100
+        self._closed = False
+        self._sent_count = 0
+        self._drop_after = drop_after
+        self.scenario = "navigate_complete"
+        self.verdict_seen: list[tuple[str, bool]] = []
+        self.requests: list[dict] = []
+        self.present = True
+        self.position = [10.5, 64.0, -3.5]
+        self._history: list[dict] = []
+        self._chat_history: list[dict] = []
+        self._chat_seq = 0
+
+    def send(self, text: str) -> None:
+        if self._closed:
+            raise TransportClosed("closed")
+        self._sent_count += 1
+        self._react(json.loads(text))
+        if self._drop_after is not None and self._sent_count >= self._drop_after:
+            self._closed = True
+
+    def recv(self, timeout: float) -> str:
+        if self._out:
+            return self._out.pop(0)
+        if self._closed:
+            raise TransportClosed("closed")
+        raise TimeoutError("empty")
+
+    def close(self) -> None:
+        self._closed = True
+
+    def emit_chat(self, sender: str, message: str) -> None:
+        self._chat_seq += 1
+        self._chat_history.append({
+            "channel": self.CHANNEL,
+            "type": "EVENT",
+            "bot": "Bot",
+            "seq": self._chat_seq,
+            "tick": self._tick,
+            "event": "agentChat",
+            "data": {"sender": sender, "message": message},
+        })
+    def _react(self, message: dict) -> None:
+        self.requests.append(dict(message))
+        kind = message.get("type")
+        rid = message.get("request_id")
+        if kind == "HELLO":
+            self._emit_response(rid, "HELLO_ACK", {
+                "protocol": "fakeplayer-body/1",
+                "minecraft_version": "26.1.2",
+                "max_request_bytes": 16384,
+                "max_requests_per_second": 40,
+                "request_types": [
+                    "ASCEND", "BODY_STATE", "CANCEL_ACTION", "COLLECT_BLOCK", "DIG_DOWN", "ENGAGE_ENTITY", "ENTITY_READ", "FIND_BLOCKS", "FOLLOW_ENTITY", "FURNACE_TRANSFER",
+                    "HELLO", "EVENT_HEAD", "WORLD_IDENTITY", "CHAT_EVENTS", "SAY",
+                    "SPAWN", "DESPAWN", "INTERRUPT", "INVENTORY", "CONTAINER_READ", "CONTAINER_TRANSFER", "CRAFT_ITEM", "MUTATION_VERDICT", "NAVIGATE", "PLAYER_ACTION", "QUERY_ACTION",
+                    "RECIPE_READ", "RESUME_EVENTS", "SET_SURVIVAL_OWNER", "WORLD_READ",
+                ],
+            })
+        elif kind == "SET_SURVIVAL_OWNER":
+            self._emit_response(rid, "SET_SURVIVAL_OWNER_RESULT", {
+                "bot": message.get("bot_name"),
+                "enabled": bool(message.get("enabled")),
+            })
+        elif kind == "EVENT_HEAD":
+            self._emit_response(rid, "EVENT_HEAD_RESULT", {
+                "bot": message.get("bot_name"),
+                "epoch": "fake-server-epoch",
+                "event_seq": self._seq,
+                "chat_seq": self._chat_seq,
+                "owner": None,
+                "pending_action_count": 0,
+                "tick": self._tick,
+            })
+        elif kind == "WORLD_IDENTITY":
+            self._emit_response(rid, "WORLD_IDENTITY_RESULT", {
+                "world_id": "world-java-fixture",
+            })
+        elif kind == "CHAT_EVENTS":
+            after = int(message.get("after_seq", 0))
+            self._emit_response(rid, "CHAT_EVENTS_RESULT", {
+                "bot": message.get("bot_name"),
+                "epoch": "fake-server-epoch",
+                "event_gap": None,
+                "events": [event for event in self._chat_history if int(event["seq"]) > after],
+                "replay_complete": True,
+                "last_seq": self._chat_seq,
+            })
+        elif kind == "SAY":
+            self._emit_response(rid, "SAY_RESULT", {
+                "bot": message.get("bot_name"),
+                "said": True,
+            })
+        elif kind == "SPAWN":
+            self.present = True
+            if message.get("pos") is not None:
+                self.position = [float(value) for value in message["pos"]]
+            if message.get("emit_respawned"):
+                self._emit_event("respawned", None, {"final_pos": list(self.position)})
+            self._emit_response(rid, "SPAWN_RESULT", {
+                "bot": message.get("bot_name"),
+                "accepted": True,
+                "present": True,
+                "already_present": False,
+            })
+        elif kind == "DESPAWN":
+            self.present = False
+            self._emit_event("bodyMissing", None, {"lastPos": list(self.position), "reason": "despawn"})
+            self._emit_response(rid, "DESPAWN_RESULT", {
+                "bot": message.get("bot_name"),
+                "accepted": True,
+                "missing": True,
+                "already_missing": False,
+            })
+        elif kind == "INTERRUPT":
+            self._emit_response(rid, "INTERRUPT_RESULT", {
+                "bot": message.get("bot_name"),
+                "accepted": True,
+                "complete": True,
+                "owner_action_id": None,
+                "reason": message.get("reason"),
+            })
+        elif kind == "RESUME_EVENTS":
+            after = int(message.get("after_seq", 0))
+            self._emit_response(rid, "RESUME_EVENTS_RESULT", {
+                "bot": message.get("bot_name"),
+                "event_gap": None,
+                "events": [event for event in self._history if int(event["seq"]) > after],
+                "replay_complete": True,
+                "last_seq": self._seq,
+            })
+        elif kind == "NAVIGATE":
+            self._handle_navigate(message, rid)
+        elif kind == "COLLECT_BLOCK":
+            self._handle_collect(message, rid)
+        elif kind == "DIG_DOWN":
+            self._handle_dig_down(message, rid)
+        elif kind == "ASCEND":
+            self._handle_ascend(message, rid)
+        elif kind == "FOLLOW_ENTITY":
+            self._handle_follow(message, rid)
+        elif kind == "ENGAGE_ENTITY":
+            self._handle_engage(message, rid)
+        elif kind == "PLAYER_ACTION":
+            self._handle_player_action(message, rid)
+        elif kind == "CONTAINER_TRANSFER":
+            self._handle_container_transfer(message, rid)
+        elif kind == "CRAFT_ITEM":
+            self._handle_craft_item(message, rid)
+        elif kind == "FURNACE_TRANSFER":
+            self._handle_furnace_transfer(message, rid)
+        elif kind == "MUTATION_VERDICT":
+            self._handle_verdict(message)
+        elif kind == "QUERY_ACTION":
+            self._handle_query(message, rid)
+        elif kind == "CANCEL_ACTION":
+            self._handle_cancel(message, rid)
+        elif kind == "BODY_STATE":
+            self._emit_response(rid, "BODY_STATE_RESULT", {
+                "bot": message.get("bot_name"),
+                "missing": not self.present,
+                "position": {"x": self.position[0], "y": self.position[1], "z": self.position[2]},
+                "yaw": 90.0, "pitch": 0.0,
+                "health": 18.0, "food": 17, "air": 300,
+                "dimension": "minecraft:overworld",
+                "game_time": 123456,
+                "inventory_raw": "0=minecraft:oak_log*3;",
+                "inventory_hash": "inventory-hash",
+                "inventory_counts": {"minecraft:oak_log": 3},
+                "selected_slot": 0,
+                "selected_item": "minecraft:oak_log",
+                "offhand_item": None,
+                "effects": [],
+                "sleeping": False,
+                "weather": "clear",
+                "body_owner": None,
+                "pending_action_count": 0,
+                "hazard_unresolved": None,
+            })
+        elif kind == "FIND_BLOCKS":
+            self._handle_find_blocks(message, rid)
+        elif kind == "INVENTORY":
+            if message.get("bot_name") == "MissingBot":
+                self._emit_response(rid, "INVENTORY_RESULT", {
+                    "bot": "MissingBot",
+                    "missing": True,
+                })
+                return
+            start = max(0, min(45, int(message.get("start", 0))))
+            limit = max(1, min(46, int(message.get("limit", 46))))
+            end = min(46, start + limit)
+            slots = []
+            for slot in range(start, end):
+                item = "minecraft:stone" if slot == 0 else "minecraft:diamond_helmet" if slot == 39 else None
+                count = 3 if slot == 0 else 1 if slot == 39 else 0
+                slots.append({
+                    "slot": slot,
+                    "slotType": _inventory_slot_type(slot),
+                    "slotLabel": _inventory_slot_label(slot),
+                    "empty": item is None,
+                    "item": item,
+                    "count": count,
+                    "stackRaw": None if item is None else json.dumps({
+                        "id": item,
+                        "count": count,
+                        "components": {"minecraft:damage": 7} if slot == 39 else {},
+                    }, separators=(",", ":")),
+                })
+            self._emit_response(rid, "INVENTORY_RESULT", {
+                "bot": message.get("bot_name"),
+                "missing": False,
+                "start": start,
+                "limit": limit,
+                "nextStart": None if end >= 46 else end,
+                "totalSlots": 46,
+                "slots": slots,
+            })
+        elif kind == "CONTAINER_READ":
+            if message.get("bot_name") == "MissingBot":
+                self._emit_response(rid, "CONTAINER_READ_RESULT", {
+                    "bot": "MissingBot",
+                    "missing": True,
+                })
+                return
+            start = max(0, min(26, int(message.get("start", 0))))
+            limit = max(1, min(27, int(message.get("limit", 27))))
+            end = min(27, start + limit)
+            slots = []
+            for slot in range(start, end):
+                item = "minecraft:diamond" if slot == 0 else None
+                count = 3 if slot == 0 else 0
+                slots.append({
+                    "slot": slot,
+                    "slotType": "container",
+                    "slotLabel": f"container.{slot}",
+                    "empty": item is None,
+                    "item": item,
+                    "count": count,
+                    "stackRaw": None if item is None else '{"id":"minecraft:diamond","count":3}',
+                })
+            self._emit_response(rid, "CONTAINER_READ_RESULT", {
+                "bot": message.get("bot_name"),
+                "missing": False,
+                "pos": message.get("pos"),
+                "start": start,
+                "limit": limit,
+                "nextStart": None if end >= 27 else end,
+                "totalSlots": 27,
+                "slots": slots,
+            })
+        elif kind == "RECIPE_READ":
+            item = message.get("item")
+            recipe_type = message.get("recipe_type", "crafting")
+            variants = []
+            if item == "minecraft:oak_planks" and recipe_type == "crafting":
+                variants = [{
+                    "recipe_id": "minecraft:oak_planks",
+                    "output_item": "minecraft:oak_planks",
+                    "output_count": 4,
+                    "recipe_kind": "shapeless",
+                    "width": 0,
+                    "height": 0,
+                    "ingredient_groups": [["minecraft:oak_log"]],
+                    "requires_table": False,
+                }]
+            elif item == "minecraft:iron_ingot" and recipe_type == "smelting":
+                variants = [{
+                    "recipe_id": "minecraft:iron_ingot_from_smelting_raw_iron",
+                    "output_item": "minecraft:iron_ingot",
+                    "output_count": 1,
+                    "recipe_kind": "smelting",
+                    "width": 1,
+                    "height": 1,
+                    "ingredient_groups": [["minecraft:raw_iron"]],
+                    "requires_table": False,
+                }]
+            self._emit_response(rid, "RECIPE_READ_RESULT", {
+                "bot": message.get("bot_name"),
+                "missing": False,
+                "found": bool(variants),
+                "item": item,
+                "recipe_type": recipe_type,
+                "variant_count": len(variants),
+                "variants": variants,
+                "server_cost_micros": 120,
+            })
+        elif kind == "WORLD_READ":
+            self._handle_world_read(message, rid)
+        elif kind == "ENTITY_READ":
+            self._handle_entity_read(message, rid)
+
+    def _handle_find_blocks(self, message: dict, rid: str) -> None:
+        if message.get("bot_name") == "MissingBot":
+            self._emit_error(rid, "body_missing", retryable=True)
+            return
+        all_matches = [
+            {
+                "x": 1,
+                "y": 64,
+                "z": 0,
+                "block_id": "minecraft:oak_log",
+                "state": "SOLID",
+                "distance_squared": 1.0,
+            },
+            {
+                "x": 4,
+                "y": 65,
+                "z": 0,
+                "block_id": "minecraft:oak_log",
+                "state": "SOLID",
+                "distance_squared": 17.0,
+            },
+            {
+                "x": 7,
+                "y": 64,
+                "z": 0,
+                "block_id": "minecraft:oak_log",
+                "state": "SOLID",
+                "distance_squared": 49.0,
+            },
+        ]
+        start = 2 if message.get("cursor") == "find-page-2" else 0
+        end = min(len(all_matches), start + int(message.get("limit", 32)))
+        self._emit_response(rid, "FIND_BLOCKS_RESULT", {
+            "server_cost_micros": 90,
+            "start": start,
+            "total_matches": len(all_matches),
+            "index_generation": 321,
+            "coverage_complete": True,
+            "unloaded_chunk_count": 0,
+            "result_capped": False,
+            "next_cursor": "find-page-2" if end < len(all_matches) else None,
+            "matches": all_matches[start:end],
+        })
+
+    def _handle_navigate(self, message: dict, rid: str) -> None:
+        action = message["action_id"]
+        self._navigate_action = action
+        if self.scenario == "owner_busy":
+            self._emit_error(rid, "owner_busy", retryable=True,
+                             extra={"owner_action_id": "other-1", "owner_priority": "ACTION"})
+            return
+        self._emit_response(rid, "NAVIGATE_ACK", {"action_id": action, "state": "accepted"})
+        self._emit_event("owner_acquired", action, {"type": "NAVIGATE", "priority": "ACTION"})
+        if self.scenario == "navigate_no_path":
+            self._emit_terminal(action, {"classification": "failed", "reason": "no_path",
+                                        "failure_detail": "replan_budget_exhausted:arrival_unstable",
+                                         "elapsed_ticks": 12, "replans": 0})
+        elif self.scenario == "navigate_preempted":
+            self._emit_terminal(action, {
+                "classification": "preempted",
+                "reason": "preempted",
+                "paused": True,
+                "preempted_by": "survival-lava-1",
+                "preempted_by_priority": "SURVIVAL",
+            })
+        elif self.scenario == "drop_before_terminal":
+            self._pending_action = action
+        elif self.scenario == "silent_terminal":
+            self._pending_action = action
+        elif self.scenario == "navigate_running":
+            self._pending_action = action
+        else:
+            self._emit_event("path_planned", action, {"waypoints": 20, "partial": False})
+            terminal = {"classification": "completed", "reason": "goal_satisfied",
+                        "elapsed_ticks": 88, "replans": 2,
+                        "final_x": 10.0, "final_y": 64.0, "final_z": 0.0}
+            if message.get("final_reach_distance") is not None:
+                terminal["final_reach_distance"] = message["final_reach_distance"]
+            self._emit_terminal(action, terminal)
+
+    def _handle_world_read(self, message: dict, rid: str) -> None:
+        scope = message["scope"]
+        if message.get("bot_name") == "MissingBot":
+            self._emit_response(rid, "WORLD_READ_RESULT", {
+                "bot": "MissingBot", "scope": scope, "missing": True,
+            })
+            return
+        params = message.get("params") or {}
+        if scope == "blockAt":
+            data = _fake_block_fact(
+                int(params["x"]), int(params["y"]), int(params["z"]),
+                block="minecraft:oak_log", properties={"axis": "x"},
+            )
+            if params.get("interaction_radius") is not None:
+                # The Body answers its live reach predicate when asked for one.
+                data["interaction_ready"] = True
+            complete = True
+            next_cursor = None
+        elif scope == "blockCells":
+            requested = params.get("cells") or []
+            start = int(params.get("start", 0))
+            limit = int(params.get("limit", 64))
+            end = min(len(requested), start + limit)
+            data = {
+                "start": start,
+                "limit": limit,
+                "nextStart": None if end >= len(requested) else end,
+                "total": len(requested),
+                "count": end - start,
+                "cells": [_fake_block_fact(*position) for position in requested[start:end]],
+            }
+            complete = end >= len(requested)
+            next_cursor = None if complete else str(end)
+        elif scope == "surfaceColumns":
+            requested = params.get("columns") or []
+            data = {
+                "start": 0, "limit": 64, "nextStart": None,
+                "total": len(requested), "count": len(requested),
+                "columns": [
+                    {
+                        "x": x, "z": z, "feetY": 65,
+                        "feetType": "minecraft:air", "feetState": "CLEAR",
+                        "headType": "minecraft:air", "headState": "CLEAR",
+                        "supportType": "minecraft:grass_block", "supportState": "SOLID",
+                    }
+                    for x, z in requested
+                ],
+            }
+            complete = True
+            next_cursor = None
+        else:
+            debug = scope == "debugBlocks"
+            block = _fake_block_fact(1, 64, 0, block="minecraft:oak_log")
+            data = {
+                "center": [0.5, 64.0, 0.5],
+                "radius": int(params.get("radius", 1)),
+                "start": 0,
+                "limit": int(params.get("limit", 64)),
+                "nextStart": None,
+                "total": 27,
+                "count": 1,
+                "blocks": [block],
+            }
+            if debug:
+                data.update({
+                    "cursor": _fake_block_fact(0, 64, 0, block="minecraft:air", state="CLEAR"),
+                    "feet": _fake_block_fact(0, 63, 0),
+                    "head": _fake_block_fact(0, 65, 0, block="minecraft:air", state="CLEAR"),
+                })
+            complete = True
+            next_cursor = None
+        self._emit_response(rid, "WORLD_READ_RESULT", {
+            "bot": message.get("bot_name"),
+            "scope": scope,
+            "missing": False,
+            "ok": True,
+            "complete": complete,
+            "server_cost_micros": 125,
+            "data": data,
+            "uncertainty": [] if complete else [{"reason": "page_limit"}],
+            "next": next_cursor,
+        })
+
+    def _handle_entity_read(self, message: dict, rid: str) -> None:
+        scope = message["scope"]
+        if message.get("bot_name") == "MissingBot":
+            self._emit_response(rid, "ENTITY_READ_RESULT", {
+                "bot": "MissingBot", "scope": scope, "missing": True,
+            })
+            return
+        params = message.get("params") or {}
+        entities = [
+            {
+                "id": "guide-uuid",
+                "type": "minecraft:player",
+                "name": "MineBotGuide",
+                "pos": [12.5, 64.0, -3.5],
+                "health": 20.0,
+                "dist2": 4.0,
+            },
+            {
+                "id": "cow-uuid",
+                "type": "minecraft:cow",
+                "name": "Cow",
+                "pos": [14.5, 64.0, -3.5],
+                "health": 10.0,
+                "dist2": 16.0,
+            },
+            {
+                "id": "item-uuid",
+                "type": "minecraft:item",
+                "name": "Oak Log",
+                "pos": [11.0, 64.0, -3.5],
+                "health": None,
+                "dist2": 0.25,
+            },
+            {
+                "id": "zombie-uuid",
+                "type": "minecraft:zombie",
+                "name": "Zombie",
+                "pos": [13.5, 64.0, -3.5],
+                "health": 20.0,
+                "dist2": 9.0,
+            },
+        ]
+        if scope == "nearbyHostiles":
+            entities = [entity for entity in entities if entity["type"] == "minecraft:zombie"]
+        wanted_types = {
+            str(value) if ":" in str(value) else f"minecraft:{value}"
+            for value in params.get("types") or []
+        }
+        wanted_name = params.get("name")
+        matches = [
+            entity for entity in entities
+            if (not wanted_types or entity["type"] in wanted_types)
+            and (wanted_name in {None, ""} or entity["name"] == wanted_name)
+        ]
+        matches.sort(key=lambda entity: (entity["dist2"], entity["id"]))
+        limit = max(1, min(128, int(params.get("limit", 32))))
+        complete = len(matches) <= limit
+        self._emit_response(rid, "ENTITY_READ_RESULT", {
+            "bot": message.get("bot_name"),
+            "scope": scope,
+            "missing": False,
+            "ok": True,
+            "complete": complete,
+            "server_cost_micros": 75,
+            "data": {
+                "center": [10.5, 64.0, -3.5],
+                "radius": int(params.get("radius", 1)),
+                "limit": limit,
+                "count": min(limit, len(matches)),
+                "totalMatches": len(matches),
+                "entities": matches[:limit],
+            },
+            "uncertainty": [] if complete else [{"reason": "limit_exceeded"}],
+            "next": None if complete else "limit",
+        })
+
+    def _handle_collect(self, message: dict, rid: str) -> None:
+        action = message["action_id"]
+        self._collect_action = action
+        self._collect_request = dict(message)
+        target = list(message["target"])
+        block_id = str(message["expected_block_id"])
+        self._emit_response(rid, "COLLECT_BLOCK_ACK", {
+            "action_id": action,
+            "state": "accepted",
+            "contract_version": 2,
+            "target": target,
+            "excavation_budget": int(message.get("excavation_budget", 0)),
+        })
+        self._emit_event("owner_acquired", action, {"type": "COLLECT_BLOCK", "priority": "ACTION"})
+        self._emit_event("target_committed", action, {
+            "x": target[0], "y": target[1], "z": target[2], "block_id": block_id,
+        })
+        self._emit_proposal(action, "mp-1", block_id, *target)
+
+    def _handle_dig_down(self, message: dict, rid: str) -> None:
+        action = message["action_id"]
+        self._emit_response(rid, "DIG_DOWN_ACK", {"action_id": action, "state": "accepted"})
+        self._emit_event("owner_acquired", action, {"type": "DIG_DOWN", "priority": "ACTION"})
+        self._emit_terminal(action, {
+            "classification": "completed",
+            "reason": "dig_down_target_reached",
+            "target_y": message["target_y"],
+            "steps_completed": 2,
+            "blocks_descended": 2,
+            "final_x": 10.5,
+            "final_y": float(message["target_y"]),
+            "final_z": -3.5,
+            "final_feet_y": message["target_y"],
+            "broken": [
+                {"x": 10, "y": message["target_y"] + 1, "z": -4, "block_id": "minecraft:stone"},
+                {"x": 10, "y": message["target_y"], "z": -4, "block_id": "minecraft:stone"},
+            ],
+        })
+
+    def _handle_ascend(self, message: dict, rid: str) -> None:
+        action = message["action_id"]
+        self._emit_response(rid, "ASCEND_ACK", {"action_id": action, "state": "accepted"})
+        self._emit_event("owner_acquired", action, {"type": "ASCEND", "priority": "RECOVERY"})
+        self._emit_event("ascent_pillar_verified", action, {
+            "x": 1, "y": 64, "z": 0, "block_id": "minecraft:cobblestone",
+        })
+        self._emit_event("ascent_pillar_verified", action, {
+            "x": 1, "y": 65, "z": 0, "block_id": "minecraft:cobblestone",
+        })
+        self._emit_event("ascent_step_verified", action, {"x": 1, "y": 65, "z": 0})
+        self._emit_terminal(action, {
+            "classification": "completed",
+            "reason": "surface_reached",
+            "final_y": 70,
+            "ascend_steps": 6,
+            "break_steps": 12,
+            "pillar_steps": 2,
+            "pillar_fallback_from": "stair_route_unavailable",
+            "surface_route_attempted": True,
+            "surface_route_used": False,
+            "surface_route_replans": 1,
+            "surface_candidate_count": 12,
+            "surface_route_failure": "no_path",
+            "recovery_staging_attempts": 3,
+            "recovery_staging_candidate_total": 9,
+            "recovery_staging_best_headroom": 6,
+            "recovery_staging_frontier_y": 76,
+            "pillar_continuation_preflight_count": 2,
+            "pillar_continuation_preflight_allowed": 1,
+            "placed": [
+                {"x": 1, "y": 64, "z": 0, "block_id": "minecraft:cobblestone"},
+                {"x": 1, "y": 65, "z": 0, "block_id": "minecraft:cobblestone"},
+            ],
+            "elapsed_ticks": 280,
+        })
+
+    def _handle_engage(self, message: dict, rid: str) -> None:
+        action = message["action_id"]
+        self._emit_response(rid, "ENGAGE_ENTITY_ACK", {"action_id": action, "state": "accepted"})
+        self._emit_event("owner_acquired", action, {"type": "ENGAGE_ENTITY", "priority": "ACTION"})
+        self._emit_terminal(action, {
+            "classification": "completed",
+            "reason": "killed",
+            "success": True,
+            "target_uuid": message.get("target_uuid"),
+            "target_type": "minecraft:husk",
+            "target_id": message.get("target_uuid"),
+            "target_name": "Husk",
+            "target_health": 0.0,
+            "target_initial_health": 20.0,
+            "damage_observed": True,
+            "persistent_target": True,
+            "attacks": 4,
+            "cooldown_ticks": message.get("cooldown_ticks", 10),
+            "min_attack_interval_ticks": message.get("cooldown_ticks", 10),
+            "max_attack_interval_ticks": message.get("cooldown_ticks", 10),
+        })
+
+    def _handle_follow(self, message: dict, rid: str) -> None:
+        action = message["action_id"]
+        self._emit_response(rid, "FOLLOW_ENTITY_ACK", {"action_id": action, "state": "accepted"})
+        self._emit_event("owner_acquired", action, {"type": "FOLLOW_ENTITY", "priority": "ACTION"})
+        self._emit_terminal(action, {
+            "classification": "completed",
+            "reason": "arrived",
+            "success": True,
+            "target_uuid": message.get("target_uuid"),
+            "target_type": "minecraft:player",
+            "target_id": message.get("target_uuid"),
+            "target_name": "Guide",
+            "keep_radius": message.get("keep_radius", 3.0),
+            "final_distance": 2.5,
+            "elapsed_ticks": message.get("timeout_ticks", 600),
+            "target_replans": 1,
+        })
+
+    def _handle_player_action(self, message: dict, rid: str) -> None:
+        action_id = message["action_id"]
+        action = message["action"]
+        params = message.get("params") or {}
+        self._emit_response(rid, "PLAYER_ACTION_ACK", {"action_id": action_id, "state": "accepted"})
+        self._emit_event("owner_acquired", action_id, {"type": f"PLAYER_ACTION:{action}", "priority": "ACTION"})
+        no_effect = self.scenario == "player_action_no_effect" and action == "useItem"
+        facts = {
+            "classification": "failed" if no_effect else "completed",
+            "reason": "no_effect" if no_effect else "completed",
+            "success": not no_effect,
+            "stopped_reason": "no_effect" if no_effect else "completed",
+        }
+        if action == "selectItem":
+            facts.update({"item": params.get("item"), "slot": 2, "count": 3, "moved_to_hotbar": False})
+        elif action == "lookAt":
+            facts.update({"target": params.get("target"), "yaw": 45.0, "pitch": -5.0, "alignment": 1.0})
+        elif action == "stop":
+            pass
+        elif action == "moveItem":
+            facts.update({
+                "from_slot": params.get("from_slot"),
+                "to_slot": params.get("to_slot"),
+                "item": "minecraft:stone",
+                "count": params.get("count", 3),
+                "from_before": {"item": "minecraft:stone", "count": 8},
+                "from_after": {"item": "minecraft:stone", "count": 5},
+                "to_before": {"item": None, "count": 0},
+                "to_after": {"item": "minecraft:stone", "count": 3},
+            })
+        elif action == "dropItem":
+            facts.update({
+                "slot": params.get("slot", 0),
+                "mode": params.get("mode", "one"),
+                "item": "minecraft:diamond",
+                "count_before": 3,
+                "count_after": 2,
+                "slot_before": {"item": "minecraft:diamond", "count": 3},
+                "slot_after": {"item": "minecraft:diamond", "count": 2},
+            })
+        elif action == "handoffItem":
+            facts.update({
+                "receiver": params.get("receiver"),
+                "item": params.get("item"),
+                "requested_count": params.get("count", 1),
+                "spawned_count": params.get("count", 1),
+                "source_slot": 18,
+                "slot_before": {"item": params.get("item"), "count": params.get("count", 1)},
+                "slot_after": {"item": None, "count": 0},
+                "receiver_pos": [12.5, 64.0, -3.5],
+                "receiver_count_before": 0,
+                "receiver_count_after": params.get("count", 1),
+                "pickup_receipt": {
+                    "player": params.get("receiver"),
+                    "item": params.get("item"),
+                    "count": params.get("count", 1),
+                    "tick": 604,
+                },
+            })
+        elif action == "igniteBlock":
+            facts.update({
+                "target": params.get("target"),
+                "expected_type": "minecraft:fire",
+                "block_after": "minecraft:fire",
+                "item": params.get("item"),
+                "method": "physical",
+                "final_pos": [10.5, 64.0, -3.5],
+            })
+        elif action == "sowCrop":
+            target = params.get("target") or [1, 64, 0]
+            facts.update({
+                "target": target,
+                "crop_pos": [target[0], target[1] + 1, target[2]],
+                "expected_type": params.get("crop_block"),
+                "block_after": params.get("crop_block"),
+                "item": params.get("seed_item"),
+                "method": "physical",
+                "item_count_before": 3,
+                "item_count_after": 2,
+                "final_pos": [10.5, 64.0, -3.5],
+            })
+        elif action == "useItem":
+            facts.update({
+                "mode": params.get("mode", "once"),
+                "item": params.get("item", "unknown"),
+                "ticks": params.get("ticks", 1),
+                "inventory_changed": True,
+                "start_pos": [10.5, 64.0, -3.5],
+                "final_pos": [10.5, 64.0, -3.5],
+            })
+        elif action == "mineBlock":
+            facts.update({
+                "target": params.get("target"),
+                "block_type": params.get("block_type"),
+                "block_after": "minecraft:air",
+                "final_pos": [10.5, 64.0, -3.5],
+            })
+        elif action == "placeBlock":
+            facts.update({
+                "target": params.get("target"),
+                "block_type": params.get("block_type"),
+                "block_after": params.get("block_type"),
+                "item_count_before": 3,
+                "item_count_after": 2,
+                "final_pos": [10.5, 64.0, -3.5],
+            })
+        elif action == "jump":
+            facts.update({
+                "position_before": [10.5, 64.0, -3.5],
+                "position_after": [10.5, 64.42, -3.5],
+                "gained_y": 0.42,
+            })
+        self._emit_terminal(action_id, facts)
+
+    def _handle_container_transfer(self, message: dict, rid: str) -> None:
+        action_id = message["action_id"]
+        self._container_action = action_id
+        self._container_params = dict(message)
+        self._emit_response(rid, "CONTAINER_TRANSFER_ACK", {"action_id": action_id, "state": "accepted"})
+        self._emit_event("owner_acquired", action_id, {"type": "CONTAINER_TRANSFER", "priority": "ACTION"})
+        self._emit_proposal(
+            action_id,
+            "mp-container-1",
+            "minecraft:chest",
+            *message.get("pos", [1, 64, 0]),
+            kind="open",
+            context="activate",
+        )
+
+    def _handle_craft_item(self, message: dict, rid: str) -> None:
+        action_id = message["action_id"]
+        self._emit_response(rid, "CRAFT_ITEM_ACK", {"action_id": action_id, "state": "accepted"})
+        self._emit_event("owner_acquired", action_id, {"type": "CRAFT_ITEM", "priority": "ACTION"})
+        failed = self.scenario == "craft_recipe_mismatch"
+        output = message.get("output") or {}
+        self._emit_terminal(action_id, {
+            "classification": "failed" if failed else "completed",
+            "reason": "recipe_mismatch" if failed else "completed",
+            "success": not failed,
+            "stopped_reason": "recipe_mismatch" if failed else "completed",
+            "recipe_id": None if failed else "minecraft:oak_planks",
+            "crafts": 0 if failed else 1,
+            "output_item": output.get("item"),
+            "output_count": output.get("count"),
+            "output_slot": output.get("slot"),
+            "inputs_before": [{"slot": 0, "item": "minecraft:oak_log", "count": 1}],
+            "inputs_after": [{"slot": 0, "item": None, "count": 0}],
+            "output_before": {"slot": output.get("slot"), "item": None, "count": 0},
+            "output_after": {"slot": output.get("slot"), "item": output.get("item"), "count": output.get("count")},
+        })
+
+    def _handle_furnace_transfer(self, message: dict, rid: str) -> None:
+        action_id = message["action_id"]
+        self._furnace_action = action_id
+        self._furnace_params = dict(message)
+        self._emit_response(rid, "FURNACE_TRANSFER_ACK", {"action_id": action_id, "state": "accepted"})
+        self._emit_event("owner_acquired", action_id, {"type": "FURNACE_TRANSFER", "priority": "ACTION"})
+        self._emit_proposal(
+            action_id,
+            "mp-furnace-1",
+            "minecraft:furnace",
+            *message.get("pos", [1, 64, 0]),
+            kind="open",
+            context="activate",
+        )
+
+    def _handle_verdict(self, message: dict) -> None:
+        allow = bool(message.get("allow"))
+        self.verdict_seen.append((message.get("proposal_id"), allow))
+        if getattr(self, "_furnace_action", None) is not None:
+            action = self._furnace_action
+            params = self._furnace_params
+            if allow:
+                count = int(params.get("count", 1))
+                slot = params.get("furnace_slot")
+                direction = params.get("direction")
+                item = "minecraft:iron_ingot" if slot == "output" else (
+                    "minecraft:coal" if slot == "fuel" else "minecraft:raw_iron"
+                )
+                furnace_before = count if direction == "furnace_to_bot" else 0
+                furnace_after = 0 if direction == "furnace_to_bot" else count
+                bot_before = 0 if direction == "furnace_to_bot" else count
+                bot_after = count if direction == "furnace_to_bot" else 0
+                self._emit_event("mutation_allowed", action, {"proposal_id": "mp-furnace-1"})
+                self._emit_terminal(action, {
+                    "classification": "completed",
+                    "reason": "completed",
+                    "success": True,
+                    "stopped_reason": "completed",
+                    "direction": direction,
+                    "pos": params.get("pos"),
+                    "furnace_slot": slot,
+                    "bot_slot": params.get("bot_slot"),
+                    "item": item,
+                    "count": count,
+                    "furnace_before": {"item": item if furnace_before else None, "count": furnace_before},
+                    "furnace_after": {"item": item if furnace_after else None, "count": furnace_after},
+                    "bot_before": {"item": item if bot_before else None, "count": bot_before},
+                    "bot_after": {"item": item if bot_after else None, "count": bot_after},
+                })
+            else:
+                denial = f"governance_denied:{message.get('reason')}"
+                self._emit_event("mutation_denied", action, {
+                    "proposal_id": "mp-furnace-1", "reason": denial,
+                })
+                self._emit_terminal(action, {
+                    "classification": "failed",
+                    "reason": denial,
+                    "success": False,
+                    "stopped_reason": denial,
+                    "direction": params.get("direction"),
+                    "pos": params.get("pos"),
+                    "furnace_slot": params.get("furnace_slot"),
+                    "bot_slot": params.get("bot_slot"),
+                    "count": 0,
+                })
+            return
+        if getattr(self, "_container_action", None) is not None:
+            action = self._container_action
+            params = self._container_params
+            if allow:
+                count = int(params.get("count", 1))
+                self._emit_event("mutation_allowed", action, {"proposal_id": "mp-container-1"})
+                self._emit_terminal(action, {
+                    "classification": "completed",
+                    "reason": "partial",
+                    "success": True,
+                    "stopped_reason": "partial",
+                    "direction": params.get("direction"),
+                    "pos": params.get("pos"),
+                    "container_slot": params.get("container_slot"),
+                    "bot_slot": params.get("bot_slot"),
+                    "item": "minecraft:diamond",
+                    "count": count,
+                    "container_before": {"item": "minecraft:diamond", "count": 3},
+                    "container_after": {"item": "minecraft:diamond", "count": 3 - count},
+                    "bot_before": {"item": None, "count": 0},
+                    "bot_after": {"item": "minecraft:diamond", "count": count},
+                })
+            else:
+                denial = f"governance_denied:{message.get('reason')}"
+                self._emit_event("mutation_denied", action, {
+                    "proposal_id": "mp-container-1", "reason": denial,
+                })
+                self._emit_terminal(action, {
+                    "classification": "failed",
+                    "reason": denial,
+                    "success": False,
+                    "stopped_reason": denial,
+                    "direction": params.get("direction"),
+                    "pos": params.get("pos"),
+                    "container_slot": params.get("container_slot"),
+                    "bot_slot": params.get("bot_slot"),
+                    "count": 0,
+                })
+            return
+        action = getattr(self, "_collect_action", "collect-1")
+        collect_request = getattr(self, "_collect_request", {})
+        target = list(collect_request.get("target", [5, 64, 5]))
+        block_id = str(collect_request.get("expected_block_id", "minecraft:oak_log"))
+        expected_items = list(collect_request.get("expected_item_ids") or [block_id])
+        item_id = str(expected_items[0])
+        if allow:
+            self._emit_event("mutation_allowed", action, {"proposal_id": "mp-1"})
+            self._emit_event("mutation_verified", action, {"block_id": block_id, "now": "minecraft:air"})
+            self._emit_terminal(action, {
+                "classification": "completed", "reason": "collected",
+                "inventory_delta": {"item_id": item_id, "before": 0, "after": 1},
+                "mined_block": {
+                    "x": target[0], "y": target[1], "z": target[2], "block_id": block_id,
+                },
+                "elapsed_ticks": 140,
+                "attempts_consumed": 1,
+                "budget_remaining": int(collect_request.get("excavation_budget", 0)),
+                "mutations_completed": 1,
+            })
+        else:
+            self._emit_event("mutation_denied", action, {"proposal_id": "mp-1", "reason": "protected_region"})
+            self._emit_terminal(action, {
+                "classification": "failed",
+                "reason": "governance_denied",
+                "phase_reason": "protected_region",
+                "attempts_consumed": 1,
+                "budget_remaining": int(collect_request.get("excavation_budget", 0)),
+                "mutations_completed": 0,
+            })
+
+    def _handle_query(self, message: dict, rid: str) -> None:
+        action = message["action_id"]
+        pending = getattr(self, "_pending_action", None)
+        if self.scenario == "navigate_running" and action == pending:
+            if getattr(self, "_cancel_requested", False):
+                self._emit_response(rid, "QUERY_ACTION_RESULT", {
+                    "action_id": action,
+                    "state": "terminal",
+                    "terminal": {
+                        "classification": "canceled",
+                        "reason": "cancel_requested",
+                        "elapsed_ticks": 9,
+                    },
+                })
+            else:
+                self._emit_response(rid, "QUERY_ACTION_RESULT", {
+                    "action_id": action,
+                    "state": "running",
+                    "bot": "Bot",
+                    "action_type": "NAVIGATE",
+                    "cancel_requested": False,
+                })
+            return
+        if action == pending:
+            self._emit_response(rid, "QUERY_ACTION_RESULT", {
+                "action_id": action, "state": "terminal",
+                "terminal": {"classification": "completed", "reason": "goal_satisfied",
+                             "elapsed_ticks": 90, "replans": 0},
+            })
+        else:
+            self._emit_response(rid, "QUERY_ACTION_RESULT", {"action_id": action, "state": "unknown"})
+
+    def _handle_cancel(self, message: dict, rid: str) -> None:
+        action = message["action_id"]
+        if action != getattr(self, "_pending_action", None):
+            self._emit_response(rid, "CANCEL_ACTION_RESULT", {
+                "action_id": action,
+                "state": "unknown",
+            })
+            return
+        self._cancel_requested = True
+        self._emit_response(rid, "CANCEL_ACTION_RESULT", {
+            "action_id": action,
+            "state": "cancel_requested",
+        })
+
+    def _emit_response(self, rid, kind, payload) -> None:
+        frame = {"channel": self.CHANNEL, "type": kind, "request_id": rid, "server_tick": self._tick, **payload}
+        self._out.append(json.dumps(frame))
+
+    def _emit_error(self, rid, code, *, retryable, extra=None) -> None:
+        frame = {"channel": self.CHANNEL, "type": "ERROR", "request_id": rid,
+                 "code": code, "message": code, "retryable": retryable, "server_tick": self._tick, **(extra or {})}
+        self._out.append(json.dumps(frame))
+
+    def _emit_event(self, name, action, data) -> None:
+        self._seq += 1
+        frame = {"channel": self.CHANNEL, "type": "EVENT", "bot": "Bot", "seq": self._seq,
+                 "tick": self._tick, "event": name, "action_id": action, "data": data}
+        self._history.append(dict(frame))
+        self._out.append(json.dumps(frame))
+
+    def _emit_terminal(self, action, data) -> None:
+        self._emit_event("action_terminal", action, data)
+
+    def _emit_proposal(self, action, pid, block_id, x, y, z, *, kind="break", context=None) -> None:
+        frame = {"channel": self.CHANNEL, "type": "MUTATION_PROPOSAL", "proposal_id": pid,
+                 "bot": "Bot", "action_id": action, "server_tick": self._tick,
+                 "mutation": {"kind": kind, "x": x, "y": y, "z": z, "block_id": block_id}}
+        if context is not None:
+            frame["mutation"]["context"] = context
+        self._out.append(json.dumps(frame))
+
+
+class ConcurrentRecvServer(FakeBodyServer):
+    def __init__(self) -> None:
+        super().__init__()
+        self.active_recvs = 0
+        self.max_active_recvs = 0
+        self._recv_lock = threading.Lock()
+
+    def recv(self, timeout: float) -> str:
+        with self._recv_lock:
+            self.active_recvs += 1
+            self.max_active_recvs = max(self.max_active_recvs, self.active_recvs)
+        try:
+            time.sleep(0.01)
+            return super().recv(timeout)
+        finally:
+            with self._recv_lock:
+                self.active_recvs -= 1
+
+
+def _client(server, governance=None) -> JavaBodyClient:
+    return JavaBodyClient("Bot", lambda: server, governance, action_wall_timeout_s=5.0, recv_timeout_s=0.01)
+
+
+def test_connect_accounts_hello_in_negotiated_rate_window() -> None:
+    server = FakeBodyServer()
+    client = _client(server)
+
+    client.connect()
+
+    assert [request["type"] for request in server.requests] == ["HELLO"]
+    assert len(client._request_times) == 1
+
+
+def test_client_serializes_complete_exchanges_on_one_connection() -> None:
+    server = ConcurrentRecvServer()
+    client = _client(server)
+    barrier = threading.Barrier(3)
+    errors: list[Exception] = []
+
+    def read_state() -> None:
+        barrier.wait()
+        try:
+            client.request_response(lambda protocol: protocol.body_state("Bot"))
+        except Exception as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=read_state) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    barrier.wait()
+    for thread in threads:
+        thread.join(timeout=2.0)
+
+    assert errors == []
+    assert all(not thread.is_alive() for thread in threads)
+    assert server.max_active_recvs == 1
+    assert sum(request["type"] == "BODY_STATE" for request in server.requests) == 2
+
+
+def test_read_exchange_ignores_late_response_from_abandoned_request() -> None:
+    server = FakeBodyServer()
+    client = _client(server)
+    client.connect()
+    abandoned = client.protocol.inventory("Bot", start=0, limit=46)
+    client._send(abandoned)
+
+    response = client.request_response(lambda protocol: protocol.body_state("Bot"))
+
+    assert response.request_type == "BODY_STATE"
+    assert response.payload["health"] == 18.0
+    assert [request["type"] for request in server.requests[-2:]] == [
+        "INVENTORY",
+        "BODY_STATE",
+    ]
+
+
+def test_navigate_complete_maps_to_arrived_with_metrics() -> None:
+    client = _client(FakeBodyServer())
+    client.connect()
+    result = client.navigate({"kind": "near", "x": 10, "y": 64, "z": 0, "range": 1.5})
+    assert result.success is True
+    assert result.reason == "arrived"
+    assert result.metrics["replans"] == 2
+    assert result.metrics["final_x"] == 10.0
+    assert result.metrics["final_y"] == 64.0
+    assert result.metrics["final_z"] == 0.0
+
+
+def test_navigate_no_path_keeps_typed_failure() -> None:
+    server = FakeBodyServer()
+    server.scenario = "navigate_no_path"
+    client = _client(server)
+    client.connect()
+    result = client.navigate({"kind": "near", "x": 99, "y": 64, "z": 0, "range": 1.5})
+    assert result.success is False
+    assert result.reason == "no_path"
+    assert result.can_retry is True
+    assert result.metrics["failure_detail"] == "replan_budget_exhausted:arrival_unstable"
+
+
+def test_execution_lane_cancellation_interrupts_java_terminal_wait() -> None:
+    server = FakeBodyServer()
+    server.scenario = "navigate_running"
+    client = JavaBodyClient(
+        "Bot",
+        lambda: server,
+        action_wall_timeout_s=2.0,
+        recv_timeout_s=0.01,
+    )
+    lane = SerialExecutionLane(thread_name="java-body-cancel-test")
+
+    async def scenario() -> tuple[int, bool]:
+        task = asyncio.create_task(
+            lane.run(client.navigate, {"kind": "xz", "x": 99, "z": 0})
+        )
+        while not any(request.get("type") == "NAVIGATE" for request in server.requests):
+            await asyncio.sleep(0.002)
+        cancelled_count = lane.request_cancel("session_command:quit")
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=0.5)
+        return cancelled_count, await lane.wait_idle(timeout_s=0.25)
+
+    try:
+        cancelled_count, idle = asyncio.run(scenario())
+    finally:
+        lane.close()
+
+    assert cancelled_count == 1
+    assert idle is True
+    assert lane.active_count == 0
+
+
+def test_survival_preemption_stays_typed_retryable_and_paused() -> None:
+    server = FakeBodyServer()
+    server.scenario = "navigate_preempted"
+    client = _client(server)
+    client.connect()
+
+    result = client.navigate({"kind": "xz", "x": 99, "z": 0})
+
+    assert result.success is False
+    assert result.reason == "preempted"
+    assert result.can_retry is True
+    assert result.metrics["paused"] is True
+    assert result.metrics["preempted_by_priority"] == "SURVIVAL"
+
+
+def test_navigate_precision_reach_is_sent_and_preserved_in_terminal_metrics() -> None:
+    server = FakeBodyServer()
+    client = _client(server)
+    client.connect()
+
+    result = client.navigate(
+        {"kind": "near", "x": 10, "y": 64, "z": 0, "range": 0.5},
+        final_reach_distance=0.1,
+    )
+
+    request = next(request for request in server.requests if request.get("type") == "NAVIGATE")
+    assert request["final_reach_distance"] == 0.1
+    assert result.metrics["final_reach_distance"] == 0.1
+
+
+def test_collect_terminal_metrics_exclude_deleted_cross_candidate_strategy_ledgers() -> None:
+    metrics = JavaBodyClient._terminal_metrics(
+        {
+            "classification": "completed",
+            "reason": "collected",
+            "approach_excavation_breaks": 12,
+            "mutations_completed": 13,
+            "planning_duplicate_skips": [
+                {
+                    "planner_kind": "governed_excavation",
+                    "reason": "planning_context_already_exhausted",
+                }
+            ],
+            "planning_duplicate_skip_total": 84,
+            "planning_duplicate_skips_truncated": True,
+            "candidate_state_transition_total": 11_063,
+            "candidate_state_transitions_truncated": True,
+            "attempt_failure_total": 70,
+            "attempt_failures_truncated": True,
+        }
+    )
+
+    assert metrics["approach_excavation_breaks"] == 12
+    assert metrics["mutations_completed"] == 13
+    assert "planning_duplicate_skips" not in metrics
+    assert "planning_duplicate_skip_total" not in metrics
+    assert "candidate_state_transition_total" not in metrics
+    assert "attempt_failure_total" not in metrics
+
+
+def test_terminal_metrics_preserve_the_bounded_decision_grade_core() -> None:
+    terminal = {
+        "classification": "failed",
+        "reason": "no_path",
+        "reason_class": "blocked",
+        "goal": {
+            "action_id": "collect-1",
+            "objective": "COLLECT_BLOCK",
+            "bot": "Bot",
+        },
+        "attempts_consumed": 8,
+        "budget_remaining": 0,
+        "closest_approach_distance": 11.5,
+        "unloaded_chunk_count": 0,
+        "elapsed_ticks": 400,
+        "terminal_phase": "approaching",
+        "active_approach_expanded_nodes": 1_200,
+        "active_approach_unloaded_touches": 3,
+        "evidence_truncated": True,
+        "evidence_omitted_fields": ["planning_attempts"],
+    }
+
+    metrics = JavaBodyClient._terminal_metrics(terminal)
+
+    assert metrics == {
+        key: value
+        for key, value in terminal.items()
+        if key not in {"classification", "reason"}
+    }
+
+
+def test_owner_busy_ack_becomes_a_retryable_toolresult() -> None:
+    server = FakeBodyServer()
+    server.scenario = "owner_busy"
+    client = _client(server)
+    client.connect()
+    result = client.navigate({"kind": "xz", "x": 1, "z": 2})
+    assert result.success is False
+    assert result.reason == "owner_busy"
+    assert result.can_retry is True
+    assert result.metrics["owner_action_id"] == "other-1"
+
+
+def test_collect_allow_completes_with_inventory_delta() -> None:
+    server = FakeBodyServer()
+    policy = GovernancePolicy(natural_regions=[Region("n", (-64, 0, -64), (64, 200, 64))])
+    client = _client(server, GovernanceAnswerer(policy))
+    client.connect()
+    result = client.collect_block(
+        (5, 64, 5),
+        expected_block_id="minecraft:oak_log",
+        expected_item_ids=["minecraft:oak_log"],
+    )
+    assert result.success is True
+    assert result.reason == "collected"
+    assert result.metrics["inventory_delta"]["after"] == 1
+    assert server.verdict_seen == [("mp-1", True)]
+
+
+def test_collect_request_carries_exact_target_and_expected_drop_independently() -> None:
+    server = FakeBodyServer()
+    policy = GovernancePolicy(natural_regions=[Region("n", (-64, 0, -64), (64, 200, 64))])
+    client = _client(server, GovernanceAnswerer(policy))
+    client.connect()
+
+    result = client.collect_block(
+        (5, 63, 5),
+        expected_block_id="minecraft:deepslate_iron_ore",
+        expected_item_ids=["minecraft:raw_iron"],
+        excavation_budget=3,
+    )
+
+    assert result.success is True
+    request = next(item for item in server.requests if item["type"] == "COLLECT_BLOCK")
+    assert request["contract_version"] == 2
+    assert request["target"] == [5, 63, 5]
+    assert request["expected_block_id"] == "minecraft:deepslate_iron_ore"
+    assert request["expected_item_ids"] == ["minecraft:raw_iron"]
+    assert request["excavation_budget"] == 3
+    assert all(
+        field not in request
+        for field in ("block_ids", "radius", "target_count", "candidate_budget")
+    )
+
+
+def test_collect_failed_designated_target_preserves_bounded_terminal_evidence() -> None:
+    class BlockedCollectServer(FakeBodyServer):
+        def _handle_collect(self, message: dict, rid: str) -> None:
+            action = message["action_id"]
+            self._emit_response(
+                rid,
+                "COLLECT_BLOCK_ACK",
+                {
+                    "action_id": action,
+                    "state": "accepted",
+                    "contract_version": 2,
+                    "target": list(message["target"]),
+                    "excavation_budget": int(message["excavation_budget"]),
+                },
+            )
+            self._emit_terminal(action, {
+                "classification": "failed",
+                "reason": "no_path",
+                "reason_class": "blocked",
+                "attempts_consumed": 2,
+                "budget_remaining": 0,
+                "closest_approach_distance": 4.5,
+                "unloaded_chunk_count": 0,
+            })
+
+    server = BlockedCollectServer()
+    client = _client(server)
+    client.connect()
+
+    result = client.collect_block(
+        (5, 63, 5),
+        expected_block_id="minecraft:deepslate_iron_ore",
+        expected_item_ids=["minecraft:raw_iron"],
+        excavation_budget=2,
+    )
+
+    assert result.success is False
+    assert result.reason == "no_path"
+    assert result.can_retry is True
+    assert result.metrics["attempts_consumed"] == 2
+    assert result.metrics["budget_remaining"] == 0
+    assert result.metrics["closest_approach_distance"] == 4.5
+    assert "target_count" not in result.metrics
+
+
+def test_dig_down_is_one_java_objective_with_final_position_truth() -> None:
+    server = FakeBodyServer()
+    client = _client(server)
+    client.connect()
+
+    result = client.dig_down(62, max_steps=3, max_clear_fall=1, timeout_ticks=600)
+
+    assert result.success is True
+    assert result.reason == "dig_down_target_reached"
+    assert result.metrics["final_feet_y"] == 62
+    assert result.metrics["steps_completed"] == 2
+    request = next(item for item in server.requests if item["type"] == "DIG_DOWN")
+    assert request["target_y"] == 62
+    assert request["max_steps"] == 3
+    assert request["max_clear_fall"] == 1
+    assert request["timeout_ticks"] == 600
+
+
+def test_collect_denied_by_governance_never_relabels_success() -> None:
+    server = FakeBodyServer()
+    policy = GovernancePolicy(
+        natural_regions=[Region("n", (-64, 0, -64), (64, 200, 64))],
+        protected_regions=[Region("base", (0, 0, 0), (10, 128, 10))],
+    )
+    client = _client(server, GovernanceAnswerer(policy))
+    client.connect()
+    result = client.collect_block(
+        (5, 64, 5),
+        expected_block_id="minecraft:oak_log",
+        expected_item_ids=["minecraft:oak_log"],
+    )
+    assert result.success is False
+    assert result.reason == "governance_denied"
+    assert server.verdict_seen == [("mp-1", False)]
+
+
+def test_collect_complete_ambiguous_risk_returns_model_actionable_scope_confirmation() -> None:
+    class AmbiguousRisk:
+        def assess(self, pos, block_type, context, *, bot_placements=None):
+            return StructureRiskAssessment(
+                pos=pos,
+                block_type=block_type,
+                level=StructureRiskLevel.AMBIGUOUS,
+                score=0.4,
+                complete=True,
+                sampled_cells=63,
+                signals=("local_axis_symmetry",),
+            )
+
+    server = FakeBodyServer()
+    policy = GovernancePolicy(
+        natural_regions=[Region("n", (-64, 0, -64), (64, 200, 64))],
+        structure_risk_assessor=AmbiguousRisk(),
+        require_structure_assessment=True,
+        bot_name="Bot",
+    )
+    client = _client(server, GovernanceAnswerer(policy))
+    client.connect()
+
+    result = client.collect_block(
+        (5, 64, 5),
+        expected_block_id="minecraft:oak_log",
+        expected_item_ids=["minecraft:oak_log"],
+    )
+
+    assert result.success is False
+    assert result.reason == "governance_confirmation_required"
+    assert result.can_retry is True
+    confirmation = result.metrics["governance_confirmation"]
+    assert confirmation["challenge_id"].startswith("gc-")
+    assert confirmation["context"] == "collect"
+    verdict = next(request for request in server.requests if request.get("type") == "MUTATION_VERDICT")
+    assert verdict["reason"] == (
+        f"governance_confirmation_required:{confirmation['challenge_id']}"
+    )
+    confirmed = policy.confirm_scope(
+        confirmation["challenge_id"],
+        "collect the requested natural log",
+    )
+    retried = client.collect_block(
+        (5, 64, 5),
+        expected_block_id="minecraft:oak_log",
+        expected_item_ids=["minecraft:oak_log"],
+    )
+    assert confirmed["confirmed"] is True
+    assert retried.success is True
+    assert server.verdict_seen == [("mp-1", False), ("mp-1", True)]
+
+
+def test_ascend_maps_verified_surface_terminal() -> None:
+    server = FakeBodyServer()
+    client = _client(server)
+
+    result = client.ascend(max_mutations=7, timeout_ticks=2_400)
+
+    assert result.success is True
+    assert result.reason == "surface_reached"
+    assert result.metrics["final_y"] == 70
+    assert result.metrics["ascend_steps"] == 6
+    assert result.metrics["pillar_steps"] == 2
+    assert result.metrics["pillar_fallback_from"] == "stair_route_unavailable"
+    assert result.metrics["surface_route_attempted"] is True
+    assert result.metrics["surface_route_used"] is False
+    assert result.metrics["surface_route_replans"] == 1
+    assert result.metrics["surface_candidate_count"] == 12
+    assert result.metrics["surface_route_failure"] == "no_path"
+    assert result.metrics["recovery_staging_attempts"] == 3
+    assert result.metrics["recovery_staging_candidate_total"] == 9
+    assert result.metrics["recovery_staging_best_headroom"] == 6
+    assert result.metrics["recovery_staging_frontier_y"] == 76
+    assert result.metrics["pillar_continuation_preflight_count"] == 2
+    assert result.metrics["pillar_continuation_preflight_allowed"] == 1
+    assert len(result.metrics["placed"]) == 2
+    request = next(item for item in server.requests if item["type"] == "ASCEND")
+    assert request["max_mutations"] == 7
+
+
+def test_ascend_records_server_verified_pillars_in_shared_governance() -> None:
+    policy = _policy()
+    client = _client(FakeBodyServer(), GovernanceAnswerer(policy))
+
+    result = client.ascend(timeout_ticks=2_400)
+
+    assert result.success is True
+    assert policy.bot_placements[(1, 64, 0)].purpose == "pillar"
+    assert policy.bot_placements[(1, 65, 0)].block_type == "cobblestone"
+
+
+def test_engage_entity_preserves_server_kill_facts_and_action_identity() -> None:
+    server = FakeBodyServer()
+    client = _client(server)
+
+    result = client.engage_entity(
+        "engage-1",
+        {
+            "target_uuid": HOSTILE_UUID,
+            "attack_range": 2.0,
+            "cooldown_ticks": 10,
+            "acquire_radius": 32,
+            "timeout_ticks": 400,
+            "disengage_health": 6.0,
+        },
+    )
+
+    request = next(request for request in server.requests if request.get("type") == "ENGAGE_ENTITY")
+    assert request["action_id"] == "engage-1"
+    assert request["target_uuid"] == HOSTILE_UUID
+    assert result.success is True
+    assert result.reason == "killed"
+    assert result.metrics["target_id"] == HOSTILE_UUID
+    assert result.metrics["target_health"] == 0.0
+    assert result.metrics["damage_observed"] is True
+    assert result.metrics["min_attack_interval_ticks"] == 10
+
+
+def test_combat_terminal_evidence_survives_java_body_and_python_transaction() -> None:
+    from minebot.body.combat import CombatTransactions
+    from minebot.brain.progress import combat_progress_evidence
+    from minebot.game.java_body import JavaBody
+
+    class CombatServer(FakeBodyServer):
+        def _emit_response(self, rid, kind, payload):
+            if kind == "ENTITY_READ_RESULT" and payload.get("data"):
+                payload = {**payload, "data": {**payload["data"], "entities": [
+                    {**entity, "id": HOSTILE_UUID}
+                    if entity["type"] == "minecraft:zombie" else entity
+                    for entity in payload["data"]["entities"]
+                ]}}
+            super()._emit_response(rid, kind, payload)
+
+    class LostTargetServer(CombatServer):
+        def _handle_engage(self, message, rid):
+            action = message["action_id"]
+            self._emit_response(rid, "ENGAGE_ENTITY_ACK", {"action_id": action, "state": "accepted"})
+            self._emit_terminal(action, {
+                "classification": "failed", "reason": "target_lost", "success": False,
+                "target_uuid": message["target_uuid"], "target_id": message["target_uuid"],
+                "target_health": None, "target_initial_health": 20.0,
+                "damage_observed": False, "persistent_target": True, "attacks": 1,
+            })
+
+    for server, expected in ((CombatServer(), ("observed_target_defeat",)), (LostTargetServer(), ())):
+        client = _client(server)
+        try:
+            body = JavaBody(client, "Bot")
+            result = CombatTransactions(body).engage_entity("nearest_hostile")
+            request = next(request for request in server.requests if request.get("type") == "ENGAGE_ENTITY")
+            assert result.metrics["action_id"] == request["action_id"]
+            assert result.metrics["target_initial_health"] == 20.0
+            assert combat_progress_evidence(result.to_payload()) == expected
+            assert result.success is bool(expected)
+            assert result.reason == ("killed" if expected else "target_lost")
+            if not expected:
+                assert result.metrics["target_health"] is None
+        finally:
+            client.close()
+
+
+def test_follow_entity_preserves_target_lock_and_final_distance() -> None:
+    server = FakeBodyServer()
+    client = _client(server)
+
+    result = client.follow_entity(
+        "follow-1",
+        {
+            "target_uuid": GUIDE_UUID,
+            "keep_radius": 3.0,
+            "replan_distance": 2.0,
+            "acquire_radius": 32,
+            "timeout_ticks": 200,
+        },
+    )
+
+    request = next(request for request in server.requests if request.get("type") == "FOLLOW_ENTITY")
+    assert request["action_id"] == "follow-1"
+    assert request["target_uuid"] == GUIDE_UUID
+    assert result.success is True
+    assert result.reason == "arrived"
+    assert result.metrics["target_id"] == GUIDE_UUID
+    assert result.metrics["final_distance"] == 2.5
+    assert result.metrics["target_replans"] == 1
+
+
+def test_no_governance_denies_proposals_by_default() -> None:
+    client = _client(FakeBodyServer())
+    client.connect()
+    result = client.collect_block(
+        (5, 64, 5),
+        expected_block_id="minecraft:oak_log",
+        expected_item_ids=["minecraft:oak_log"],
+    )
+    assert result.success is False
+    assert client._governance is None
+    # The proposal was answered with a denial, not left to time out silently.
+
+
+def test_transport_drop_reconciles_via_query_action() -> None:
+    server = FakeBodyServer()
+    server.scenario = "drop_before_terminal"
+    server._drop_after = 2
+    reconnects = {"n": 0}
+    connections = []
+
+    def connect():
+        reconnects["n"] += 1
+        if reconnects["n"] == 1:
+            connection = server
+        else:
+            connection = FakeBodyServer()
+            connection.scenario = "drop_before_terminal"
+            connection._pending_action = server._pending_action
+        connections.append(connection)
+        return connection
+
+    client = JavaBodyClient("Bot", connect, action_wall_timeout_s=5.0, recv_timeout_s=0.01)
+    client.connect()
+    result = client.navigate({"kind": "near", "x": 10, "y": 64, "z": 0, "range": 1.5})
+    assert result.success is True
+    assert result.reason == "arrived"
+    assert reconnects["n"] == 2
+    reconnect_types = [request.get("type") for request in connections[1].requests]
+    assert reconnect_types.index("RESUME_EVENTS") < reconnect_types.index("QUERY_ACTION")
+
+
+def test_silent_terminal_is_reconciled_without_waiting_for_wall_timeout() -> None:
+    server = FakeBodyServer()
+    server.scenario = "silent_terminal"
+    client = JavaBodyClient(
+        "Bot",
+        lambda: server,
+        action_wall_timeout_s=5.0,
+        recv_timeout_s=0.01,
+        terminal_query_interval_s=0.02,
+    )
+
+    started = time.monotonic()
+    result = client.navigate({"kind": "near", "x": 10, "y": 64, "z": 0, "range": 1.5})
+    elapsed = time.monotonic() - started
+
+    assert result.success is True
+    assert result.reason == "arrived"
+    assert elapsed < 0.5
+    assert result.metrics["terminal_delivery"]["source"] == "query"
+    assert result.metrics["terminal_delivery"]["query_count"] == 1
+    assert any(request["type"] == "QUERY_ACTION" for request in server.requests)
+
+
+def test_wall_deadline_cancels_and_reconciles_running_action_before_return() -> None:
+    server = FakeBodyServer()
+    server.scenario = "navigate_running"
+    client = JavaBodyClient(
+        "Bot",
+        lambda: server,
+        action_wall_timeout_s=0.03,
+        recv_timeout_s=0.005,
+        terminal_query_interval_s=1.0,
+        terminal_delivery_grace_s=0.1,
+    )
+
+    result = client.navigate({"kind": "xz", "x": 99, "z": 0})
+
+    assert result.success is False
+    assert result.reason == "cancel_requested"
+    assert result.can_retry is False
+    assert result.metrics["deadline_cancel_requested"] is True
+    assert result.metrics["terminal_delivery"]["source"] == "deadline_cancel_query"
+    request_types = [request["type"] for request in server.requests]
+    assert request_types.count("CANCEL_ACTION") == 1
+    assert request_types.index("CANCEL_ACTION") < request_types.index("QUERY_ACTION")
+
+
+def test_deadline_reconciliation_excludes_concurrent_body_watch_from_read_lane() -> None:
+    class ReconciliationReadServer(ConcurrentRecvServer):
+        def __init__(self) -> None:
+            super().__init__()
+            self.scenario = "navigate_running"
+            self.cancel_seen = threading.Event()
+
+        def _handle_cancel(self, message: dict, rid: str) -> None:
+            self._pending_action = message["action_id"]
+            super()._handle_cancel(message, rid)
+            self.cancel_seen.set()
+
+    action_server = FakeBodyServer()
+    action_server.scenario = "navigate_running"
+    read_server = ReconciliationReadServer()
+    read_client = JavaBodyClient(
+        "Bot",
+        lambda: read_server,
+        action_wall_timeout_s=0.03,
+        recv_timeout_s=0.01,
+        terminal_query_interval_s=1.0,
+        terminal_delivery_grace_s=0.2,
+        subscribe_events=False,
+    )
+    action_client = JavaBodyClient(
+        "Bot",
+        lambda: action_server,
+        action_wall_timeout_s=0.03,
+        recv_timeout_s=0.005,
+        terminal_query_interval_s=1.0,
+        terminal_delivery_grace_s=0.2,
+    )
+    action_client.configure_reconciliation_client(read_client)
+    watcher_errors: list[Exception] = []
+
+    def body_watch() -> None:
+        assert read_server.cancel_seen.wait(timeout=1.0)
+        try:
+            read_client.request_response(lambda protocol: protocol.body_state("Bot"))
+        except Exception as exc:
+            watcher_errors.append(exc)
+
+    watcher = threading.Thread(target=body_watch)
+    watcher.start()
+    result = action_client.navigate({"kind": "xz", "x": 99, "z": 0})
+    watcher.join(timeout=2.0)
+
+    assert result.reason == "cancel_requested"
+    assert watcher_errors == []
+    assert not watcher.is_alive()
+    assert read_server.max_active_recvs == 1
+
+
+def test_closed_read_transport_is_discarded_and_next_event_resume_reconnects() -> None:
+    class CloseOnResumeServer(FakeBodyServer):
+        def send(self, text: str) -> None:
+            message = json.loads(text)
+            if message.get("type") == "RESUME_EVENTS":
+                self.requests.append(dict(message))
+                self._closed = True
+                raise TransportClosed("closed during resume")
+            super().send(text)
+
+    first = CloseOnResumeServer()
+    second = FakeBodyServer()
+    connections = iter((first, second))
+    client = JavaBodyClient("Bot", lambda: next(connections), recv_timeout_s=0.01)
+    client.connect()
+    body = JavaBody(client, "Bot")
+    body.last_seq = 7
+
+    assert body.poll_events() == []
+    assert client.negotiated is True
+    resume = next(request for request in second.requests if request["type"] == "RESUME_EVENTS")
+    assert resume["after_seq"] == 7
+
+
+def test_wall_deadline_without_terminal_enters_existing_timeout_fence() -> None:
+    class NeverTerminalServer(FakeBodyServer):
+        def _handle_query(self, message: dict, rid: str) -> None:
+            action = message["action_id"]
+            self._emit_response(rid, "QUERY_ACTION_RESULT", {
+                "action_id": action,
+                "state": "running",
+                "bot": "Bot",
+                "action_type": "NAVIGATE",
+                "cancel_requested": bool(getattr(self, "_cancel_requested", False)),
+            })
+
+    server = NeverTerminalServer()
+    server.scenario = "navigate_running"
+    client = JavaBodyClient(
+        "Bot",
+        lambda: server,
+        action_wall_timeout_s=0.03,
+        recv_timeout_s=0.005,
+        terminal_query_interval_s=1.0,
+        terminal_delivery_grace_s=0.1,
+    )
+
+    with pytest.raises(BodyActionTimeoutError) as raised:
+        client.navigate({"kind": "xz", "x": 99, "z": 0})
+
+    diagnostics = raised.value.diagnostics
+    assert diagnostics["action_id"].startswith("Bot-nav-")
+    assert diagnostics["action_kind"] == "navigate"
+    assert diagnostics["deadline_cancel_requested"] is True
+    assert diagnostics["cancel_state"] == "cancel_requested"
+    request_types = [request["type"] for request in server.requests]
+    assert request_types.count("CANCEL_ACTION") == 1
+    assert "QUERY_ACTION" in request_types
+
+
+def test_action_ids_do_not_collide_across_client_process_epochs() -> None:
+    first_server = FakeBodyServer()
+    second_server = FakeBodyServer()
+    first = _client(first_server)
+    second = _client(second_server)
+
+    assert first.navigate({"kind": "xz", "x": 1, "z": 2}).success is True
+    assert second.navigate({"kind": "xz", "x": 1, "z": 2}).success is True
+
+    assert first_server._navigate_action != second_server._navigate_action
+
+
+# ---------------------------------------------------------------------------
+# JavaBody: the neutral Body-contract face over the client.
+# ---------------------------------------------------------------------------
+
+from minebot.contract import Action
+def test_java_body_get_state_maps_authoritative_wire_state() -> None:
+    client = _client(FakeBodyServer())
+    body = JavaBody(client, "Bot")
+
+    state = body.get_state()
+
+    assert state.missing is False
+    assert state.pos == (10.5, 64.0, -3.5)
+    assert state.health == 18.0
+    assert state.food == 17
+    assert state.oxygen == 300
+    assert state.dimension == "minecraft:overworld"
+    assert state.inventory_counts == {"minecraft:oak_log": 3}
+    assert state.inventory_hash == "inventory-hash"
+    assert state.selected_slot == 0
+    assert state.selected_item == "minecraft:oak_log"
+    assert state.body_owner is None
+    assert state.pending_action_count == 0
+    assert state.effects == []
+    assert state.sleeping is False
+    assert state.weather == "clear"
+
+
+def test_java_body_owns_world_identity_chat_ingress_and_chat_egress() -> None:
+    server = FakeBodyServer()
+    body = JavaBody(_client(server), "Bot")
+
+    assert body.world_identity() == "world-java-fixture"
+    head = body.event_head("client-epoch")
+    assert head["chat_seq"] == 0
+
+    server.emit_chat("Guide", "/goal collect one log")
+    events = body.poll_chat_events()
+    assert len(events) == 1
+    assert events[0].name == "agentChat"
+    assert events[0].data == {
+        "sender": "Guide",
+        "message": "/goal collect one log",
+    }
+    assert body.poll_chat_events() == []
+
+    assert body.say("reached 12, 64, -3\nnow") is True
+    say = next(request for request in server.requests if request["type"] == "SAY")
+    assert say["text"] == "reached [position] now"
+
+
+def test_java_body_keeps_short_reads_off_the_action_connection() -> None:
+    action_server = FakeBodyServer()
+    read_server = FakeBodyServer()
+    body = JavaBody(
+        _client(action_server),
+        "Bot",
+        read_client=_client(read_server),
+    )
+
+    body.event_head("client-epoch")
+    read_server.emit_chat("Guide", "/quit now")
+    body.get_state()
+    body.world_identity()
+    events = body.poll_chat_events()
+    body.say("still responsive")
+
+    assert [event.data["message"] for event in events] == ["/quit now"]
+    action_types = [request["type"] for request in action_server.requests]
+    read_types = [request["type"] for request in read_server.requests]
+    assert not {"EVENT_HEAD", "BODY_STATE", "WORLD_IDENTITY", "CHAT_EVENTS", "SAY"}.intersection(
+        action_types
+    )
+    assert {"EVENT_HEAD", "BODY_STATE", "WORLD_IDENTITY", "CHAT_EVENTS", "SAY"}.issubset(read_types)
+
+
+def test_java_body_rejects_malformed_chat_instead_of_silently_dropping_it() -> None:
+    server = FakeBodyServer()
+    body = JavaBody(_client(server), "Bot")
+    body.event_head("client-epoch")
+    server.emit_chat("Guide", "/goal collect one log")
+    server._chat_history[0]["bot"] = "OtherBot"
+
+    with pytest.raises(RuntimeError, match="chat event is malformed"):
+        body.poll_chat_events()
+
+
+def test_java_body_lifecycle_requires_presence_truth_and_emits_respawn() -> None:
+    server = FakeBodyServer()
+    server.present = False
+    body = JavaBody(_client(server), "Bot")
+
+    spawned = body.spawn(
+        (3, 59, 0),
+        yaw=90.0,
+        pitch=0.0,
+        gamemode="survival",
+        emit_respawned=True,
+        timeout_s=1.0,
+    )
+    events = body.poll_events()
+    despawned = body.despawn()
+
+    assert spawned.ok and spawned.accepted
+    assert spawned.data["final_pos"] == [3.0, 59.0, 0.0]
+    assert any(event.name == "respawned" and event.data["final_pos"] == [3.0, 59.0, 0.0] for event in events)
+    assert despawned.ok and despawned.accepted
+    assert body.get_state().missing is True
+
+
+def test_java_body_rejects_incomplete_state_instead_of_synthesizing_death() -> None:
+    class IncompleteStateServer(FakeBodyServer):
+        def _react(self, message: dict) -> None:
+            if message.get("type") != "BODY_STATE":
+                super()._react(message)
+                return
+            self.requests.append(dict(message))
+            self._emit_response(
+                message.get("request_id"),
+                "BODY_STATE_RESULT",
+                {"bot": "Bot", "missing": False},
+            )
+
+    body = JavaBody(_client(IncompleteStateServer()), "Bot")
+
+    with pytest.raises(BodyProtocolError, match="state response is incomplete"):
+        body.get_state()
+
+
+def test_java_body_interrupt_uses_independent_control_connection() -> None:
+    connections: list[FakeBodyServer] = []
+
+    def connect():
+        server = FakeBodyServer()
+        connections.append(server)
+        return server
+
+    body = JavaBody(JavaBodyClient("Bot", connect), "Bot")
+
+    interrupted = body.interrupt("unit_cleanup")
+
+    assert interrupted.ok and interrupted.accepted and interrupted.complete
+    assert len(connections) == 1
+    assert any(request.get("type") == "INTERRUPT" for request in connections[0].requests)
+
+
+def test_java_body_perceive_adapts_find_blocks_and_gaps_the_rest() -> None:
+    client = _client(FakeBodyServer())
+    body = JavaBody(client, "Bot")
+
+    first = body.perceive(
+        "findBlocks",
+        {"type": "oak_log", "radius": 32, "y_radius": 12, "limit": 2, "start": 0},
+    )
+    second = body.perceive(
+        "findBlocks",
+        {"types": ["oak_log"], "radius": 32, "y_radius": 12, "limit": 2, "cursor": first.next},
+    )
+
+    assert first.ok is True
+    assert first.complete is False
+    assert first.next == "find-page-2"
+    assert first.data["blocks"][0] == {
+        "x": 1,
+        "y": 64,
+        "z": 0,
+        "type": "minecraft:oak_log",
+        "state": "SOLID",
+        "dist2": 1.0,
+    }
+    assert first.data["totalMatches"] == 3
+    assert first.data["serverCostMicros"] == 90
+    assert second.ok is True
+    assert second.complete is True
+    assert second.data["start"] == 2
+    assert second.data["count"] == 1
+    find_requests = [request for request in client._transport.requests if request.get("type") == "FIND_BLOCKS"]
+    assert find_requests[0]["block_ids"] == ["minecraft:oak_log"]
+    assert find_requests[0]["vertical_radius"] == 12
+    assert find_requests[1]["cursor"] == "find-page-2"
+
+    gap = body.perceive("recipeData", {})
+    assert gap.ok is False
+    assert gap.error == "invalid_request:item_required"
+
+
+def test_java_body_find_blocks_rejects_numeric_resume_without_snapshot_cursor() -> None:
+    body = JavaBody(_client(FakeBodyServer()), "Bot")
+
+    result = body.perceive("findBlocks", {"type": "oak_log", "radius": 32, "start": 2})
+
+    assert result.ok is False
+    assert result.error == "invalid_cursor:numeric_resume_requires_original_snapshot"
+
+
+def test_java_body_find_blocks_preserves_server_error_details() -> None:
+    class RejectingFindServer(FakeBodyServer):
+        def _handle_find_blocks(self, message: dict, rid: str) -> None:
+            self._emit_error(rid, "invalid_request", retryable=False)
+
+    body = JavaBody(_client(RejectingFindServer()), "Bot")
+
+    result = body.perceive("findBlocks", {"type": "oak_log", "radius": 32})
+
+    assert result.ok is False
+    assert result.complete is True
+    assert result.error == "invalid_request"
+    assert result.uncertainty == [
+        {
+            "reason": "invalid_request",
+            "message": "invalid_request",
+            "retryable": False,
+        }
+    ]
+
+
+def test_java_body_inventory_preserves_paging_slots_and_metadata() -> None:
+    body = JavaBody(_client(FakeBodyServer()), "Bot")
+
+    first = body.perceive("inventory", {"start": 0, "limit": 40})
+    second = body.perceive("inventory", {"start": 40, "limit": 40})
+
+    assert first.ok is True
+    assert first.complete is False
+    assert first.next == "40"
+    assert first.uncertainty == [{"reason": "page_limit"}]
+    assert first.data["slots"][0]["item"] == "minecraft:stone"
+    assert '"minecraft:damage":7' in first.data["slots"][39]["stackRaw"]
+    assert second.ok is True
+    assert second.complete is True
+    assert second.next is None
+    assert len(second.data["slots"]) == 6
+
+
+def test_java_body_inventory_missing_body_is_explicit_and_complete() -> None:
+    body = JavaBody(_client(FakeBodyServer()), "MissingBot")
+
+    result = body.perceive("inventory", {"start": 0, "limit": 7})
+
+    assert result.ok is False
+    assert result.complete is True
+    assert result.error == "missing_body"
+    assert result.uncertainty == [{"reason": "missing_body"}]
+
+
+def test_java_body_container_preserves_paging_position_and_stack_facts() -> None:
+    body = JavaBody(_client(FakeBodyServer()), "Bot")
+
+    first = body.perceive("container", {"pos": [1, 64, 0], "start": 0, "limit": 12})
+    second = body.perceive("container", {"pos": [1, 64, 0], "start": 12, "limit": 20})
+
+    assert first.ok and not first.complete
+    assert first.next == "12"
+    assert first.data["pos"] == [1, 64, 0]
+    assert first.data["totalSlots"] == 27
+    assert first.data["slots"][0]["item"] == "minecraft:diamond"
+    assert first.data["slots"][0]["count"] == 3
+    assert second.ok and second.complete
+    assert len(second.data["slots"]) == 15
+
+
+def test_java_body_container_missing_body_is_explicit() -> None:
+    body = JavaBody(_client(FakeBodyServer()), "MissingBot")
+
+    result = body.perceive("container", {"pos": [1, 64, 0]})
+
+    assert not result.ok and result.complete
+    assert result.error == "missing_body"
+
+
+def test_java_body_recipe_data_returns_structured_crafting_and_smelting_truth() -> None:
+    client = _client(FakeBodyServer())
+    body = JavaBody(client, "Bot")
+
+    crafting = body.perceive("recipeData", {"item": "oak_planks"})
+    smelting = body.perceive("recipeData", {"item": "iron_ingot", "type": "smelting"})
+
+    assert crafting.ok and crafting.complete
+    assert crafting.data["variantCount"] == 1
+    assert crafting.data["variants"][0]["ingredient_groups"] == [["minecraft:oak_log"]]
+    assert crafting.data["serverCostMicros"] == 120
+    assert smelting.ok and smelting.data["type"] == "smelting"
+    assert smelting.data["variants"][0]["output_item"] == "minecraft:iron_ingot"
+    requests = [request for request in client._transport.requests if request.get("type") == "RECIPE_READ"]
+    assert requests[0]["item"] == "minecraft:oak_planks"
+    assert requests[0]["recipe_type"] == "crafting"
+    assert requests[1]["recipe_type"] == "smelting"
+
+
+def test_java_body_recipe_not_found_is_complete_and_typed() -> None:
+    body = JavaBody(_client(FakeBodyServer()), "Bot")
+
+    result = body.perceive("recipeData", {"item": "diamond"})
+
+    assert result.ok is False
+    assert result.complete is True
+    assert result.error == "recipe_not_found"
+    assert result.data["variants"] == []
+
+
+def test_java_body_world_read_family_preserves_existing_perception_shapes() -> None:
+    body = JavaBody(_client(FakeBodyServer()), "Bot")
+
+    exact = body.perceive("blockAt", {"x": 1, "y": 64, "z": 0})
+    cells = body.perceive(
+        "blockCells",
+        {"cells": [[0, 63, 0], [1, 64, 0]], "start": 0, "limit": 1},
+    )
+    columns = body.perceive("surfaceColumns", {"columns": [[0, 0], [1, 0]]})
+    nearby = body.perceive("nearbyBlocks", {"radius": 1, "limit": 32})
+    debug = body.perceive("debugBlocks", {"radius": 1, "limit": 64})
+
+    assert exact.ok and exact.complete
+    assert exact.data["type"] == "minecraft:oak_log"
+    assert exact.data["properties"] == {"axis": "x"}
+    assert exact.data["serverCostMicros"] == 125
+    assert cells.ok and not cells.complete
+    assert cells.next == "1"
+    assert cells.data["cells"][0]["state"] == "SOLID"
+    assert columns.ok and columns.complete
+    assert columns.data["columns"][0]["supportType"] == "minecraft:grass_block"
+    assert nearby.data["blocks"][0]["type"] == "minecraft:oak_log"
+    assert debug.data["cursor"]["state"] == "CLEAR"
+    assert debug.data["feet"]["state"] == "SOLID"
+
+
+@pytest.mark.parametrize("scope", ["blockAt", "blockCells"])
+def test_java_body_requires_requested_standing_facts_without_legacy_fallback(scope) -> None:
+    client = _client(FakeBodyServer())
+    body = JavaBody(client, "Bot")
+    try:
+        result = body.perceive(scope, {"x": 0, "y": 63, "z": 0,
+            "cells": [[0, 63, 0]], "include_standing": True})
+        assert not result.ok
+        assert result.error == "invalid_standing_geometry"
+    finally:
+        client.close()
+
+
+@pytest.mark.parametrize("height,valid", [(63.5, True), (None, True), (64.0, False),
+    (True, False), ("63.5", False), (float("nan"), False)])
+def test_java_body_preserves_or_rejects_native_standing_height(height, valid) -> None:
+    class StandingServer(FakeBodyServer):
+        def _emit_response(self, rid, kind, payload):
+            if kind == "WORLD_READ_RESULT":
+                for fact in payload.get("data", {}).get("cells", []):
+                    fact["standing_y"] = height
+            super()._emit_response(rid, kind, payload)
+
+    client = _client(StandingServer())
+    try:
+        result = JavaBody(client, "Bot").perceive("blockCells",
+            {"cells": [[0, 63, 0]], "include_standing": True})
+        assert result.ok is valid
+        if valid:
+            assert result.data["cells"][0]["standing_y"] == height
+        else:
+            assert result.error == "invalid_standing_geometry"
+    finally:
+        client.close()
+
+
+def test_java_body_world_read_missing_body_is_explicit() -> None:
+    body = JavaBody(_client(FakeBodyServer()), "MissingBot")
+
+    result = body.perceive("blockAt", {"x": 0, "y": 64, "z": 0})
+
+    assert result.ok is False
+    assert result.complete is True
+    assert result.error == "missing_body"
+    assert result.uncertainty == [{"reason": "missing_body"}]
+
+
+def test_java_body_nearby_entities_preserves_filters_identity_and_capping() -> None:
+    body = JavaBody(_client(FakeBodyServer()), "Bot")
+
+    player = body.perceive(
+        "nearbyEntities",
+        {"radius": 16, "limit": 8, "types": ["player"], "name": "MineBotGuide"},
+    )
+    capped = body.perceive("nearbyEntities", {"radius": 16, "limit": 1})
+
+    assert player.ok and player.complete
+    assert player.data["entities"] == [{
+        "id": "guide-uuid",
+        "type": "minecraft:player",
+        "name": "MineBotGuide",
+        "pos": [12.5, 64.0, -3.5],
+        "health": 20.0,
+        "dist2": 4.0,
+    }]
+    assert player.data["serverCostMicros"] == 75
+    assert capped.ok and not capped.complete
+    assert capped.next == "limit"
+    assert capped.data["entities"][0]["id"] == "item-uuid"
+    assert capped.uncertainty == [{"reason": "limit_exceeded"}]
+
+
+def test_java_body_nearby_entities_missing_body_is_explicit() -> None:
+    body = JavaBody(_client(FakeBodyServer()), "MissingBot")
+
+    result = body.perceive("nearbyEntities", {"radius": 16})
+
+    assert result.ok is False
+    assert result.complete is True
+    assert result.error == "missing_body"
+    assert result.uncertainty == [{"reason": "missing_body"}]
+
+
+def test_java_body_nearby_hostiles_preserves_scope_and_excludes_non_hostiles() -> None:
+    body = JavaBody(_client(FakeBodyServer()), "Bot")
+
+    result = body.perceive("nearbyHostiles", {"radius": 16, "limit": 8})
+
+    assert result.ok and result.complete
+    assert result.scope == "nearbyHostiles"
+    assert result.data["count"] == 1
+    assert result.data["entities"] == [{
+        "id": "zombie-uuid",
+        "type": "minecraft:zombie",
+        "name": "Zombie",
+        "pos": [13.5, 64.0, -3.5],
+        "health": 20.0,
+        "dist2": 9.0,
+    }]
+
+
+def test_java_body_execute_delegates_whole_objectives() -> None:
+    client = _client(FakeBodyServer())
+    client.connect()
+    body = JavaBody(client, "Bot")
+
+    result = body.execute(Action.create("navigate", {"goal": {"kind": "near", "x": 10, "y": 64, "z": 0, "range": 1.5}}))
+    assert result.ok is True
+    assert result.data["replans"] == 2
+
+    gap = body.execute(Action.create("openContainer", {}))
+    assert gap.ok is False
+    assert gap.error == "capability_unavailable:openContainer"
+
+
+def test_java_body_player_actions_preserve_caller_id_and_legacy_terminals() -> None:
+    client = _client(FakeBodyServer())
+    body = JavaBody(client, "Bot")
+
+    select = Action.create("selectItem", {"item": "minecraft:bread"})
+    accepted = body.execute(select)
+    terminal = body.await_action_terminal(select.id)
+
+    assert accepted.ok is True
+    assert accepted.accepted is True
+    assert accepted.complete is False
+    assert terminal.name == "selectItemDone"
+    assert terminal.data["action_id"] == select.id
+    assert terminal.data["success"] is True
+    assert terminal.data["slot"] == 2
+    request = next(message for message in client._transport.requests if message.get("type") == "PLAYER_ACTION")
+    assert request["action_id"] == select.id
+    assert request["action"] == "selectItem"
+
+
+def test_java_body_player_action_terminal_is_consumed_once() -> None:
+    body = JavaBody(_client(FakeBodyServer()), "Bot")
+    action = Action.create("useItem", {"item": "minecraft:bread", "mode": "continuous", "ticks": 40})
+
+    body.execute(action)
+    terminal = body.await_action_terminal(action.id)
+
+    assert terminal.name == "useDone"
+    assert terminal.data["stopped_reason"] == "completed"
+    with pytest.raises(NotImplementedError, match="capability_unavailable:await_action_terminal"):
+        body.await_action_terminal(action.id)
+
+
+def test_java_body_player_action_preserves_server_terminal_failure() -> None:
+    server = FakeBodyServer()
+    server.scenario = "player_action_no_effect"
+    body = JavaBody(_client(server), "Bot")
+    action = Action.create("useItem", {"item": "minecraft:bread", "ticks": 2})
+
+    accepted = body.execute(action)
+    terminal = body.await_action_terminal(action.id)
+
+    assert accepted.ok and accepted.accepted
+    assert terminal.name == "useDone"
+    assert terminal.data["success"] is False
+    assert terminal.data["stopped_reason"] == "no_effect"
+
+
+def test_java_body_move_and_drop_actions_preserve_inventory_terminal_facts() -> None:
+    body = JavaBody(_client(FakeBodyServer()), "Bot")
+    move = Action.create("moveItem", {"from_slot": 18, "to_slot": 0, "count": 3})
+    drop = Action.create("dropItem", {"slot": 0, "mode": "one"})
+
+    body.execute(move)
+    move_terminal = body.await_action_terminal(move.id)
+    body.execute(drop)
+    drop_terminal = body.await_action_terminal(drop.id)
+
+    assert move_terminal.name == "moveItemDone"
+    assert move_terminal.data["from_slot"] == 18
+    assert move_terminal.data["to_slot"] == 0
+    assert move_terminal.data["count"] == 3
+    assert drop_terminal.name == "dropDone"
+    assert drop_terminal.data["count_before"] == 3
+    assert drop_terminal.data["count_after"] == 2
+
+
+def test_java_body_handoff_preserves_receiver_pickup_terminal_truth() -> None:
+    body = JavaBody(_client(FakeBodyServer()), "Bot")
+    action = Action.create("handoffItem", {
+        "receiver": "MineBotGuide",
+        "item": "minecraft:diamond",
+        "count": 2,
+        "timeout_ticks": 60,
+    })
+
+    accepted = body.execute(action)
+    terminal = body.await_action_terminal(action.id)
+
+    assert accepted.ok and accepted.accepted
+    assert terminal.name == "handoffDone"
+    assert terminal.data["success"] is True
+    assert terminal.data["spawned_count"] == 2
+    assert terminal.data["receiver_count_before"] == 0
+    assert terminal.data["receiver_count_after"] == 2
+    assert terminal.data["pickup_receipt"] == {
+        "player": "MineBotGuide",
+        "item": "minecraft:diamond",
+        "count": 2,
+        "tick": 604,
+    }
+
+
+def test_java_body_special_use_methods_preserve_world_and_inventory_terminals() -> None:
+    body = JavaBody(_client(FakeBodyServer()), "Bot")
+
+    ignite = body.ignite_block(
+        (1, 64, 0),
+        item="minecraft:flint_and_steel",
+        allow_server_substitute=True,
+        timeout_s=2.0,
+    )
+    sow = body.sow_crop(
+        (2, 64, 0),
+        crop_block="minecraft:wheat",
+        seed_item="minecraft:wheat_seeds",
+        allow_server_substitute=True,
+        timeout_s=2.0,
+    )
+
+    assert ignite.name == "igniteDone"
+    assert ignite.data["success"] is True
+    assert ignite.data["block_after"] == "minecraft:fire"
+    assert sow.name == "sowDone"
+    assert sow.data["success"] is True
+    assert sow.data["block_after"] == "minecraft:wheat"
+    assert sow.data["item_count_before"] == 3
+    assert sow.data["item_count_after"] == 2
+
+
+def test_java_body_container_transfer_preserves_caller_id_governance_and_terminal_facts() -> None:
+    server = FakeBodyServer()
+    policy = GovernancePolicy(natural_regions=[Region("n", (-64, 0, -64), (64, 200, 64))])
+    body = JavaBody(_client(server, GovernanceAnswerer(policy)), "Bot")
+    action = Action.create("containerTransfer", {
+        "pos": [1, 64, 0],
+        "direction": "container_to_bot",
+        "container_slot": 0,
+        "bot_slot": 1,
+        "count": 2,
+    })
+
+    accepted = body.execute(action)
+    terminal = body.await_action_terminal(action.id)
+
+    assert accepted.ok and accepted.accepted and not accepted.complete
+    assert terminal.name == "containerDone"
+    assert terminal.data["action_id"] == action.id
+    assert terminal.data["success"] is True
+    assert terminal.data["count"] == 2
+    assert terminal.data["container_after"]["count"] == 1
+    assert server.verdict_seen == [("mp-container-1", True)]
+    request = next(item for item in server.requests if item.get("type") == "CONTAINER_TRANSFER")
+    assert request["action_id"] == action.id
+    assert request["pos"] == [1, 64, 0]
+
+
+def test_java_body_container_transfer_governance_denial_is_not_relabelled() -> None:
+    server = FakeBodyServer()
+    body = JavaBody(_client(server, GovernanceAnswerer(GovernancePolicy())), "Bot")
+    action = Action.create("containerTransfer", {
+        "pos": [1, 64, 0],
+        "direction": "container_to_bot",
+        "container_slot": 0,
+        "bot_slot": 1,
+        "count": 2,
+    })
+
+    accepted = body.execute(action)
+    terminal = body.await_action_terminal(action.id)
+
+    assert accepted.ok and accepted.accepted
+    assert terminal.data["success"] is False
+    assert terminal.data["stopped_reason"] == "governance_denied:unknown_provenance"
+    assert server.verdict_seen == [("mp-container-1", False)]
+
+
+def test_java_body_craft_item_preserves_caller_id_and_authoritative_terminal_facts() -> None:
+    server = FakeBodyServer()
+    body = JavaBody(_client(server), "Bot")
+    action = Action.create("craftItem", {
+        "inputs": [{"slot": 0, "item": "minecraft:oak_log", "count": 1}],
+        "output": {"slot": 1, "item": "minecraft:oak_planks", "count": 4},
+        "remainders": [],
+        "max_stack": 64,
+    })
+
+    accepted = body.execute(action)
+    terminal = body.await_action_terminal(action.id)
+
+    assert accepted.ok and accepted.accepted and not accepted.complete
+    assert terminal.name == "craftDone"
+    assert terminal.data["action_id"] == action.id
+    assert terminal.data["success"] is True
+    assert terminal.data["recipe_id"] == "minecraft:oak_planks"
+    request = next(item for item in server.requests if item.get("type") == "CRAFT_ITEM")
+    assert request["action_id"] == action.id
+    assert request["inputs"][0]["item"] == "minecraft:oak_log"
+
+
+def test_java_body_craft_item_preserves_recipe_rejection_without_relabeling() -> None:
+    server = FakeBodyServer()
+    server.scenario = "craft_recipe_mismatch"
+    body = JavaBody(_client(server), "Bot")
+    action = Action.create("craftItem", {
+        "inputs": [{"slot": 0, "item": "minecraft:oak_log", "count": 1}],
+        "output": {"slot": 1, "item": "minecraft:diamond", "count": 64},
+        "remainders": [],
+        "max_stack": 64,
+    })
+
+    body.execute(action)
+    terminal = body.await_action_terminal(action.id)
+
+    assert terminal.data["success"] is False
+    assert terminal.data["stopped_reason"] == "recipe_mismatch"
+
+
+def test_java_body_furnace_transfer_preserves_caller_id_governance_and_terminal_facts() -> None:
+    server = FakeBodyServer()
+    policy = GovernancePolicy(natural_regions=[Region("n", (-64, 0, -64), (64, 200, 64))])
+    body = JavaBody(_client(server, GovernanceAnswerer(policy)), "Bot")
+    action = Action.create("furnaceTransfer", {
+        "pos": [1, 64, 0],
+        "direction": "bot_to_furnace",
+        "furnace_slot": "input",
+        "bot_slot": 5,
+        "count": 2,
+    })
+
+    accepted = body.execute(action)
+    terminal = body.await_action_terminal(action.id)
+
+    assert accepted.ok and accepted.accepted and not accepted.complete
+    assert terminal.name == "furnaceDone"
+    assert terminal.data["action_id"] == action.id
+    assert terminal.data["success"] is True
+    assert terminal.data["count"] == 2
+    assert terminal.data["furnace_slot"] == "input"
+    assert terminal.data["furnace_after"]["count"] == 2
+    assert server.verdict_seen == [("mp-furnace-1", True)]
+    request = next(item for item in server.requests if item.get("type") == "FURNACE_TRANSFER")
+    assert request["action_id"] == action.id
+    assert request["pos"] == [1, 64, 0]
+
+
+def test_java_body_furnace_transfer_governance_denial_is_not_relabelled() -> None:
+    server = FakeBodyServer()
+    body = JavaBody(_client(server, GovernanceAnswerer(GovernancePolicy())), "Bot")
+    action = Action.create("furnaceTransfer", {
+        "pos": [1, 64, 0],
+        "direction": "bot_to_furnace",
+        "furnace_slot": "fuel",
+        "bot_slot": 6,
+        "count": 1,
+    })
+
+    accepted = body.execute(action)
+    terminal = body.await_action_terminal(action.id)
+
+    assert accepted.ok and accepted.accepted
+    assert terminal.data["success"] is False
+    assert terminal.data["stopped_reason"] == "governance_denied:unknown_provenance"
+    assert server.verdict_seen == [("mp-furnace-1", False)]
+
+
+def test_java_body_poll_events_drains_contract_events() -> None:
+    client = _client(FakeBodyServer())
+    client.connect()
+    body = JavaBody(client, "Bot")
+    body.execute(Action.create("navigate", {"goal": {"kind": "near", "x": 10, "y": 64, "z": 0, "range": 1.5}}))
+
+    events = body.poll_events()
+
+    names = [event.name for event in events]
+    assert "owner_acquired" in names
+    assert "action_terminal" in names
+    assert all(event.bot == "Bot" for event in events)
+    terminal = next(event for event in events if event.name == "action_terminal")
+    assert terminal.data["action_id"].startswith("Bot-nav-")
+    assert body.poll_events() == []

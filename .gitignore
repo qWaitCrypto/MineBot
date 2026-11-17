@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+
+# Local knowledge, never committed
+docs/
+AGENTS.md
+CLAUDE.md
+ARCHITECTURE.md
+.harnesskit/
+logs/

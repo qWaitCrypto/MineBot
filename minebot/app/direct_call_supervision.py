@@ -1,0 +1,942 @@
+"""Default Decision supervision for every mutating Body call.
+
+The supervisor compiles bounded facts from :mod:`execution_snapshot`, asks one
+finite-choice Decision question for each new fact frame, and leaves admission,
+stopping and settlement to the existing runtime entry points. Direct calls and
+plan call nodes use this same path.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import copy
+import inspect
+import json
+import os
+import sys
+import time
+from uuid import uuid4
+from collections.abc import Callable, Mapping
+from dataclasses import asdict, is_dataclass
+from typing import Any
+
+from minebot.app import reflex_question as rq
+from minebot.app.decision_client import DecisionClient, DecisionPriority
+from minebot.body.use import _is_food_item
+from minebot.body.threat_reach import DODGE_MARGIN, attack_reach
+from minebot.app.execution_snapshot import FACT_FRAME_INTERVAL_S
+from minebot.contract import ToolResult
+from minebot.contract.execution import tool_observation_scope
+
+MAX_SUPERVISION_READS = 4
+# Kept as a compatibility export. R2 no longer caps questions per call.
+MAX_QUESTION_CHARS = 16_000
+FAST_COMPLETION_GRACE_S = 0.02
+# What each default tool is for, recorded as the intent of the call it starts.
+_DEFAULT_ACTION_TEXT = rq.DEFAULT_ACTION_INTENTS
+
+format_call = rq.call_text
+
+
+class CallSupervisor:
+    """Observe all mutating calls through one frame-by-frame Decision loop."""
+
+    def __init__(
+        self,
+        runtime: Any,
+        *,
+        decision_url: str | None = None,
+        max_reads: int = MAX_SUPERVISION_READS,
+    ) -> None:
+        self.runtime = runtime
+        self.decision_url = decision_url or os.environ.get(
+            "MINEBOT_DECISION_URL", "http://127.0.0.1:10004/v1/systemone"
+        )
+        self.max_reads = max(0, int(max_reads))
+        self._client = getattr(runtime, "decision_client", None) or DecisionClient(
+            url=self.decision_url, emit=runtime.trace.emit
+        )
+        self.current: dict[str, Any] | None = None
+        self._latest_finished_call: str | None = None
+        # Health and air history belongs to the Body, not to one call.
+        self._vitals = rq.VitalWindow()
+
+    def observe_call_result(self, tool: str, params: Mapping[str, Any], result: Any) -> None:
+        """Remember completion independently of the call whose result is judged."""
+        if isinstance(result, ToolResult):
+            result = result.to_payload()
+        if isinstance(result, Mapping):
+            self._latest_finished_call = rq.result_sentence(rq.call_text(tool, params), result)
+
+    def _with_latest_result(self, request: dict[str, Any]) -> dict[str, Any]:
+        state = request["state"]
+        latest = getattr(self, "_latest_finished_call", None)
+        if latest:
+            judged = state.get("finished_call")
+            if judged and judged != latest:
+                state["original_call_result"] = judged
+            state["finished_call"] = latest
+        return request
+
+    async def close(self) -> None:
+        if self._client is not None:
+            await self._client.close()
+
+    def _start_monitor(
+        self, record: dict[str, Any], tool: Any, params: Mapping[str, Any],
+        wake: asyncio.Event, worker: asyncio.Task[Any],
+    ) -> asyncio.Task[Any] | None:
+        """Start the Body-owned frame consumer.
+
+        The concrete per-Body loop supplies this hook.  Keeping the call
+        runner responsible only for registration and awaiting the returned
+        task prevents a second supervision implementation from appearing in
+        the execution path.
+        """
+        raise RuntimeError("a BodyLoop is required for mutating calls")
+
+    async def _wait_monitor(self, record: Mapping[str, Any]) -> None:
+        """Wait for a Body-owned monitor when a concrete loop registered one."""
+        return None
+
+    def _release_result_pending(self, call_id: str) -> None:
+        """Allow a concrete Body loop to resume idle after result judgment."""
+        return None
+
+    def _frame(self, execution: Mapping[str, Any] | None) -> dict[str, Any]:
+        """Add what health and air were a few seconds ago to this frame's facts."""
+        if not execution:
+            return {}
+        facts = dict(execution.get("facts") or {})
+        frame_clock = time.monotonic()
+        frame_input = {"execution": copy.deepcopy({key: value for key, value in execution.items()
+                                                  if key != "_frame_input"}),
+                       "monotonic_s": frame_clock,
+                       "vital_samples": copy.deepcopy(self._vitals._samples),
+                       "protections": copy.deepcopy(self._vitals._protections)}
+        self._last_frame_input = frame_input
+        facts.update(self._vitals.add(frame_clock, facts))
+        inventory = facts.get("inventory", facts.get("inventory_counts"))
+        if "food_item" not in facts and isinstance(inventory, Mapping):
+            # Which items are food is the Body's knowledge, not the reflex layer's.
+            food = next((str(item) for item, count in inventory.items()
+                         if isinstance(count, int) and count > 0 and _is_food_item(str(item))), None)
+            if food:
+                facts["food_item"] = food
+        return {**execution, "facts": facts, "_frame_input": frame_input}
+
+    def _snapshot(self, call_id: str) -> dict[str, Any]:
+        snapshots = getattr(self.runtime, "execution_snapshots", None)
+        current = snapshots.current() if snapshots is not None else None
+        if isinstance(current, dict) and current.get("operation_id") == call_id:
+            return current
+        last = snapshots.last() if snapshots is not None else None
+        if isinstance(last, dict) and last.get("operation_id") == call_id:
+            return last
+        return {}
+
+    @staticmethod
+    def _bounded(value: Any, *, depth: int = 0) -> Any:
+        if depth >= 5:
+            return "<bounded>"
+        if isinstance(value, Mapping):
+            out: dict[str, Any] = {}
+            for index, (key, item) in enumerate(value.items()):
+                if index >= 32:
+                    out["_omitted"] = len(value) - 32
+                    break
+                out[str(key)[:100]] = CallSupervisor._bounded(item, depth=depth + 1)
+            return out
+        if isinstance(value, (list, tuple)):
+            result = [CallSupervisor._bounded(item, depth=depth + 1) for item in value[:64]]
+            if len(value) > 64:
+                result.append(f"<{len(value) - 64} omitted>")
+            return result
+        if isinstance(value, str):
+            return value[:500]
+        if isinstance(value, (int, float, bool)) or value is None:
+            return value
+        return str(value)[:500]
+
+    def _durable_plan_context(self) -> dict[str, Any]:
+        """Read the current Agent goal and durable ``in_progress`` step."""
+        context = getattr(self.runtime, "agent_context", None)
+        goal = str(getattr(context, "goal_text", "") or "")[:800]
+        # The durable task plan is a planning aid, not the dispatch intent for
+        # a physical call.  Its current_step can lag behind the call by an
+        # entire Agent turn, so do not present that stale field to Decision.
+        current_step = ""
+        workspace = getattr(self.runtime, "native_task_workspace", None)
+        try:
+            task = None if workspace is None else workspace.current_task
+            if task is not None:
+                goal = str(getattr(task, "goal_text", "") or goal)[:800]
+                plan = workspace.store.get_plan(task.task_id)
+                steps = [] if plan is None else getattr(plan, "steps", [])
+                for step in steps:
+                    status = getattr(getattr(step, "status", None), "value", getattr(step, "status", ""))
+                    if str(status) == "in_progress":
+                        # Keep the lookup for compatibility with older callers,
+                        # but never copy the durable title into a call question.
+                        break
+        except Exception:
+            # Missing plan state is an empty fact, not a reason to make a stop.
+            pass
+        native_plan = getattr(self.runtime, "native_plan", None)
+        if not current_step and isinstance(native_plan, Mapping):
+            for step in native_plan.get("steps", []):
+                if isinstance(step, Mapping) and str(step.get("status") or "") == "in_progress":
+                    break
+        return {"goal": goal, "current_step": current_step}
+
+    def _plan_context(
+        self, *, supervision_context: Mapping[str, Any] | None,
+        tool: Any, params: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        plan = self._durable_plan_context()
+        if isinstance(supervision_context, Mapping):
+            for key in ("goal", "node_description", "intent", "intent_chain", "is_plan"):
+                if key in supervision_context:
+                    plan[key] = supervision_context[key]
+        agent_intent = str(plan.get("intent") or "").strip()
+        node_description = str(plan.get("node_description") or "").strip()
+        if not node_description:
+            node_description = agent_intent or str(plan.get("current_step") or "").strip()
+        intents = plan.get("intent_chain")
+        if not isinstance(intents, list):
+            intents = [] if not intents else [str(intents)]
+        return self._bounded({
+            "goal": str(plan.get("goal") or "")[:180],
+            "node_description": node_description[:200],
+            "intent": str(plan.get("intent") or "")[:500],
+            "intent_chain": [str(item)[:160] for item in intents[:4]],
+        })
+
+    @staticmethod
+    def _compact_result(value: Any) -> dict[str, Any]:
+        if not isinstance(value, Mapping):
+            return {"result": str(value)[:500]}
+        result = {key: value[key] for key in ("success", "reason", "canRetry", "complete", "outcome") if key in value}
+        summary = value.get("summary")
+        if isinstance(summary, Mapping):
+            result["summary"] = CallSupervisor._bounded(dict(summary), depth=0)
+        return result
+
+    def _question(
+        self, call_id: str, tool: Any, params: Mapping[str, Any],
+        execution: Mapping[str, Any], *, idle_s: float, purpose: str,
+        supervision_context: Mapping[str, Any] | None,
+        options: Mapping[str, str] | None = None,
+        decision_context: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Write one frame as a request; all wording lives in reflex_question."""
+        plan = self._plan_context(supervision_context=supervision_context, tool=tool, params=params)
+        context = decision_context if isinstance(decision_context, Mapping) else {}
+        tool_name = str(getattr(tool, "name", "unknown"))
+        result = context.get("tool_result")
+        running = not isinstance(result, Mapping)
+        facts = execution.get("facts") if isinstance(execution.get("facts"), Mapping) else {}
+        if not running and isinstance(context.get("body_state"), Mapping) and context["body_state"]:
+            facts = context["body_state"]
+        call_params = context.get("tool_arguments", params)
+        intent = str(plan.get("intent") or plan.get("node_description") or "")
+        history = context.get("history")
+        earlier = rq.attempt_lines(
+            [item for item in history if isinstance(item, Mapping)],
+            int(context.get("history_earlier") or 0),
+        ) if isinstance(history, list) else []
+        interrupted = context.get("interrupted_history")
+        interrupted_lines = rq.interruption_lines(
+            [item for item in interrupted if isinstance(item, Mapping)],
+            int(context.get("interrupted_history_earlier") or 0),
+        ) if isinstance(interrupted, list) else []
+        state = rq.frame_state(
+            goal=str(plan.get("goal") or ""), intent=intent, tool=tool_name,
+            params=call_params if isinstance(call_params, Mapping) else {}, facts=facts,
+            running=running, phase=execution.get("phase"), elapsed_s=execution.get("elapsed_s"),
+            progress_signal=execution.get("progress_signal"),
+            since_progress_s=execution.get("since_progress_s"),
+            result=result if isinstance(result, Mapping) else None, earlier_attempts=earlier,
+            interrupted_attempts=interrupted_lines,
+        )
+        if options is None:
+            options = rq.frame_options(
+                tool=tool_name, params=call_params if isinstance(call_params, Mapping) else {},
+                intent=intent, facts=facts, running=running,
+                result=result if isinstance(result, Mapping) else None,
+            )
+        if "mine_ore" in options and running:
+            # What mining on the way is judged by (mechanism-map §11.6, D5).
+            state.update(rq.wayside_facts(facts))
+        if running and (supervision_context or {}).get("is_life_project"):
+            state, options = rq.project_frame(state, options, facts)
+        elif running and (supervision_context or {}).get("is_ladder_item") and "call_agent" in options:
+            # The Agent's own ladder item: set it aside, beside handing it back.
+            options = {**{key: text for key, text in options.items() if key != "call_agent"},
+                       "set_aside": rq.set_aside_option("Stop the current action"),
+                       "call_agent": options["call_agent"]}
+        request: dict[str, Any] = {"state": state, "questions": rq.frame_questions(
+            options, protecting=bool((supervision_context or {}).get("is_reflex_action")),
+            acting_for_intent=running and bool(intent),
+            interrupt=(supervision_context or {}).get("interrupt_when") if running else None,
+            running_protection=running and bool((supervision_context or {}).get("is_reflex_action")),
+            handback="" if (supervision_context or {}).get("is_life_project") else "running" if running else "result",
+            hold=rq.hold_option(facts),
+            keep_protecting=(options.get("keep_going", "") if running and tool_name in rq.AGENT_PROTECTION_TOOLS
+                             and not (supervision_context or {}).get("is_reflex_action") else ""))}
+        if purpose == "default_result_frame":
+            # After a protective action: how it ended and what protection is
+            # judged on (replay of step5-threat-claude4, 18/18 vs 0/18).
+            request["state"] = {key: state[key] for key in ("agent_stance", "agent_rules", "finished_call")
+                                + rq.PROTECTION_FACTS if state.get(key)}
+            request["questions"] = rq.frame_questions(options, protecting=True)
+        if running and (supervision_context or {}).get("is_reflex_action"):
+            # Only the facts protection is judged on. The protective intent
+            # ("The Agent wants ... Move away") and the running-call line made
+            # Decision keep fleeing at one block while health fell (replay of
+            # step5-threat-claude2; same pull as the progress line in §19).
+            request["state"] = {key: state[key] for key in ("agent_stance", "agent_rules") + rq.PROTECTION_FACTS
+                                if state.get(key)}
+            fight = rq.running_fight(facts, str((supervision_context or {}).get("reflex_action_choice") or ""),
+                                     (params or {}).get("target") if isinstance(params, Mapping) else None)
+            if fight is not None:
+                request["state"]["current_work"] = fight[0]
+        if (supervision_context or {}).get("is_life_action"):
+            request = rq.idle_question(facts, options)
+            if running:
+                request["state"]["current_work"] = rq.call_text(tool_name, params)
+        self._with_latest_result(request)
+        size = len(json.dumps(request, ensure_ascii=False, separators=(",", ":"), default=str))
+        # Private values, removed before the request reaches Decision.
+        request["_request_chars_before"] = size
+        request["_request_chars"] = size
+        if (running and intent and not (supervision_context or {}).get("is_life_action")
+                and not (supervision_context or {}).get("is_reflex_action")):
+            # Whether the intent is reached: its own request, asked by judge.
+            request["_done"] = rq.done_question(state, intent)
+        return request
+
+    async def judge(
+        self, call_id: str, tool: Any, params: Mapping[str, Any],
+        execution: Mapping[str, Any], idle_s: float, *,
+        purpose: str = "running_frame",
+        supervision_context: Mapping[str, Any] | None = None,
+        options: Mapping[str, str] | None = None,
+        decision_context: Mapping[str, Any] | None = None,
+        question: Mapping[str, Any] | None = None,
+    ) -> str:
+        # Plan nodes compile their terminal facts through the existing tree
+        # compiler. The Body loop judges that same request; rebuilding it here
+        # would change the goal bounds, repeat wording and request metadata.
+        request = copy.deepcopy(dict(question)) if question is not None else self._question(
+            call_id, tool, params, execution, idle_s=idle_s,
+            purpose=purpose, supervision_context=supervision_context, options=options,
+            decision_context=decision_context,
+        )
+        self._with_latest_result(request)
+        tool_name = getattr(tool, "name", "unknown")
+        compiled_chars = len(json.dumps(
+            request, ensure_ascii=False, separators=(",", ":"), default=str,
+        )) if question is not None else 0
+        request_chars_before = int(request.pop("_request_chars_before", compiled_chars))
+        request_chars = int(request.pop("_request_chars", request_chars_before))
+        done_request = request.pop("_done", None)
+        if done_request is not None:
+            self._with_latest_result(done_request)
+        fact_revision = execution.get("fact_revision")
+        self.runtime.trace.emit(
+            "call_supervision_request", tool_call_id=call_id, tool=tool_name,
+            purpose=purpose, idle_s=round(idle_s, 3), fact_revision=fact_revision,
+            loop_state=getattr(self, "loop_state", None),
+            request_chars_before=request_chars_before, request_chars=request_chars,
+            request=request, done_request=done_request,
+            frame_input=execution.get("_frame_input", {"execution": dict(execution)}),
+            compiler_input={"params": dict(params), "supervision_context": dict(supervision_context or {}),
+                            "decision_context": copy.deepcopy(dict(decision_context or {})),
+                            "options": dict(options) if options is not None else None,
+                            # The facts the frame was compiled from, complete: a
+                            # replay gate recompiles the frame from them alone
+                            # (ladder-item-consolidation-20261108 §4).
+                            "facts": copy.deepcopy(dict(execution.get("facts")))
+                            if isinstance(execution.get("facts"), Mapping) else None},
+            clock={"request_monotonic_s": time.monotonic(),
+                   "elapsed_s": execution.get("elapsed_s"),
+                   "since_progress_s": execution.get("since_progress_s")},
+        )
+        started = time.monotonic()
+        raw: dict[str, Any] | None = None
+        done_raw: dict[str, Any] | None = None
+        try:
+            choice = rq.only_option(request["questions"])
+            if choice is None:
+                answer = await self._client.ask(request, priority=DecisionPriority.SUPERVISION)
+                raw = answer.raw
+                choice = rq.frame_choice(raw, request["questions"])
+            # Danger is read first; otherwise the separate intent question
+            # decides whether this work moves on to its next step.
+            if done_request is not None and choice != "unknown" and not rq.in_danger(raw, request["questions"]):
+                done = await self._client.ask(done_request, priority=DecisionPriority.SUPERVISION)
+                done_raw = done.raw
+                shown = rq.done_choice(done_raw)
+                choice = "unknown" if shown is None else "next_step" if shown == "shown" else choice
+        except Exception:
+            choice = "unknown"
+        elapsed = time.monotonic() - started
+        self.runtime.trace.emit(
+            "call_supervision_result", tool_call_id=call_id, tool=tool_name,
+            purpose=purpose, response=raw, done_response=done_raw, choice=choice,
+            unknown=choice == "unknown", elapsed_s=elapsed,
+            decision_ms=round(elapsed * 1000.0, 3), fact_revision=fact_revision,
+        )
+        return choice
+
+    @staticmethod
+    def _shown_is_success(payload: dict[str, Any], handoff: Mapping[str, Any]) -> None:
+        """The hand ended a direct call because the result the Agent named is
+        already shown. That call succeeded; it was not preempted.
+
+        The stop changes the Body generation, so the tool's own result came
+        back wrapped as ``preempted`` and the Agent read a failure: 51 of the
+        75 preempted or stopped results it got in easy run-18..20, 30 of them
+        craft_item, and it spent turns re-reading the inventory or calling
+        again (project-review-20261110.md §2.3). The tool's own result stays
+        in ``metrics.original_result``.
+        """
+        facts = handoff.get("facts") if isinstance(handoff, Mapping) else None
+        if not (isinstance(facts, Mapping) and facts.get("reason") == "decision_step_done"
+                and facts.get("confirmed") is True) or payload.get("success") is True:
+            return
+        payload["metrics"].pop("preempted", None)
+        payload["metrics"]["ended_as"] = payload.get("reason")
+        payload["success"] = True
+        payload["reason"] = "wanted_result_shown"
+        payload["canRetry"] = False
+
+    async def _register_monitor(
+        self, record: dict[str, Any], tool: Any, params: Mapping[str, Any],
+        wake: asyncio.Event, worker: asyncio.Task[Any],
+    ) -> asyncio.Task[Any] | None:
+        """Hand a live call to the monitor, or stop it.
+
+        A call nobody supervises must not keep writing to the world while the
+        Agent is told it failed: the 2026-10-16 run kept placing blocks from
+        place_block calls that had already returned "active monitor" errors.
+        """
+        try:
+            return self._start_monitor(record, tool, params, wake, worker)
+        except BaseException:
+            worker.cancel()
+            await asyncio.gather(worker, return_exceptions=True)
+            raise
+
+    async def _judge_frame(
+        self, call_id: str, tool: Any, params: Mapping[str, Any],
+        execution: Mapping[str, Any], idle_s: float, *, purpose: str,
+        supervision_context: Mapping[str, Any] | None,
+        options: Mapping[str, str] | None = None,
+        decision_context: Mapping[str, Any] | None = None,
+        question: Mapping[str, Any] | None = None,
+    ) -> str:
+        """Call the overridable judge while accepting slice-1 test seams."""
+        signature = inspect.signature(self.judge)
+        accepts_context = (
+            "purpose" in signature.parameters
+            or "supervision_context" in signature.parameters
+            or "options" in signature.parameters
+            or "decision_context" in signature.parameters
+            or any(param.kind is inspect.Parameter.VAR_KEYWORD for param in signature.parameters.values())
+        )
+        if accepts_context:
+            compiled = {"question": question} if question is not None else {}
+            return await self.judge(
+                call_id, tool, params, execution, idle_s,
+                purpose=purpose, supervision_context=supervision_context, options=options,
+                decision_context=decision_context,
+                **compiled,
+            )
+        return await self.judge(call_id, tool, params, execution, idle_s)
+
+    async def _bounded_read(self, record: dict[str, Any], tool: Any,
+                            params: Mapping[str, Any]) -> dict[str, Any]:
+        reader = getattr(tool, "supervision_reader", None)
+        if not callable(reader):
+            # Generic body reads repeat the same broad state and are not a
+            # Decision option.  The execution snapshot already carries the
+            # bounded state facts for every cadence frame.
+            return {}
+        try:
+            if callable(reader):
+                value = await self.runtime._read_lane.run(reader, dict(params))
+                source = "registered_reader"
+            else:
+                body = getattr(self.runtime, "body", None)
+                getter = getattr(body, "get_state", None)
+                if not callable(getter):
+                    return {}
+                value = await self.runtime._read_lane.run(getter)
+                source = "body_state"
+        except Exception as exc:
+            self.runtime.trace.emit(
+                "call_supervision_read_unknown", tool_call_id=record["call_id"],
+                tool=getattr(tool, "name", "unknown"), error_type=type(exc).__name__,
+            )
+            return {}
+        if isinstance(value, Mapping):
+            facts = dict(value)
+        elif is_dataclass(value):
+            facts = asdict(value)
+        else:
+            raw = getattr(value, "__dict__", None)
+            facts = dict(raw) if isinstance(raw, dict) else {}
+        snapshots = getattr(self.runtime, "execution_snapshots", None)
+        before = record.get("last_read_facts")
+        if before == self._bounded(facts):
+            return {}
+        record["last_read_facts"] = self._bounded(facts)
+        if snapshots is not None:
+            snapshots.enrich(record["call_id"], facts, source=source)
+        record["reads"] += 1
+        record["reader_new_fact"] = True
+        self.runtime.trace.emit(
+            "call_supervision_read", tool_call_id=record["call_id"],
+            tool=getattr(tool, "name", "unknown"), read_number=record["reads"],
+            facts=self._bounded(facts),
+        )
+        return facts
+
+    @staticmethod
+    def _facts_for_options(execution: Mapping[str, Any]) -> Mapping[str, Any]:
+        facts = execution.get("facts")
+        return facts if isinstance(facts, Mapping) else {}
+
+    @classmethod
+    def _options_for(
+        cls, tool: Any, record: Mapping[str, Any], supplied: Mapping[str, str] | None = None,
+        execution: Mapping[str, Any] | None = None,
+    ) -> dict[str, str]:
+        """The concrete things the Body may do in this frame."""
+        current = execution or {}
+        terminal = str(current.get("state") or "") in {"succeeded", "failed", "cancelled", "unknown"}
+        context = record.get("supervision_context")
+        context = context if isinstance(context, Mapping) else {}
+        if context.get("is_life_action") and not terminal:
+            # Chosen again under its own name, the running action carries on
+            # (BodyLoop._continues_protection); another option switches.
+            return rq.life_running_options(cls._facts_for_options(current),
+                                           str(context.get("reflex_action_choice") or ""))
+        reflex_choice = context.get("reflex_action_choice")
+        if context.get("is_reflex_action") and not terminal and isinstance(reflex_choice, str):
+            # The protective choice again, the running action one option of it.
+            return rq.protecting_options(cls._facts_for_options(current), reflex_choice,
+                                         (record.get("params") or {}).get("target"))
+        unchanged = terminal and rq.body_unchanged_by_call(cls._facts_for_options(current))
+        history = record.get("history") if isinstance(record.get("history"), list) else []
+        if terminal and not unchanged and len(history) >= 2:
+            # A tool that reads no start position (explore_for) never looked
+            # unchanged: run again, it ended where the last attempt ended, with
+            # the same things carried, 106 times in 90 s (easy run-19, 07:11).
+            # Two attempts ending alike are the same attempt.
+            last, before = (entry.get("body") if isinstance(entry, Mapping) else None for entry in history[-2:][::-1])
+            unchanged = rq.body_unchanged_by_call(last, before)
+        options = rq.frame_options(
+            unchanged=unchanged,
+            tool=str(record.get("tool") or getattr(tool, "name", "unknown")),
+            params=record.get("params") if isinstance(record.get("params"), Mapping) else {},
+            intent=str(context.get("intent") or context.get("node_description") or ""),
+            facts=cls._facts_for_options(current),
+            running=not terminal,
+            result=current.get("result") if isinstance(current.get("result"), Mapping) else None,
+            next_call=str(context.get("next_call") or ""),
+            tree=supplied,
+            intent_of_plan=bool(context.get("intent_of_plan")),
+            interrupt=context.get("interrupt_when"),
+        )
+        # A protective call is already the selected response to danger.  It
+        # must be allowed to run or finish, never start the same protective
+        # action again from its own supervision frame.
+        reflex_choice = context.get("reflex_action_choice")
+        if isinstance(reflex_choice, str):
+            response = cls._default_action(reflex_choice, current)
+            if reflex_choice != "ranged" or response is None or response[1].get("target") == record.get("params", {}).get("target"):
+                options.pop(reflex_choice, None)
+        if context.get("is_reflex_action") and not terminal:
+            options.pop("next_step", None)
+        if callable(getattr(tool, "supervision_reader", None)) and record.get("reader_new_fact"):
+            options["inspect"] = "Read one new registered fact."
+        return options
+
+    @staticmethod
+    def _tree_options(context: Mapping[str, Any] | None) -> Mapping[str, str] | None:
+        if not isinstance(context, Mapping):
+            return None
+        for key in ("node_options", "tree_options", "options"):
+            value = context.get(key)
+            if isinstance(value, Mapping):
+                return {str(option): str(description) for option, description in value.items()}
+            if isinstance(value, list):
+                compiled: dict[str, str] = {}
+                for item in value:
+                    if isinstance(item, Mapping) and item.get("id"):
+                        compiled[str(item["id"])] = str(item.get("intent") or item.get("description") or "")
+                if compiled:
+                    return compiled
+        return None
+
+    @classmethod
+    def _default_action(cls, choice: str, execution: Mapping[str, Any]) -> tuple[str, dict[str, Any]] | None:
+        facts = cls._facts_for_options(execution)
+        if rq._end_bed_choice(choice):
+            raw = choice.removeprefix("use_bed_").split("_")
+            if len(raw) == 3:
+                try:
+                    pos = [int(value) for value in raw]
+                except ValueError:
+                    pos = None
+                if pos is not None and choice in rq.end_bed_options(facts):
+                    return "use_on_block", {"pos": pos, "item": None, "allow_unchanged": True}
+        if choice.startswith(rq.RULE_PREFIX):
+            # The Agent's own call, as it wrote it, bound to this frame.
+            return rq.rule_action(choice, facts)
+        if choice in {"surface", "go_to_surface"}:
+            return "go_to_surface", {"timeout_s": 120.0}
+        if choice == "leave_lava":
+            exit_cell = rq._cell(facts.get("lava_exit"))
+            if exit_cell:
+                return "__reflex_leave_lava", {"pos": exit_cell, "timeout_s": 5.0}
+        if choice in rq.STEP_OPTIONS:
+            direction = choice.removeprefix("step_")
+            for step in facts.get("steps") or []:
+                cell = rq._cell(step.get("to")) if isinstance(step, Mapping) else None
+                if cell and step.get("direction") == direction:
+                    return "__reflex_step", {"pos": cell, "timeout_s": 3.0}
+        if choice == "scoop_water" and rq.scoop_water_offered(facts):
+            cell = rq._cell(facts.get("water_source_in_reach"))
+            return "__reflex_use_item", {"item": "bucket", "look_at": [cell[0] + 0.5, cell[1] + 0.4, cell[2] + 0.5]}
+        if choice == "cushion_fall" and rq.cushion_fall_offered(facts):
+            return "__reflex_cushion_fall", {"item": "water_bucket", "timeout_s": 10.0}
+        if choice == "mine_ore":
+            ore = rq.wayside_ore(facts)
+            if ore:
+                return "mine_block_collect", {"pos": ore["pos"], "target_block_types": [ore["block"]],
+                                              "expected_drops": [ore["drop"]], "strict_type": True}
+        if choice == "put_out_fire":
+            ground = rq._cell(facts.get("standing_on"))
+            if ground:
+                # The cell above the block stood on: the bucket pours through its top face.
+                return "use_on_block", {"item": "water_bucket", "pos": [ground[0], ground[1] + 1, ground[2]]}
+        if choice == "eat":
+            item = facts.get("food_item")
+            if isinstance(item, str) and item.strip():
+                return "consume_item", {"item": item.strip()}
+        if choice in {"engage", "ranged"}:
+            near = rq.hostiles(facts)
+            # The option said which mob: melee never meets a creeper (body-tool-boundaries §13).
+            target_entry = rq.melee_target(near, facts) if choice == "engage" else rq._hurt_target(near, facts)
+            target = target_entry.get("id") if target_entry else None
+            if isinstance(target, str) and target:
+                if choice == "engage":
+                    # Decision chose to fight and is asked again whenever the Body
+                    # is hurt; the tool's own low-health default would refuse that
+                    # choice and leave the Body standing still (step5-threat-claude6).
+                    return "engage_entity", {"target": target, "disengage_health": 0}
+                inventory = rq._inventory(facts) or {}
+                weapon = next((item for item in ("bow", "crossbow")
+                               if inventory.get(item, inventory.get("minecraft:" + item, 0)) > 0), None)
+                if weapon:
+                    # As far as the bow reaches. The Body no longer walks to a
+                    # target out of range; it says out_of_range and the distance.
+                    return "ranged_attack", {"target": target, "weapon": weapon, "max_range": 64}
+        if choice == "move_away":
+            near = rq.hostiles(facts)
+            target = rq._hurt_target(near, facts)
+            pos = target.get("pos") if target else None
+            if isinstance(pos, (list, tuple)) and len(pos) == 3:
+                kind = str(target.get("type") or target["name"])
+                if rq.mob_kind(target) in rq.DODGE_ONLY:
+                    return "move_away", {"danger_pos": [float(value) for value in pos],
+                                         "min_distance": attack_reach(kind) + DODGE_MARGIN,
+                                         "threat_id": target.get("id"), "threat_kind": kind}
+                # One whole run: from every hostile mob seen, re-measured at each
+                # leg, until the nearest is flee_distance away (body-tool-boundaries-20261110).
+                return "move_away", {"danger_pos": [float(value) for value in pos],
+                                     "min_distance": rq.flee_distance(rq.mob_kind(target), float(target["dist"])),
+                                     "from_hostiles": True,
+                                     "maintenance_checks": 3}
+        if choice == "go_home" and not rq.home_here(facts):
+            # Into the portal cell itself (radius 0): standing in it carries the
+            # Body to the home's dimension, as move_to radius 0 did live (S7, 2026-10-28).
+            portal = rq.home_portal(facts)
+            if portal:
+                return "move_to", {"pos": portal, "radius": 0, "timeout_s": 60.0}
+            return None
+        if choice == "go_home":
+            pos = rq.home_target(facts)
+            # Arrival within 1 block lands inside rq.AT_PLACE_BLOCKS. With
+            # radius 2 (counted on block cells) the walk ended 2.3 blocks
+            # away, still "not home", and was asked and re-run every 1.5 s
+            # (step8-extra-claude3).
+            if isinstance(pos, (list, tuple)) and len(pos) == 3:
+                return "move_to", {"pos": list(pos), "radius": 1, "timeout_s": 60.0}
+        if choice == "approach_player":
+            players = rq.nearby_players(facts)
+            if players:
+                player = players[0]
+                return "move_to", {"pos": player.get("pos"), "radius": 1, "timeout_s": 60.0}
+        if choice == "follow_player":
+            players = rq.nearby_players(facts)
+            if players and players[0].get("id"):
+                return "follow_entity", {"target": players[0]["id"], "timeout_s": 60.0}
+        if choice == "look_player":
+            players = rq.nearby_players(facts)
+            if players and isinstance(players[0].get("pos"), (list, tuple)):
+                return "__reflex_look_at", {"pos": list(players[0]["pos"]), "timeout_s": 5.0}
+        if choice == "seek_player":
+            profile = facts.get("life_profile") or {}
+            visible = {str(p.get("name")) for p in rq.nearby_players(facts)}
+            for relationship in profile.get("relationships") or []:
+                name = relationship.get("player") if isinstance(relationship, Mapping) else None
+                if name and name not in visible:
+                    return "search_for_entity", {"entity_name": name, "entity_types": ["player"],
+                                                  "max_distance": 2.0, "timeout_s": 60.0}
+        return None
+
+    @staticmethod
+    def _deterministic_terminal(execution: Mapping[str, Any], read: Mapping[str, Any]) -> dict[str, Any] | None:
+        """Preserve the existing build_structure material evidence rule."""
+        if not read.get("complete") or not read.get("remaining_cells"):
+            return None
+        facts = execution.get("facts") if isinstance(execution.get("facts"), Mapping) else {}
+        if facts.get("builder_paused") is not True or facts.get("creative") is True:
+            return None
+        if facts.get("inventory_complete") is not True or facts.get("inventory_includes_selected") is not True:
+            return None
+        construction = facts.get("construction") if isinstance(facts.get("construction"), Mapping) else {}
+        item, inventory = construction.get("material_item"), facts.get("inventory")
+        if not isinstance(item, str) or not item or not isinstance(inventory, Mapping):
+            return None
+        if inventory.get(item, 0) != 0:
+            return None
+        return {"reason": "material_exhausted", "confirmed": True, "construction": read}
+
+    @staticmethod
+    def _handoff_facts(
+        execution: Mapping[str, Any], *, reason: str, confirmed: bool,
+        decision: str | None, plan: Mapping[str, Any] | None = None,
+        extra: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        facts = execution.get("facts") if isinstance(execution.get("facts"), Mapping) else {}
+        evidence = {
+            key: facts.get(key) for key in
+            ("position", "navigation", "pathing", "processes", "builder_paused", "goal")
+            if key in facts
+        }
+        construction = facts.get("construction")
+        if isinstance(construction, Mapping):
+            evidence["construction"] = {
+                key: value for key, value in construction.items() if key != "material_item"
+            }
+        safe: dict[str, Any] = {
+            "reason": reason, "confirmed": confirmed,
+            "what": {
+                "tool": execution.get("tool"), "phase": execution.get("phase"),
+                "elapsed_s": execution.get("elapsed_s"),
+                "no_progress_s": execution.get("since_progress_s"),
+                "last_progress_at": execution.get("last_progress_at"),
+                "progress_signal": execution.get("progress_signal"),
+            },
+            "body": {"position": facts.get("position")},
+            "decision": {"choice": decision, "evidence": evidence},
+        }
+        if isinstance(plan, Mapping):
+            safe["plan"] = {
+                key: plan.get(key) for key in
+                ("goal", "current_step", "node_description", "intent_chain")
+                if plan.get(key)
+            }
+        if isinstance(extra, Mapping) and isinstance(extra.get("construction"), Mapping):
+            construction = dict(extra["construction"])
+            construction.pop("material_item", None)
+            safe["construction"] = construction
+        if isinstance(extra, Mapping) and isinstance(extra.get("tool_result"), Mapping):
+            safe["result"] = CallSupervisor._compact_result(extra["tool_result"])
+        if isinstance(extra, Mapping) and isinstance(extra.get("history"), str):
+            safe["history"] = extra["history"][:900]
+        return CallSupervisor._bounded(safe)
+
+    async def run(
+        self, tool: Any, callback: Any, args: tuple[Any, ...], *, call_id: str,
+        timeout_s: float | None, supervision_context: Mapping[str, Any] | None = None,
+        readmit: Callable[[], None] | None = None,
+    ) -> Any:
+        loop = asyncio.get_running_loop()
+        wake = asyncio.Event()
+        record: dict[str, Any] = {
+            "call_id": call_id, "action_id": None, "cancel_requested": False,
+            "settling": False, "reads": 0, "questions": 0, "unknown_answers": 0,
+            "supervision_context": dict(supervision_context or {}),
+            "tool": getattr(tool, "name", "unknown"),
+            "params": dict(args[1]) if len(args) > 1 and isinstance(args[1], Mapping) else {},
+            "started_at": time.monotonic(),
+            "timeout_s": timeout_s,
+            "initial_reader_done": False,
+            "reader_new_fact": False,
+            "history": copy.deepcopy((supervision_context or {}).get("history", [])),
+            "history_total": (len((supervision_context or {}).get("history", []))
+                              + int((supervision_context or {}).get("history_earlier") or 0)),
+        }
+        # A protective action can be launched while its parent call is still
+        # settling.  Preserve that parent so the per-Body loop does not lose
+        # ownership when the short reflex call returns.
+        previous_current = self.current
+        self.current = record
+
+        def receive(payload: Mapping[str, Any]) -> None:
+            if self.current is record and payload.get("call_id") == call_id:
+                record["action_id"] = payload.get("action_id")
+                wake.set()
+
+        telemetry = getattr(self.runtime, "panel_telemetry", None)
+        snapshots = getattr(self.runtime, "execution_snapshots", None)
+
+        def notify(payload: Mapping[str, Any]) -> None:
+            if snapshots is not None:
+                snapshots.observe(call_id, payload)
+            observe = getattr(self, "observe_native_action_progress", None)
+            if callable(observe):
+                observe(call_id, payload)
+            if telemetry is not None:
+                telemetry.observe(call_id, payload)
+            loop.call_soon_threadsafe(receive, {**dict(payload), "call_id": call_id})
+
+        def invoke() -> Any:
+            if snapshots is not None:
+                snapshots.running(call_id)
+            with tool_observation_scope(call_id, notify):
+                result = callback(*args)
+                self.observe_call_result(record["tool"], record["params"], result)
+                return result
+
+        params = args[1] if len(args) > 1 and isinstance(args[1], Mapping) else {}
+        monitor: asyncio.Task[Any] | None = None
+        worker: asyncio.Task[Any] | None = None
+        direct = (getattr(self.runtime, "reflex_manager", None) is not None
+                  and not bool(record["supervision_context"].get("is_plan"))
+                  and not bool(record["supervision_context"].get("is_reflex_action")))
+        try:
+            while True:
+                worker = asyncio.create_task(self.runtime.execution_lane.run(invoke, timeout_s=timeout_s))
+                # Give very short calls a small completion race window. This
+                # is scheduling protection, not a supervision gate: calls
+                # that remain live are always handed to BodyLoop._monitor.
+                grace = FAST_COMPLETION_GRACE_S
+                if grace:
+                    done, _ = await asyncio.wait({worker}, timeout=grace)
+                    if not done:
+                        monitor = await self._register_monitor(record, tool, params, wake, worker)
+                        record["monitor_task"] = monitor
+                else:
+                    monitor = await self._register_monitor(record, tool, params, wake, worker)
+                    record["monitor_task"] = monitor
+                try:
+                    result = await worker
+                except asyncio.CancelledError:
+                    task = asyncio.current_task()
+                    if not record["cancel_requested"] or (task is not None and task.cancelling() > 0):
+                        raise
+                    # Our own stop reached the tool as a cancellation. That
+                    # ends this call, not its caller: the stop still has to
+                    # settle and be handed on like any other stopped call.
+                    result = {"success": False, "reason": "stopped_by_decision",
+                              "canRetry": True, "metrics": {}}
+                    self.observe_call_result(record["tool"], record["params"], result)
+                record["result"] = result
+                if monitor is not None:
+                    await monitor
+                    monitor = None
+                elif record.get("monitor_registered"):
+                    await self._wait_monitor(record)
+                # A direct call is a one-node work tree: when it ends, Decision
+                # chooses between running it again, calling it done, and the
+                # Agent.  Plan calls are judged by WorkPlanExecutor instead.
+                again = False
+                if direct and record.pop("resume_original", False):
+                    again = True
+                elif direct and not record["cancel_requested"]:
+                    again = await self._decide_result(record, tool, params, result) == "repeat"
+                if not again:
+                    break
+                # The unified stop released the old Body claim. A resumed
+                # direct call must re-enter the same admission boundary before
+                # the callback can write; it cannot reuse the old generation.
+                if readmit is not None:
+                    readmit()
+                record["cancel_requested"] = record["settling"] = False
+                record.pop("result", None)
+                record["initial_reader_done"] = record["reader_new_fact"] = False
+                record.pop("decision", None)
+                self.runtime.direct_call_handoffs.pop(call_id, None)
+                if snapshots is not None:
+                    snapshots.begin(call_id, record["tool"], record["params"])
+                wake.clear()
+            handoff = self.runtime.direct_call_handoffs.get(call_id)
+            payload = result if isinstance(result, dict) else getattr(result, "result", None)
+            if handoff is not None and isinstance(payload, dict):
+                if not isinstance(payload.get("metrics"), dict):
+                    payload["metrics"] = {}
+                payload["metrics"]["direct_call_handoff"] = handoff
+                if direct:
+                    self._shown_is_success(payload, handoff)
+            metrics = payload.get("metrics") if isinstance(payload, dict) else None
+            if isinstance(metrics, dict) and metrics.get("control_unknown"):
+                self.runtime.body_control.mark_unknown()
+            return result
+        finally:
+            caller = asyncio.current_task()
+            if caller is not None and caller.cancelling():
+                # A cancelled containing plan will never ask a result
+                # question. Its lifecycle completion must not reserve a slot.
+                record["result_abandoned"] = True
+                self._release_result_pending(str(record.get("call_id") or ""))
+            elif sys.exc_info()[0] is not None:
+                # The tool raised: no result question will follow, so neither
+                # this call nor its monitor may keep a result slot.
+                record["result_abandoned"] = True
+                self._release_result_pending(str(record.get("call_id") or ""))
+            # Plan calls are judged by WorkPlanExecutor immediately after this
+            # method returns; BodyLoop releases their result slot from
+            # decide_plan_result. Direct calls have no second owner and can
+            # release here.
+            if not bool(record.get("supervision_context", {}).get("is_plan")):
+                self._release_result_pending(str(record.get("call_id") or ""))
+            if monitor is not None:
+                monitor.cancel()
+                await asyncio.gather(monitor, return_exceptions=True)
+            if worker is not None and not worker.done():
+                # Cancelled inside the completion grace, before any monitor:
+                # the writer must not run on with nobody judging it.
+                worker.cancel()
+                await asyncio.gather(worker, return_exceptions=True)
+            decision_task = record.get("decision_task")
+            if isinstance(decision_task, asyncio.Task) and not decision_task.done():
+                decision_task.cancel()
+                await asyncio.gather(decision_task, return_exceptions=True)
+            self.runtime.trace.emit(
+                "call_supervision_finished", tool_call_id=call_id,
+                tool=getattr(tool, "name", "unknown"), reads=record["reads"],
+                questions=record["questions"], unknown_answers=record.get("unknown_answers", 0),
+                elapsed_s=round(time.monotonic() - record["started_at"], 3),
+                requests_per_min=round(
+                    record["questions"] / max(time.monotonic() - record["started_at"], 0.001) * 60.0, 3,
+                ),
+            )
+            if self.current is record:
+                self.current = previous_current
+
+
+
+# Compatibility name for slice-1 callers.
+DirectBuildSupervisor = CallSupervisor
+
+__all__ = [
+    "CallSupervisor", "DirectBuildSupervisor", "MAX_SUPERVISION_READS",
+]

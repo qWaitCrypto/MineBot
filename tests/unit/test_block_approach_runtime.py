@@ -1,0 +1,288 @@
+import unittest
+
+from minebot.body import BlockApproachTransactions, GetToBlockConfig
+from minebot.contract import ToolResult
+from tests.unit.test_work_runtime import FakeBody as WorkFakeBody, FakeNavigator
+
+
+class FakeBody(WorkFakeBody):
+    interaction_ready = True
+
+    def perceive(self, scope, params):
+        result = super().perceive(scope, params)
+        if scope == "blockAt" and "interaction_radius" in params:
+            result.data["interaction_ready"] = self.interaction_ready
+        return result
+
+
+def target_blocks(*targets: tuple[int, int, int]) -> dict[tuple[int, int, int], tuple[str, str]]:
+    blocks: dict[tuple[int, int, int], tuple[str, str]] = {}
+    for target in targets:
+        blocks[target] = ("minecraft:oak_log", "SOLID")
+        for dx, dz in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            stand = (target[0] + dx, target[1], target[2] + dz)
+            blocks[stand] = ("minecraft:air", "CLEAR")
+            blocks[(stand[0], stand[1] + 1, stand[2])] = ("minecraft:air", "CLEAR")
+            blocks[(stand[0], stand[1] - 1, stand[2])] = ("minecraft:stone", "SOLID")
+    return blocks
+
+
+class SequencedNavigator(FakeNavigator):
+    def __init__(self, body: FakeBody, outcomes: list[tuple[bool, str]]) -> None:
+        super().__init__()
+        self.body = body
+        self.outcomes = list(outcomes)
+
+    def navigate_to(self, goal, **kwargs):
+        self.calls.append((goal, kwargs))
+        selected = goal.goals[0].representative((0, 0, 0))
+        success, reason = self.outcomes.pop(0)
+        if success:
+            self.body.state_pos = (float(selected[0]), float(selected[1]), float(selected[2]))
+        return ToolResult(
+            success=success,
+            reason=reason,
+            can_retry=not success,
+            metrics={"goal": list(selected), "selected_goal": list(selected)},
+        )
+
+
+class ChangingTargetNavigator(SequencedNavigator):
+    def __init__(self, body: FakeBody, target: tuple[int, int, int]) -> None:
+        super().__init__(body, [(True, "arrived")])
+        self.target = target
+
+    def navigate_to(self, goal, **kwargs):
+        result = super().navigate_to(goal, **kwargs)
+        self.body.blocks[self.target] = ("minecraft:air", "CLEAR")
+        return result
+
+
+class BlockApproachTransactionsTests(unittest.TestCase):
+    def test_occluded_near_target_requires_navigation_and_fresh_readiness(self):
+        target = (2, 64, 0)
+        body = FakeBody(blocks=target_blocks(target), find_blocks=[
+            {"x": 2, "y": 64, "z": 0, "type": "minecraft:oak_log"},
+        ])
+        body.interaction_ready = False
+
+        class RevealingNavigator(SequencedNavigator):
+            def navigate_to(self, goal, **kwargs):
+                result = super().navigate_to(goal, **kwargs)
+                self.body.interaction_ready = True
+                return result
+
+        navigator = RevealingNavigator(body, [(True, "arrived")])
+        result = BlockApproachTransactions(body, navigator).get_to_block(block_types=("oak_log",))
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual(len(navigator.calls), 1)
+        self.assertTrue(result.metrics["interaction_verified"])
+        self.assertFalse(result.metrics["already_in_range"])
+
+    def test_missing_readiness_never_claims_approach_success(self):
+        body = FakeBody(blocks=target_blocks((2, 64, 0)), find_blocks=[
+            {"x": 2, "y": 64, "z": 0, "type": "minecraft:oak_log"},
+        ])
+        body.interaction_ready = None
+        result = BlockApproachTransactions(body, FakeNavigator()).get_to_block(block_types=("oak_log",))
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "perception_failed")
+
+    def test_requires_block_filter(self):
+        body = FakeBody()
+        navigator = FakeNavigator()
+
+        result = BlockApproachTransactions(body, navigator).get_to_block(block_types=())
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "get_to_block_filter_missing")
+
+    def test_already_in_range_rechecks_identity_without_navigation(self):
+        target = (2, 64, 0)
+        body = FakeBody(
+            blocks=target_blocks(target),
+            find_blocks=[{"x": target[0], "y": target[1], "z": target[2], "type": "minecraft:oak_log"}],
+        )
+        navigator = FakeNavigator()
+
+        result = BlockApproachTransactions(body, navigator).get_to_block(block_types=("oak_log",))
+
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual(result.reason, "block_reached")
+        self.assertTrue(result.metrics["identity_verified"])
+        self.assertTrue(result.metrics["range_verified"])
+        self.assertTrue(result.metrics["already_in_range"])
+        self.assertEqual(navigator.calls, [])
+
+    def test_distant_target_uses_complete_pure_movement_stand_domain(self):
+        target = (8, 64, 0)
+        body = FakeBody(
+            blocks=target_blocks(target),
+            find_blocks=[{"x": target[0], "y": target[1], "z": target[2], "type": "minecraft:oak_log"}],
+        )
+        navigator = FakeNavigator()
+        navigator.body = body
+
+        result = BlockApproachTransactions(body, navigator).get_to_block(block_types=("oak_log",))
+
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual(result.reason, "block_reached")
+        self.assertEqual(result.metrics["target"], list(target))
+        self.assertEqual(len(navigator.calls), 1)
+        goal, kwargs = navigator.calls[0]
+        self.assertEqual(len(goal.goals), 4)
+        config = kwargs["config"]
+        self.assertFalse(config.allow_break)
+        self.assertEqual(config.max_break_steps, 0)
+        self.assertFalse(config.allow_place)
+        self.assertFalse(config.allow_pillar)
+        self.assertFalse(config.allow_downward)
+
+    def test_distant_high_target_uses_a_lower_stand_within_interaction_reach(self):
+        target = (8, 75, 0)
+        lower_stand = (7, 73, 0)
+        blocks = {target: ("minecraft:oak_log", "SOLID")}
+        for stand_y in (target[1], target[1] - 1):
+            for dx, dz in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                blocks[(target[0] + dx, stand_y, target[2] + dz)] = (
+                    "minecraft:oak_leaves",
+                    "SOLID",
+                )
+        blocks[lower_stand] = ("minecraft:air", "CLEAR")
+        blocks[(lower_stand[0], lower_stand[1] + 1, lower_stand[2])] = ("minecraft:air", "CLEAR")
+        blocks[(lower_stand[0], lower_stand[1] - 1, lower_stand[2])] = ("minecraft:stone", "SOLID")
+        body = FakeBody(
+            blocks=blocks,
+            find_blocks=[{"x": target[0], "y": target[1], "z": target[2], "type": "minecraft:oak_log"}],
+        )
+        navigator = FakeNavigator()
+        navigator.body = body
+
+        result = BlockApproachTransactions(body, navigator).get_to_block(
+            block_types=("oak_log",),
+            config=GetToBlockConfig(candidate_budget=1),
+        )
+
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual(result.reason, "block_reached")
+        self.assertEqual(result.metrics["selected_goal"], list(lower_stand))
+        domain = result.metrics["attempts"][0]["domain"]
+        self.assertTrue(domain["candidate_targets"][0]["expanded_vertical"])
+        self.assertIn(lower_stand, tuple(goal.pos for goal in navigator.calls[0][0].goals))
+        self.assertEqual(
+            [scope for scope, _params in body.perceptions].count("blockCells"),
+            1,
+        )
+
+    def test_navigation_failure_blacklists_selected_candidate_and_replans(self):
+        near = (8, 64, 0)
+        same_cluster = (8, 65, 0)
+        far = (12, 64, 0)
+        body = FakeBody(
+            blocks=target_blocks(near, same_cluster, far),
+            find_blocks=[
+                {"x": near[0], "y": near[1], "z": near[2], "type": "minecraft:oak_log"},
+                {
+                    "x": same_cluster[0],
+                    "y": same_cluster[1],
+                    "z": same_cluster[2],
+                    "type": "minecraft:oak_log",
+                },
+                {"x": far[0], "y": far[1], "z": far[2], "type": "minecraft:oak_log"},
+            ],
+        )
+        navigator = SequencedNavigator(body, [(False, "no_path"), (True, "arrived")])
+        runtime = BlockApproachTransactions(body, navigator)
+
+        result = runtime.get_to_block(
+            block_types=("oak_log",),
+            config=GetToBlockConfig(candidate_budget=2, candidate_batch_size=2),
+        )
+
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual(result.metrics["target"], list(far))
+        self.assertEqual(result.metrics["candidate_blacklist"], [list(near)])
+        self.assertEqual(len(navigator.calls), 2)
+        self.assertEqual(result.metrics["attempts"][0]["navigation"]["reason"], "no_path")
+        self.assertEqual(result.metrics["searches"][0]["active"], [list(near), list(far)])
+
+    def test_candidate_without_stands_is_retired_without_hiding_other_cluster(self):
+        sealed = (6, 64, 0)
+        reachable = (12, 64, 0)
+        blocks = target_blocks(reachable)
+        blocks[sealed] = ("minecraft:oak_log", "SOLID")
+        body = FakeBody(
+            blocks=blocks,
+            find_blocks=[
+                {"x": sealed[0], "y": sealed[1], "z": sealed[2], "type": "minecraft:oak_log"},
+                {
+                    "x": reachable[0],
+                    "y": reachable[1],
+                    "z": reachable[2],
+                    "type": "minecraft:oak_log",
+                },
+            ],
+        )
+        navigator = SequencedNavigator(body, [(True, "arrived")])
+
+        result = BlockApproachTransactions(body, navigator).get_to_block(
+            block_types=("oak_log",),
+            config=GetToBlockConfig(candidate_budget=2, candidate_batch_size=2),
+        )
+
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual(result.metrics["target"], list(reachable))
+        self.assertEqual(result.metrics["candidate_blacklist"], [list(sealed)])
+        self.assertEqual(len(navigator.calls), 1)
+
+    def test_candidate_batch_spans_different_spatial_regions(self):
+        nearest = (8, 64, 0)
+        near_middle = (9, 64, 5)
+        middle = (10, 64, 10)
+        far_region = (12, 64, 30)
+        targets = (nearest, near_middle, middle, far_region)
+        body = FakeBody(
+            blocks=target_blocks(*targets),
+            find_blocks=[
+                {"x": target[0], "y": target[1], "z": target[2], "type": "minecraft:oak_log"}
+                for target in targets
+            ],
+        )
+        navigator = SequencedNavigator(body, [(True, "arrived")])
+
+        result = BlockApproachTransactions(body, navigator).get_to_block(
+            block_types=("oak_log",),
+            config=GetToBlockConfig(candidate_budget=3, candidate_batch_size=3),
+        )
+
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual(
+            result.metrics["searches"][0]["active"],
+            [list(nearest), list(far_region), list(middle)],
+        )
+
+    def test_post_move_identity_change_is_not_reported_as_reached(self):
+        target = (8, 64, 0)
+        body = FakeBody(
+            blocks=target_blocks(target),
+            find_blocks=[{"x": target[0], "y": target[1], "z": target[2], "type": "minecraft:oak_log"}],
+        )
+        navigator = ChangingTargetNavigator(body, target)
+
+        result = BlockApproachTransactions(body, navigator).get_to_block(
+            block_types=("oak_log",),
+            config=GetToBlockConfig(candidate_budget=1),
+        )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "get_to_block_candidate_budget_exhausted")
+        verification = result.metrics["attempts"][0]["verification"]
+        self.assertEqual(verification["reason"], "get_to_block_target_unusable")
+        self.assertEqual(
+            verification["metrics"]["failures"][0]["reason"],
+            "get_to_block_target_changed",
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()

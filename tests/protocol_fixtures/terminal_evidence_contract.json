@@ -1,0 +1,98 @@
+{
+  "name": "terminal_evidence_contract",
+  "description": "An over-bound producer is structurally truncated before the terminal is retained, queried, and delivered.",
+  "source_evidence_bytes": 3540000,
+  "steps": [
+    {
+      "send": {
+        "builder": "hello",
+        "args": {}
+      },
+      "expect_message": {
+        "channel": "fakeplayer-body",
+        "protocol": "fakeplayer-body/1",
+        "type": "HELLO",
+        "request_id": "r-1"
+      }
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body",
+        "type": "HELLO_ACK",
+        "request_id": "r-1",
+        "protocol": "fakeplayer-body/1",
+        "minecraft_version": "26.1.2",
+        "max_request_bytes": 16384,
+        "max_requests_per_second": 40,
+        "request_types": [
+          "HELLO",
+          "QUERY_ACTION"
+        ]
+      },
+      "expect": [
+        {
+          "kind": "response",
+          "type": "HELLO_ACK",
+          "request_type": "HELLO"
+        }
+      ]
+    },
+    {
+      "send": {
+        "builder": "query_action",
+        "args": {
+          "action_id": "collect-large-1"
+        }
+      },
+      "expect_message": {
+        "channel": "fakeplayer-body",
+        "protocol": "fakeplayer-body/1",
+        "type": "QUERY_ACTION",
+        "request_id": "r-2",
+        "action_id": "collect-large-1"
+      }
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body",
+        "type": "QUERY_ACTION_RESULT",
+        "request_id": "r-2",
+        "action_id": "collect-large-1",
+        "state": "terminal",
+        "terminal": {
+          "classification": "failed",
+          "reason": "no_path",
+          "reason_class": "blocked",
+          "goal": {
+            "action_id": "collect-large-1",
+            "objective": "COLLECT_BLOCK",
+            "bot": "MineBot_1"
+          },
+          "attempts_consumed": 128,
+          "budget_remaining": 0,
+          "closest_approach_distance": 12.25,
+          "unloaded_chunk_count": 0,
+          "elapsed_ticks": 12001,
+          "evidence_truncated": true,
+          "evidence_omitted_fields": [
+            "planning_attempts",
+            "candidate_state_transitions"
+          ]
+        }
+      },
+      "expect": [
+        {
+          "kind": "response",
+          "type": "QUERY_ACTION_RESULT",
+          "request_type": "QUERY_ACTION",
+          "payload_contains": {
+            "state": "terminal"
+          }
+        }
+      ]
+    }
+  ],
+  "final": {
+    "pending_requests": 0
+  }
+}

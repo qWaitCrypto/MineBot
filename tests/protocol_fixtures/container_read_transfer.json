@@ -1,0 +1,86 @@
+{
+  "name": "container_read_transfer",
+  "description": "Java Body reads paged container slots and transfers only after an open-governance proposal under the caller action id.",
+  "steps": [
+    {
+      "send": {"builder": "hello", "args": {}},
+      "expect_message": {"channel": "fakeplayer-body", "protocol": "fakeplayer-body/1", "type": "HELLO", "request_id": "r-1"}
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body", "type": "HELLO_ACK", "request_id": "r-1",
+        "protocol": "fakeplayer-body/1", "minecraft_version": "26.1.2",
+        "max_request_bytes": 16384, "max_requests_per_second": 40,
+        "request_types": ["HELLO", "CONTAINER_READ", "CONTAINER_TRANSFER", "MUTATION_VERDICT"]
+      },
+      "expect": [{"kind": "response", "type": "HELLO_ACK", "request_type": "HELLO"}]
+    },
+    {
+      "send": {
+        "builder": "container_read",
+        "args": {"bot_name": "MineBot_1", "pos": [1, 64, 0], "start": 0, "limit": 12}
+      },
+      "expect_message": {
+        "channel": "fakeplayer-body", "protocol": "fakeplayer-body/1", "type": "CONTAINER_READ",
+        "request_id": "r-2", "bot_name": "MineBot_1", "pos": [1, 64, 0], "start": 0, "limit": 12
+      }
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body", "type": "CONTAINER_READ_RESULT", "request_id": "r-2",
+        "bot": "MineBot_1", "missing": false, "pos": [1, 64, 0], "start": 0, "limit": 12,
+        "nextStart": 12, "totalSlots": 27,
+        "slots": [{"slot": 0, "empty": false, "item": "minecraft:diamond", "count": 3}]
+      },
+      "expect": [{"kind": "response", "type": "CONTAINER_READ_RESULT", "request_type": "CONTAINER_READ", "payload_contains": {"missing": false, "nextStart": 12, "totalSlots": 27}}]
+    },
+    {
+      "send": {
+        "builder": "container_transfer",
+        "args": {
+          "bot_name": "MineBot_1", "action_id": "container-0001",
+          "params": {"pos": [1, 64, 0], "direction": "container_to_bot", "container_slot": 0, "bot_slot": 1, "count": 2}
+        }
+      },
+      "expect_message": {
+        "channel": "fakeplayer-body", "protocol": "fakeplayer-body/1", "type": "CONTAINER_TRANSFER",
+        "request_id": "r-3", "bot_name": "MineBot_1", "action_id": "container-0001",
+        "pos": [1, 64, 0], "direction": "container_to_bot", "container_slot": 0, "bot_slot": 1, "count": 2
+      }
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body", "type": "CONTAINER_TRANSFER_ACK", "request_id": "r-3",
+        "action_id": "container-0001", "state": "accepted"
+      },
+      "expect": [{"kind": "response", "type": "CONTAINER_TRANSFER_ACK", "request_type": "CONTAINER_TRANSFER", "payload_contains": {"state": "accepted"}}]
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body", "type": "MUTATION_PROPOSAL", "proposal_id": "mp-container-1",
+        "bot": "MineBot_1", "action_id": "container-0001",
+        "mutation": {"kind": "open", "x": 1, "y": 64, "z": 0, "block_id": "minecraft:chest", "context": "activate"}
+      },
+      "expect": [{"kind": "proposal", "proposal_id": "mp-container-1", "mutation_kind": "open", "block_id": "minecraft:chest", "x": 1, "y": 64, "z": 0}]
+    },
+    {
+      "send": {
+        "builder": "mutation_verdict",
+        "args": {"proposal_id": "mp-container-1", "allow": true, "reason": "allowed_interaction"}
+      },
+      "expect_message": {
+        "channel": "fakeplayer-body", "protocol": "fakeplayer-body/1", "type": "MUTATION_VERDICT",
+        "proposal_id": "mp-container-1", "allow": true, "reason": "allowed_interaction"
+      }
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body", "type": "EVENT", "bot": "MineBot_1", "seq": 1, "tick": 705,
+        "event": "action_terminal", "action_id": "container-0001",
+        "data": {"classification": "completed", "reason": "partial", "success": true, "item": "minecraft:diamond", "count": 2}
+      },
+      "expect": [{"kind": "event", "name": "action_terminal", "seq": 1, "action_id": "container-0001", "data_contains": {"classification": "completed", "count": 2}}]
+    }
+  ],
+  "final": {"supports": ["CONTAINER_READ", "CONTAINER_TRANSFER"], "pending_requests": 0, "last_seq": {"MineBot_1": 1}}
+}

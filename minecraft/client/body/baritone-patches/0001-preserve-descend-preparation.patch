@@ -1,0 +1,98 @@
+diff --git a/src/api/java/baritone/api/Settings.java b/src/api/java/baritone/api/Settings.java
+index 57a375f..f2bdfa9 100644
+--- a/src/api/java/baritone/api/Settings.java
++++ b/src/api/java/baritone/api/Settings.java
+@@ -26,0 +27 @@ import net.minecraft.client.multiplayer.chat.GuiMessageTag;
++import net.minecraft.core.BlockPos;
+@@ -47,0 +49 @@ import java.util.*;
++import java.util.concurrent.ConcurrentHashMap;
+@@ -64,0 +67,3 @@ public final class Settings {
++    /** Positions that navigation must never break, independent of block type. */
++    public final Set<BlockPos> blocksToDisallowBreakingAt = ConcurrentHashMap.newKeySet();
++
+@@ -163,0 +169,3 @@ public final class Settings {
++    /** Permit submerged/flowing water traversal during MineBot surfacing only. */
++    public final Setting<Boolean> allowSubmergedNavigation = new Setting<>(false);
++
+@@ -483,0 +492,8 @@ public final class Settings {
++    /**
++     * Set to 1.0 to effectively disable this feature
++     * <p>
++     * Path cost multiplier inside a lingering cloud on the ground (dragon's breath, a lingering potion),
++     * out to its radius plus one block. MineBot.
++     */
++    public final Setting<Double> cloudAvoidanceCoefficient = new Setting<>(1.0);
++
+diff --git a/src/main/java/baritone/pathing/movement/Movement.java b/src/main/java/baritone/pathing/movement/Movement.java
+index 739c8ee..162bb3b 100644
+--- a/src/main/java/baritone/pathing/movement/Movement.java
++++ b/src/main/java/baritone/pathing/movement/Movement.java
+@@ -162,0 +163,5 @@ public abstract class Movement implements IMovement, MovementHelper {
++                // A protected block that is still there is never broken; air is.
++                if (MovementHelper.protectedBreakPosition(blockPos.x, blockPos.y, blockPos.z)) {
++                    state.setStatus(MovementStatus.UNREACHABLE);
++                    return true;
++                }
+diff --git a/src/main/java/baritone/pathing/movement/MovementHelper.java b/src/main/java/baritone/pathing/movement/MovementHelper.java
+index 51a2357..9f11a08 100644
+--- a/src/main/java/baritone/pathing/movement/MovementHelper.java
++++ b/src/main/java/baritone/pathing/movement/MovementHelper.java
+@@ -73,0 +74,3 @@ public interface MovementHelper extends ActionCosts, Helper {
++        if (Baritone.settings().blocksToDisallowBreakingAt.contains(new BlockPos(x, y, z))) {
++            return true;
++        }
+@@ -84,0 +88,4 @@ public interface MovementHelper extends ActionCosts, Helper {
++    static boolean protectedBreakPosition(int x, int y, int z) {
++        return Baritone.settings().blocksToDisallowBreakingAt.contains(new BlockPos(x, y, z));
++    }
++
+@@ -173,0 +181,6 @@ public interface MovementHelper extends ActionCosts, Helper {
++        // Waterlogged solids retain their ordinary collision rules; lava is
++        // never admitted. The Body restores this flag on all stop paths.
++        if (Baritone.settings().allowSubmergedNavigation.value
++                && block instanceof LiquidBlock && fluidState.getType() instanceof WaterFluid) {
++            return YES;
++        }
+@@ -213,0 +227,6 @@ public interface MovementHelper extends ActionCosts, Helper {
++        // Waterlogged solids retain their ordinary collision rules; lava is
++        // never admitted. The Body restores this flag on all stop paths.
++        if (Baritone.settings().allowSubmergedNavigation.value
++                && block instanceof LiquidBlock && fluidState.getType() instanceof WaterFluid) {
++            return true;
++        }
+diff --git a/src/main/java/baritone/pathing/path/PathExecutor.java b/src/main/java/baritone/pathing/path/PathExecutor.java
+index 8a5359b..ddbffd1 100644
+--- a/src/main/java/baritone/pathing/path/PathExecutor.java
++++ b/src/main/java/baritone/pathing/path/PathExecutor.java
+@@ -68,0 +69 @@ public class PathExecutor implements IPathExecutor, Helper {
++    private MovementFailure movementFailure;
+@@ -225,0 +227 @@ public class PathExecutor implements IPathExecutor, Helper {
++            movementFailure = new MovementFailure(movementStatus == UNREACHABLE ? "movement_unreachable" : "movement_failed", pathPosition, movement);
+@@ -247,0 +250 @@ public class PathExecutor implements IPathExecutor, Helper {
++                movementFailure = new MovementFailure("movement_timeout", pathPosition, movement);
+@@ -408 +411,2 @@ public class PathExecutor implements IPathExecutor, Helper {
+-                if (next instanceof MovementAscend && current.getDirection().above().equals(next.getDirection().below())) {
++                if (next instanceof MovementAscend && current.getDirection().above().equals(next.getDirection().below())
++                        && ((Movement) current).toBreak(new BlockStateInterface(ctx)).isEmpty()) {
+@@ -651,0 +656,7 @@ public class PathExecutor implements IPathExecutor, Helper {
++    /** Distinguishes execution failure from normal path replacement/cancellation. */
++    public record MovementFailure(String reason, int position, IMovement movement) {}
++
++    public MovementFailure movementFailure() {
++        return movementFailure;
++    }
++
+diff --git a/src/main/java/baritone/utils/pathing/Avoidance.java b/src/main/java/baritone/utils/pathing/Avoidance.java
+index dcaf6e8..7aa6b31 100644
+--- a/src/main/java/baritone/utils/pathing/Avoidance.java
++++ b/src/main/java/baritone/utils/pathing/Avoidance.java
+@@ -24,0 +25 @@ import net.minecraft.core.BlockPos;
++import net.minecraft.world.entity.AreaEffectCloud;
+@@ -81,0 +83,7 @@ public class Avoidance {
++        double cloudCoeff = Baritone.settings().cloudAvoidanceCoefficient.value;
++        if (cloudCoeff != 1.0D) {
++            ctx.entitiesStream()
++                    .filter(entity -> entity instanceof AreaEffectCloud)
++                    .forEach(entity -> res.add(new Avoidance(entity.blockPosition(), cloudCoeff,
++                            (int) Math.ceil(((AreaEffectCloud) entity).getRadius()) + 1)));
++        }

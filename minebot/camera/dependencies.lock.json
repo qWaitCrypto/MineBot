@@ -1,0 +1,88 @@
+{
+  "schema_version": 1,
+  "target_minecraft_version": "26.1.2",
+  "resolved_on": "2026-07-11",
+  "artifacts": [
+    {
+      "name": "fabric-api",
+      "role": "client-runtime",
+      "status": "selected",
+      "project_id": "P7dR8mSH",
+      "version_id": "NqRnXk9x",
+      "version": "0.152.1+26.1.2",
+      "source": "https://modrinth.com/mod/fabric-api/version/NqRnXk9x",
+      "artifact": "fabric-api-0.152.1+26.1.2.jar",
+      "license": "Apache-2.0",
+      "sha256": "b25ad926c8fd107d21b3a9751a98dab787736523b39a47bc2ccb048962680d76",
+      "dependencies": []
+    },
+    {
+      "name": "freecam",
+      "role": "camera-adapter-base",
+      "status": "selected",
+      "project_id": "XeEZ3fK2",
+      "version_id": "dvyNrVvc",
+      "version": "1.4.0+mc26.1.2",
+      "source": "https://modrinth.com/mod/freecam/version/dvyNrVvc",
+      "artifact": "freecam-fabric-1.4.0+mc26.1.2.jar",
+      "license": "MIT",
+      "sha256": "e75b7025acbf14eb86d869259d8d755805f509c683be2fe99e849e088079a431",
+      "dependencies": [
+        {
+          "name": "fabric-api",
+          "kind": "required"
+        },
+        {
+          "name": "cloth-config",
+          "kind": "bundled"
+        },
+        {
+          "name": "mod-menu",
+          "kind": "optional-omitted"
+        }
+      ]
+    },
+    {
+      "name": "camera-utils",
+      "role": "camera-adapter-candidate",
+      "status": "evaluated-rejected",
+      "project_id": "rrwQMaWQ",
+      "version_id": "xuzUlRia",
+      "version": "1.1.2+26.1.2",
+      "source": "https://modrinth.com/mod/camera-utils/version/xuzUlRia",
+      "artifact": "camerautils-fabric-1.1.2+26.1.2.jar",
+      "license": "LicenseRef-All-Rights-Reserved",
+      "sha256": "9c4c51d70d93ad7e9a54a66ca952ee433532ec5279b26f02f63bc5ff8561842b",
+      "dependencies": [],
+      "rejection": "No deterministic unattended target-follow and directive API; GUI or key automation is forbidden."
+    },
+    {
+      "name": "sodium",
+      "role": "renderer-optimization",
+      "status": "selected",
+      "project_id": "AANobbMI",
+      "version_id": "vf7UgZpC",
+      "version": "0.9.1+mc26.1.2",
+      "source": "https://modrinth.com/mod/sodium/version/vf7UgZpC",
+      "artifact": "sodium-fabric-0.9.1+mc26.1.2.jar",
+      "license": "PolyForm-Shield-1.0.0",
+      "sha256": "56d2eb7e8fb7f129286ab9cc89f460fe5a4cea340081ef3c50ac65bce9501b1d",
+      "dependencies": [],
+      "selection_evidence": "D3D12 RTX 3060 A/B at 1280x720 preserved 900/900 capture frames while reducing warmed client CPU and RSS versus vanilla; llvmpipe is not the product renderer."
+    },
+    {
+      "name": "prism-launcher",
+      "role": "launcher-candidate",
+      "status": "evaluated-not-selected",
+      "project_id": "PrismLauncher",
+      "version_id": "11.0.2",
+      "version": "11.0.2",
+      "source": "https://github.com/PrismLauncher/PrismLauncher/releases/tag/11.0.2",
+      "artifact": "PrismLauncher-Windows-MinGW-w64-Portable-11.0.2.zip",
+      "license": "GPL-3.0-only",
+      "sha256": "6f9944caa291a391c1b0f0a291e1c48627abcb3eebee5a14a0a8fbb0555c2bb5",
+      "dependencies": [],
+      "rejection": "Binary and CLI provenance are proven, but an external authenticated observer profile is not provisioned on this host."
+    }
+  ]
+}

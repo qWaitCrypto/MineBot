@@ -1,0 +1,226 @@
+{
+  "name": "ascend_governed_stair",
+  "description": "ASCEND carves a staircase under per-block governance and completes only after a server-observed surface position.",
+  "steps": [
+    {
+      "send": {
+        "builder": "hello",
+        "args": {}
+      },
+      "expect_message": {
+        "channel": "fakeplayer-body",
+        "protocol": "fakeplayer-body/1",
+        "type": "HELLO",
+        "request_id": "r-1"
+      }
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body",
+        "type": "HELLO_ACK",
+        "request_id": "r-1",
+        "protocol": "fakeplayer-body/1",
+        "minecraft_version": "26.1.2",
+        "max_request_bytes": 16384,
+        "max_requests_per_second": 40,
+        "request_types": [
+          "ASCEND",
+          "BODY_STATE",
+          "CANCEL_ACTION",
+          "COLLECT_BLOCK",
+          "ENTITY_READ",
+          "FIND_BLOCKS",
+          "HELLO",
+          "INVENTORY",
+          "MUTATION_VERDICT",
+          "NAVIGATE",
+          "QUERY_ACTION",
+          "RESUME_EVENTS",
+          "WORLD_READ"
+        ]
+      },
+      "expect": [
+        {
+          "kind": "response",
+          "type": "HELLO_ACK",
+          "request_type": "HELLO"
+        }
+      ]
+    },
+    {
+      "send": {
+        "builder": "ascend",
+        "args": {
+          "bot_name": "MineBot_1",
+          "action_id": "ascend-0001",
+          "max_mutations": 8,
+          "timeout_ticks": 2400
+        }
+      },
+      "expect_message": {
+        "channel": "fakeplayer-body",
+        "protocol": "fakeplayer-body/1",
+        "type": "ASCEND",
+        "request_id": "r-2",
+        "bot_name": "MineBot_1",
+        "action_id": "ascend-0001",
+        "timeout_ticks": 2400,
+        "max_mutations": 8
+      }
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body",
+        "type": "ASCEND_ACK",
+        "request_id": "r-2",
+        "action_id": "ascend-0001",
+        "state": "accepted"
+      },
+      "expect": [
+        {
+          "kind": "response",
+          "type": "ASCEND_ACK",
+          "request_type": "ASCEND",
+          "payload_contains": {
+            "state": "accepted"
+          }
+        }
+      ]
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body",
+        "type": "MUTATION_PROPOSAL",
+        "proposal_id": "mp-ascend-1",
+        "bot": "MineBot_1",
+        "action_id": "ascend-0001",
+        "mutation": {
+          "kind": "break",
+          "x": 22,
+          "y": 60,
+          "z": -1,
+          "block_id": "minecraft:stone",
+          "context": "recovery"
+        }
+      },
+      "expect": [
+        {
+          "kind": "proposal",
+          "proposal_id": "mp-ascend-1",
+          "block_id": "minecraft:stone",
+          "mutation_kind": "break",
+          "x": 22,
+          "y": 60,
+          "z": -1
+        }
+      ]
+    },
+    {
+      "send": {
+        "builder": "mutation_verdict",
+        "args": {
+          "proposal_id": "mp-ascend-1",
+          "allow": true,
+          "reason": "natural_terrain_allow"
+        }
+      },
+      "expect_message": {
+        "channel": "fakeplayer-body",
+        "protocol": "fakeplayer-body/1",
+        "type": "MUTATION_VERDICT",
+        "proposal_id": "mp-ascend-1",
+        "allow": true,
+        "reason": "natural_terrain_allow"
+      }
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body",
+        "type": "EVENT",
+        "bot": "MineBot_1",
+        "seq": 1,
+        "tick": 901,
+        "event": "ascent_break_verified",
+        "action_id": "ascend-0001",
+        "data": {
+          "x": 22,
+          "y": 60,
+          "z": -1,
+          "block_id": "minecraft:stone"
+        }
+      },
+      "expect": [
+        {
+          "kind": "event",
+          "name": "ascent_break_verified",
+          "seq": 1
+        }
+      ]
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body",
+        "type": "EVENT",
+        "bot": "MineBot_1",
+        "seq": 2,
+        "tick": 930,
+        "event": "ascent_step_verified",
+        "action_id": "ascend-0001",
+        "data": {
+          "x": 23,
+          "y": 60,
+          "z": -1,
+          "ascend_steps": 1
+        }
+      },
+      "expect": [
+        {
+          "kind": "event",
+          "name": "ascent_step_verified",
+          "seq": 2
+        }
+      ]
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body",
+        "type": "EVENT",
+        "bot": "MineBot_1",
+        "seq": 3,
+        "tick": 1180,
+        "event": "action_terminal",
+        "action_id": "ascend-0001",
+        "data": {
+          "classification": "completed",
+          "reason": "surface_reached",
+          "final_y": 70,
+          "ascend_steps": 11,
+          "break_steps": 24,
+          "elapsed_ticks": 280,
+          "broken": []
+        }
+      },
+      "expect": [
+        {
+          "kind": "event",
+          "name": "action_terminal",
+          "seq": 3,
+          "data_contains": {
+            "classification": "completed",
+            "reason": "surface_reached",
+            "final_y": 70
+          }
+        }
+      ]
+    }
+  ],
+  "final": {
+    "supports": [
+      "ASCEND"
+    ],
+    "pending_requests": 0,
+    "last_seq": {
+      "MineBot_1": 3
+    }
+  }
+}

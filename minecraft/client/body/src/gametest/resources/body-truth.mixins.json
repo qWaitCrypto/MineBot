@@ -1,0 +1,7 @@
+{
+  "required": true,
+  "package": "dev.minebot.client.body.gametest.mixin",
+  "compatibilityLevel": "JAVA_25",
+  "client": ["BodyTruthAttackMixin", "BodyTruthDamageMixin"],
+  "injectors": {"defaultRequire": 1}
+}

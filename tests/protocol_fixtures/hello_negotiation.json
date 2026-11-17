@@ -1,0 +1,67 @@
+{
+  "name": "hello_negotiation",
+  "description": "HELLO negotiates protocol, limits, and the capability list.",
+  "steps": [
+    {
+      "send": {
+        "builder": "hello",
+        "args": {}
+      },
+      "expect_message": {
+        "channel": "fakeplayer-body",
+        "protocol": "fakeplayer-body/1",
+        "type": "HELLO",
+        "request_id": "r-1"
+      }
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body",
+        "type": "HELLO_ACK",
+        "request_id": "r-1",
+        "protocol": "fakeplayer-body/1",
+        "minecraft_version": "26.1.2",
+        "max_request_bytes": 16384,
+        "max_requests_per_second": 40,
+        "request_types": [
+          "ASCEND",
+          "BODY_STATE",
+          "CANCEL_ACTION",
+          "COLLECT_BLOCK",
+          "ENTITY_READ",
+          "FIND_BLOCKS",
+          "HELLO",
+          "INVENTORY",
+          "MUTATION_VERDICT",
+          "NAVIGATE",
+          "QUERY_ACTION",
+          "RESUME_EVENTS",
+          "WORLD_READ"
+        ],
+        "seq": 1,
+        "server_tick": 120,
+        "sent_at_ms": 1785000000000
+      },
+      "expect": [
+        {
+          "kind": "response",
+          "type": "HELLO_ACK",
+          "request_type": "HELLO"
+        }
+      ]
+    }
+  ],
+  "final": {
+    "negotiated": true,
+    "supports": [
+      "ASCEND",
+      "FIND_BLOCKS",
+      "NAVIGATE",
+      "COLLECT_BLOCK",
+      "MUTATION_VERDICT"
+    ],
+    "not_supported": [
+      "PLACE_BLOCK"
+    ]
+  }
+}

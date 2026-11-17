@@ -1,0 +1,266 @@
+import asyncio
+import json
+import tempfile
+import threading
+import time
+import unittest
+from pathlib import Path
+
+from minebot.app.observability import JsonlObservationSink, sanitize_observation
+from minebot.app.runner import AgentRuntime, RuntimeTrace
+from minebot.app.real_server_session import TerminalTruth, safe_evaluate_terminal_truth
+from minebot.brain.context import AgentContext
+from minebot.brain.lifecycle import LifecycleController
+from minebot.brain.modes import ModeRuntime
+from minebot.brain.progress import ProgressAuthority
+from minebot.brain.registry import ToolRegistry
+
+from tests.unit.test_agent_runner_spine import FakeBody
+
+
+class AgentObservabilityTests(unittest.TestCase):
+    def test_jsonl_sink_writes_sanitized_records(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "session.jsonl"
+            sink = JsonlObservationSink(path)
+            trace = RuntimeTrace(session_id="s1", sink=sink)
+            raw_key = "sk-exampletokenvalue1234567890"
+
+            trace.emit(
+                "provider_config",
+                api_key="secret",
+                nested={"auth_token": "jwt"},
+                recent_session_messages=[{"role": "user", "content": f"provider key: {raw_key}"}],
+                ok=True,
+            )
+            trace.close()
+
+            rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+            rendered = json.dumps(rows, sort_keys=True)
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["session_id"], "s1")
+            self.assertEqual(rows[0]["event"], "provider_config")
+            self.assertEqual(rows[0]["api_key"], "<redacted>")
+            self.assertEqual(rows[0]["nested"]["auth_token"], "<redacted>")
+            self.assertNotIn(raw_key, rendered)
+            self.assertEqual(
+                rows[0]["recent_session_messages"][0]["content"],
+                "provider key: <redacted>",
+            )
+            self.assertTrue(rows[0]["ok"])
+
+    def test_background_sink_writes_records_in_order_and_close_drains(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "session.jsonl"
+            sink = JsonlObservationSink(path, background=True)
+            for index in range(200):
+                sink.write({"event": "e", "index": index, "api_key": "secret"})
+            sink.close()
+
+            rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual([row["index"] for row in rows], list(range(200)))
+            self.assertEqual(rows[0]["api_key"], "<redacted>")
+
+    def test_background_sink_write_does_not_wait_for_the_disk(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "session.jsonl"
+            sink = JsonlObservationSink(path, background=True)
+            disk_free = threading.Event()
+            write_line = sink._write_line
+
+            def slow_disk(record):
+                disk_free.wait(5)
+                write_line(record)
+
+            sink._write_line = slow_disk
+            started = time.monotonic()
+            for index in range(5):
+                sink.write({"event": "e", "index": index})
+            self.assertLess(time.monotonic() - started, 0.5)
+            disk_free.set()
+            sink.close()
+
+            rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual([row["index"] for row in rows], list(range(5)))
+
+    def test_bounded_trace_keeps_recent_and_durable_events_in_seq_order(self):
+        trace = RuntimeTrace(retain_limit=10, durable_events=frozenset({"assistant_message"}))
+        trace.emit("assistant_message", content="first")
+        for index in range(100):
+            trace.emit("decision_request", index=index)
+
+        self.assertLessEqual(len(trace.events), 21)
+        self.assertEqual(trace.events[0]["content"], "first")
+        self.assertEqual(trace.events[-1]["index"], 99)
+        seqs = [event["seq"] for event in trace.events]
+        self.assertEqual(seqs, sorted(seqs))
+        self.assertEqual([event["seq"] for event in trace.events_since(95)], [96, 97, 98, 99, 100, 101])
+        self.assertEqual(trace.events_since(0)[0]["content"], "first")
+
+    def test_unbounded_trace_keeps_every_event(self):
+        trace = RuntimeTrace()
+        for index in range(300):
+            trace.emit("decision_request", index=index)
+        self.assertEqual(len(trace.events), 300)
+        self.assertEqual(len(trace.events_since(100)), 200)
+
+    def test_decision_outage_reaches_the_session_as_a_lifecycle_event(self):
+        async def fake_runner(*args, **kwargs):
+            return {"ok": True}
+
+        runtime = AgentRuntime(
+            body=FakeBody(),
+            registry=ToolRegistry(),
+            agent_context=AgentContext(system_prompt="sys", goal_text="collect"),
+            lifecycle=LifecycleController(),
+            mode_runtime=ModeRuntime(),
+            authority=ProgressAuthority(),
+            runner_run=fake_runner,
+            trace=RuntimeTrace(),
+        )
+        seen = []
+        runtime.set_sdk_body_event_listener(seen.append)
+        runtime.decision_client.on_link("unavailable", {"unanswered": 30, "down_for_s": 31.0, "error": "TimeoutError"})
+        runtime.decision_client.on_link("available", {"unanswered": 64, "down_for_s": 70.2})
+
+        self.assertEqual([event.name for event in seen], ["decision_unavailable", "decision_available"])
+        self.assertEqual({event.data["native_epoch"] for event in seen}, {"decision-link"})
+        self.assertNotEqual(seen[0].seq, seen[1].seq)
+        self.assertEqual(seen[0].data["down_for_s"], 31.0)
+        self.assertIn("cannot choose their next step", seen[0].data["meaning"])
+
+    def test_runtime_trace_records_body_state_events_and_turn_profile_to_jsonl(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "runtime.jsonl"
+            trace = RuntimeTrace(session_id="runtime-test", sink=JsonlObservationSink(path))
+            body = FakeBody()
+
+            async def fake_runner(*args, **kwargs):
+                return {"ok": True}
+
+            runtime = AgentRuntime(
+                body=body,
+                registry=ToolRegistry(),
+                agent_context=AgentContext(system_prompt="sys", goal_text="collect"),
+                lifecycle=LifecycleController(),
+                mode_runtime=ModeRuntime(),
+                authority=ProgressAuthority(),
+                runner_run=fake_runner,
+                trace=trace,
+            )
+
+            asyncio.run(runtime.run_turn())
+            trace.close()
+
+            rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+            events = [row["event"] for row in rows]
+            self.assertIn("body_state", events)
+            self.assertIn("body_events", events)
+            self.assertIn("turn_profile", events)
+            self.assertIn("turn_completed", events)
+            body_state = next(row for row in rows if row["event"] == "body_state")
+            self.assertEqual(body_state["inventory_counts"], {})
+            self.assertIsNone(body_state["selected_item"])
+            self.assertIsNone(body_state["offhand_item"])
+            self.assertIsNone(body_state["body_owner"])
+            self.assertIsNone(body_state["pending_action_count"])
+            body_events = next(row for row in rows if row["event"] == "body_events")
+            self.assertEqual(body_events["events"], [])
+            self.assertTrue(all(row["session_id"] == "runtime-test" for row in rows))
+            seqs = [row["seq"] for row in rows]
+            self.assertEqual(seqs, sorted(seqs))
+
+    def test_sanitize_observation_recurses_without_destroying_public_fields(self):
+        safe = sanitize_observation(
+            {
+                "event": "tool_result",
+                "password": "pw",
+                "metrics": [{"token": "abc", "count": 3}],
+                "usage": {"input_tokens": 72_858, "output_tokens": 38,
+                          "input_tokens_details": {"cached_tokens": 100, "access_token": "secret"},
+                          "output_tokens_details": {"reasoning_tokens": 12},
+                          "total_tokens": "credential-shaped-value"},
+            }
+        )
+
+        self.assertEqual(safe["event"], "tool_result")
+        self.assertEqual(safe["password"], "<redacted>")
+        self.assertEqual(safe["metrics"][0]["token"], "<redacted>")
+        self.assertEqual(safe["metrics"][0]["count"], 3)
+        self.assertEqual(safe["usage"], {"input_tokens": 72_858, "output_tokens": 38,
+                         "input_tokens_details": {"cached_tokens": 100, "access_token": "<redacted>"},
+                         "output_tokens_details": {"reasoning_tokens": 12}, "total_tokens": "<redacted>"})
+
+    def test_sanitize_observation_redacts_secret_values_embedded_in_text(self):
+        raw_key = "sk-exampletokenvalue1234567890"
+        raw_bearer = "abcdefghijklmnopqrstuvwxyz0123456789"
+        safe = sanitize_observation(
+            {
+                "recent_session_messages": [
+                    {"role": "user", "content": f"provider key: {raw_key}"},
+                    {"role": "user", "content": f"Authorization: Bearer {raw_bearer}"},
+                ],
+                "summary": f"api_key={raw_key}",
+            }
+        )
+
+        rendered = json.dumps(safe, sort_keys=True)
+        self.assertNotIn(raw_key, rendered)
+        self.assertNotIn(raw_bearer, rendered)
+        self.assertEqual(safe["recent_session_messages"][0]["content"], "provider key: <redacted>")
+        self.assertEqual(
+            safe["recent_session_messages"][1]["content"],
+            "Authorization: Bearer <redacted>",
+        )
+        self.assertEqual(safe["summary"], "api_key=<redacted>")
+
+    def test_safe_terminal_truth_failure_is_logged_and_degrades_to_unsatisfied(self):
+        class BrokenBody(FakeBody):
+            def perceive(self, scope, params):
+                if scope == "inventory":
+                    raise RuntimeError("inventory truncated")
+                return super().perceive(scope, params)
+
+            def get_inventory(self):  # pragma: no cover - terminal truth must not call this path
+                raise RuntimeError("inventory truncated")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "runtime.jsonl"
+            trace = RuntimeTrace(session_id="terminal-test", sink=JsonlObservationSink(path))
+            body = BrokenBody()
+
+            async def fake_runner(*args, **kwargs):
+                return {"ok": True}
+
+            runtime = AgentRuntime(
+                body=body,
+                registry=ToolRegistry(),
+                agent_context=AgentContext(system_prompt="sys", goal_text="collect 64 logs"),
+                lifecycle=LifecycleController(),
+                mode_runtime=ModeRuntime(),
+                authority=ProgressAuthority(),
+                runner_run=fake_runner,
+                trace=trace,
+            )
+            asyncio.run(runtime.run_turn())
+
+            class Parts:
+                def __init__(self, runtime):
+                    self.runtime = runtime
+
+            class Session:
+                def __init__(self, runtime):
+                    self.parts = Parts(runtime)
+
+            final = type("Final", (), {"status": "completed_turn", "lifecycle": type("L", (), {"value": "active"})()})()
+            truth = safe_evaluate_terminal_truth(body, "collect 64 logs", final, session=Session(runtime))
+            trace.close()
+
+            self.assertIsInstance(truth, TerminalTruth)
+            self.assertFalse(truth.satisfied)
+            rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+            self.assertTrue(any(row["event"] == "terminal_truth_failed" for row in rows))
+
+
+if __name__ == "__main__":
+    unittest.main()

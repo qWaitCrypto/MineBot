@@ -1,0 +1,162 @@
+# MineBot real-client Body
+
+This module starts a real Fabric client with upstream Baritone and serves the
+thin Python `RealClientBody` adapter. It is the client execution backend for
+the abstract Body boundary; it does not replace the current Java FakePlayer
+backend until a caller selects the `real_client` provider.
+
+The supported tuple is Minecraft `26.1.2`, Fabric Loader `0.19.3`, Fabric API
+`0.152.1+26.1.2`, Java `25`, and Baritone `v1.18.0` with the narrow MineBot
+execution patch (`1.18.0+minebot.3`). Gradle builds the unoptimized Fabric jar
+from upstream commit `016cc210434894f371baf0c327ac94907d12dcd3` using
+[tools/build_baritone.py](../../../tools/build_baritone.py) and the checked-in
+patch. The patch preserves required clearing before the Descend→Ascend sprint
+shortcut, exposes actual movement failure reasons, and blocks protected ledger
+positions during both path calculation and movement execution.
+The generated sidecar records the upstream revision and SHA-256 of patch/jar.
+The first build needs Git, Python 3, Java 25 and upstream Gradle dependencies;
+subsequent unchanged builds reuse the artifact. The script forwards an HTTP
+proxy from `HTTPS_PROXY` to JVM downloads. It does not alter the FakePlayer backend.
+
+## Run against the disposable local server
+
+Start MineBot's local test server first, then run from `minecraft/`:
+
+```bash
+export MINEBOT_CLIENT_SERVER=127.0.0.1:25566
+export MINEBOT_CLIENT_USERNAME=MineBotCombat
+export MINEBOT_CLIENT_IPC_PORT=8768
+# Only for an explicitly disposable loopback world:
+export MINEBOT_CLIENT_DISPOSABLE_WORLD=true
+./gradlew :client:body:runClient --no-daemon --console=plain
+```
+
+This opens the controlled client's window on the current desktop. In WSL with
+WSLg, use `DISPLAY=:0` so the window appears on the Windows desktop. Keep this
+window visible when observing real Body or Agent experiments. For an explicitly
+headless run, prefix the same command with `xvfb-run -a`; Xvfb renders to a
+virtual display and does not show a desktop window.
+
+WSLg can create a transparent Windows window despite a ready client. On this
+machine, WSL 2.7.3 reports `[WARN:COPY MODE]`, a shared-memory error in
+`/mnt/wslg/weston.log`, and Windows RDP graphics decoding error `0x80070490`.
+Check the actual Windows picture before reporting the window as visible.
+An existing FFmpeg/FFplay loopback stream can temporarily show the same client's
+live picture in a Windows viewer; that viewer does not forward game input.
+
+After the client reports readiness, `RealClientBody` can submit navigation,
+mine, get-to-block, explore, follow/pickup, farm, Builder/Clear and Elytra
+objectives, plus typed combat, crafting, container/furnace, handoff and
+vertical-recovery actions. Typed client controls and world reads use the same
+correlated action id, progress/terminal result, and cancellation path.
+
+The real `consumption` and `flight` cases are described in
+[TESTING.md](../../../TESTING.md). Food use holds native input through
+consumption. Elytra completion requires observed flight and a grounded landing
+within eight blocks of the destination. The verified flight fixture uses a
+drop start with supplied equipment; measured results are in the
+[verification record](verification-20261007.md).
+
+The Agent session keeps Java as its default. To select this backend explicitly,
+set `MINEBOT_BODY_PROVIDER=real_client`, `MINEBOT_REAL_CLIENT_HOST` (default
+`127.0.0.1`), and `MINEBOT_REAL_CLIENT_PORT` (default `8768`) before starting
+the Python session; the client must already be running and ready. There is no
+automatic fallback to the Java backend.
+
+The first local run may require setting `onboardAccessibility:false` in the
+ignored `client/body/run/options.txt`; this is test-client state and is not a
+repository setting. The server-name resolver mixin only bypasses Mojang's
+external address blocklist for this local test process.
+
+## Current evidence
+
+The loopback Phase A probe now waits for a loaded feet chunk and a grounded
+player before accepting work. Python can then send one `goto` or `mine` target
+and receive a structured terminal with inventory delta, process state, path
+events, and cancellation latency. The controlled fixture proves global
+`mine:oak_log` after readiness; starting the same request from the JOIN callback
+still reproduces the old search failure.
+
+The evidence record still distinguishes verified process behavior from
+client transactions that need dedicated hostile, recipe, menu, multiplayer,
+and terrain fixtures. These actions are typed client transactions with
+explicit terminal verification; they do not silently fall back to Java. See
+the [Body capability matrix](../../../docs/references/real-client-body-capability-matrix-20261006.md)
+for the action boundary and the
+[conformance record](../../../docs/references/client-body-baritone-capability-evidence-20261006.md)
+for measurements.
+
+## Reproduce the typed transaction proof
+
+From the repository root, with the disposable server and client running:
+
+```bash
+.venv/bin/python -m tests.e2e_real_client_body_transactions --disposable-local-server --case vertical
+.venv/bin/python -m tests.e2e_real_client_body_transactions --disposable-local-server --case ranged
+.venv/bin/python -m tests.e2e_real_client_body_transactions --disposable-local-server --case menus
+.venv/bin/python -m tests.e2e_real_client_body_transactions --disposable-local-server --case combat_tools
+.venv/bin/python -m tests.e2e_real_client_body_transactions --disposable-local-server --case vertical_tools
+```
+
+For handoff, launch a second client with username `Receiver` and IPC port
+`8769`, then run the same probe with `--case handoff` or `--case handoff_tools`.
+The probe checks the server inventory of the actual recipient; a full recipient inventory must
+fail without a receipt. Reports are saved as local JSON under `logs/`.
+
+The vertical actions delegate digging, pillar placement, and movement to
+upstream Baritone. They wait for a grounded destination and use server block
+updates as mutation evidence. Their break/place calls require the disposable
+world opt-in; without it, the probe's `--case vertical_denied` verifies the
+floor and position remain intact. The distance, liquid, and mutation-position
+bounds are enforced before a vertical interaction. This narrow guard does not
+provide shared-world protection for the other Baritone processes.
+
+The `menus` fixture supplies resources, unlocks recipes, and exercises the
+canonical Agent tool callables for sticks, workstation pickaxe/cake crafting,
+bucket remainders, chest transfer in both directions, and smelt/fuel reclaim.
+It also checks protocol inventory slots, partial count moves, equipment round
+trips and invalid requests against server inventory/equipment reads. Launch
+the client and wait for readiness before running the fixture; this is a
+directed tool proof, without model planning or autonomous resource gathering.
+
+`combat_tools` calls `equip_item`, `engage_entity`, and `ranged_attack` with
+weapons supplied in the backpack. It checks the named target's death/damage,
+an untouched closer decoy, and the missing-ammunition reason. `vertical_tools`
+calls `dig_down`, `dig_up` with a specified scaffold, and `go_to_surface`, then
+checks grounded server positions, the distance refusal, and tool cancellation.
+`handoff_tools` calls `give_player` and checks its common pickup receipt and
+the full-recipient failure. These use the canonical tool callables without a
+planning model. They do not establish a complete autonomous Agent task.
+
+See [the dated verification record](verification-20261007.md) for actual
+results, reproduced failures, and the remaining coverage limits.
+
+## Execution regression (2026-10-09)
+
+Navigation state includes the current movement's type, endpoints, pending
+break/place block states, native calculation count and repeated execution
+failures. Two failures of the same movement without meaningful displacement,
+world work or increasing native mining progress end with `no_progress` after
+normal cancellation. Recalculation and elapsed idle time alone do not fail an
+action. This recognizes repeated physical execution failures, not every
+possible planning loop.
+
+`buildStructure` and the tracked `builderBuildFile` action temporarily enable
+Baritone inventory management and restore the previous setting at terminal or
+disconnect. Model `build_schematic` waits for that action and then independently
+checks the blueprint cells. Raw IPC `builder_file` remains a developer control;
+it is not the model's build path.
+
+On a **separate disposable** local server/client, the focused fixture supplies
+terrain/materials and temporarily freezes movement; it must never target an
+active Agent or shared world:
+
+```bash
+.venv/bin/python -m tests.e2e_client_navigation_execution \
+  --disposable-local-server --ipc-port 8769 --rcon-port 25578 \
+  --player BatchProbe --output logs/client-execution-regression
+```
+
+The fixture uses `MINEBOT_TEST_RCON_PASSWORD` (default `test`). Actual roof
+reproduction and bounded-regression results are recorded in RUNTIME.md; these
+are developer-directed physical checks, not an autonomous house acceptance.

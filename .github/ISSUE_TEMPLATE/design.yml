@@ -1,0 +1,75 @@
+name: Design proposal
+description: Discuss architecture, safety, permissions, Memory, multi-bot behavior, or transport before implementation.
+title: "[Design] "
+body:
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Agent Runtime
+        - Body / Scarpet
+        - Evaluation
+        - Observability
+        - Safety / governance
+        - Memory / Skills
+        - Multi-bot
+        - Transport
+        - Developer Experience
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem and evidence
+      description: Describe the observed limitation. Link measurements or reproducible cases where possible.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed contract
+      description: Describe behavior, ownership, inputs/outputs, and failure semantics before implementation details.
+    validations:
+      required: true
+
+  - type: textarea
+    id: boundaries
+    attributes:
+      label: Architecture boundaries
+      description: Explain Brain/Body ownership, single-writer behavior, terminal truth, and transport impact.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+    validations:
+      required: true
+
+  - type: textarea
+    id: safety
+    attributes:
+      label: Safety and governance impact
+      description: Include player-build protection, mutation permissions, shared servers, credentials, and privacy.
+    validations:
+      required: true
+
+  - type: textarea
+    id: non_goals
+    attributes:
+      label: Non-goals
+      description: State what this proposal deliberately does not change.
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I am proposing a contract for discussion, not treating a large implementation as pre-approved.
+          required: true

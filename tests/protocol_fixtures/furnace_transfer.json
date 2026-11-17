@@ -1,0 +1,121 @@
+{
+  "name": "furnace_transfer",
+  "description": "FURNACE_TRANSFER preserves named slots and waits for a fresh open-governance verdict before moving inventory.",
+  "steps": [
+    {
+      "send": {"builder": "hello", "args": {}},
+      "expect_message": {
+        "channel": "fakeplayer-body",
+        "protocol": "fakeplayer-body/1",
+        "type": "HELLO",
+        "request_id": "r-1"
+      }
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body",
+        "type": "HELLO_ACK",
+        "request_id": "r-1",
+        "protocol": "fakeplayer-body/1",
+        "minecraft_version": "26.1.2",
+        "max_request_bytes": 16384,
+        "max_requests_per_second": 40,
+        "request_types": ["HELLO", "FURNACE_TRANSFER", "MUTATION_VERDICT"]
+      },
+      "expect": [{"kind": "response", "type": "HELLO_ACK", "request_type": "HELLO"}]
+    },
+    {
+      "send": {
+        "builder": "furnace_transfer",
+        "args": {
+          "bot_name": "MineBot_1",
+          "action_id": "furnace-0001",
+          "params": {
+            "pos": [1, 64, 0],
+            "direction": "bot_to_furnace",
+            "furnace_slot": "input",
+            "bot_slot": 5,
+            "count": 2,
+            "max_stack": 64
+          }
+        }
+      },
+      "expect_message": {
+        "channel": "fakeplayer-body",
+        "protocol": "fakeplayer-body/1",
+        "type": "FURNACE_TRANSFER",
+        "request_id": "r-2",
+        "pos": [1, 64, 0],
+        "direction": "bot_to_furnace",
+        "furnace_slot": "input",
+        "bot_slot": 5,
+        "count": 2,
+        "max_stack": 64,
+        "bot_name": "MineBot_1",
+        "action_id": "furnace-0001"
+      }
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body",
+        "type": "FURNACE_TRANSFER_ACK",
+        "request_id": "r-2",
+        "action_id": "furnace-0001",
+        "state": "accepted"
+      },
+      "expect": [{"kind": "response", "type": "FURNACE_TRANSFER_ACK", "request_type": "FURNACE_TRANSFER", "payload_contains": {"state": "accepted"}}]
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body",
+        "type": "MUTATION_PROPOSAL",
+        "proposal_id": "mp-furnace-1",
+        "bot": "MineBot_1",
+        "action_id": "furnace-0001",
+        "mutation": {"kind": "open", "x": 1, "y": 64, "z": 0, "block_id": "minecraft:furnace", "context": "activate"}
+      },
+      "expect": [{"kind": "proposal", "proposal_id": "mp-furnace-1", "mutation_kind": "open", "block_id": "minecraft:furnace", "x": 1, "y": 64, "z": 0}]
+    },
+    {
+      "send": {
+        "builder": "mutation_verdict",
+        "args": {"proposal_id": "mp-furnace-1", "allow": true, "reason": "allowed_interaction"}
+      },
+      "expect_message": {
+        "channel": "fakeplayer-body",
+        "protocol": "fakeplayer-body/1",
+        "type": "MUTATION_VERDICT",
+        "proposal_id": "mp-furnace-1",
+        "allow": true,
+        "reason": "allowed_interaction"
+      }
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body",
+        "type": "EVENT",
+        "bot": "MineBot_1",
+        "seq": 1,
+        "tick": 910,
+        "event": "action_terminal",
+        "action_id": "furnace-0001",
+        "data": {
+          "classification": "completed",
+          "reason": "completed",
+          "success": true,
+          "direction": "bot_to_furnace",
+          "furnace_slot": "input",
+          "bot_slot": 5,
+          "item": "minecraft:raw_iron",
+          "count": 2,
+          "furnace_before": {"slot": 0, "empty": true, "item": null, "count": 0},
+          "furnace_after": {"slot": 0, "empty": false, "item": "minecraft:raw_iron", "count": 2},
+          "bot_before": {"slot": 5, "empty": false, "item": "minecraft:raw_iron", "count": 2},
+          "bot_after": {"slot": 5, "empty": true, "item": null, "count": 0}
+        }
+      },
+      "expect": [{"kind": "event", "name": "action_terminal", "seq": 1, "action_id": "furnace-0001", "data_contains": {"success": true, "furnace_slot": "input", "count": 2}}]
+    }
+  ],
+  "final": {"supports": ["FURNACE_TRANSFER"], "pending_requests": 0, "last_seq": {"MineBot_1": 1}}
+}

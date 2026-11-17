@@ -1,0 +1,165 @@
+"""Startup selection for the physical Body implementation."""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+from dataclasses import dataclass
+from enum import Enum
+
+from minebot.body import VoxelStructureRiskAssessor
+from minebot.contract import Body, Region
+from minebot.game.governance import GovernancePolicy
+from minebot.game.java_body import JavaBody
+from minebot.game.java_body_adapter import (
+    DuplexTransport,
+    GovernanceAnswerer,
+    JavaBodyClient,
+    websocket_transport,
+)
+from minebot.game.real_client_body import RealClientBody
+from minebot.game.real_client_ipc import RealClientIpc
+
+
+class BodyProviderConfigError(ValueError):
+    pass
+
+
+class BodyProviderName(str, Enum):
+    SCARPET = "scarpet"
+    JAVA = "java"
+    COMPOSITE = "composite"
+    REAL_CLIENT = "real_client"
+
+    @classmethod
+    def parse(cls, value: str | "BodyProviderName") -> "BodyProviderName":
+        if isinstance(value, cls):
+            return value
+        try:
+            return cls(str(value).strip().lower())
+        except ValueError as error:
+            choices = ", ".join(item.value for item in cls)
+            raise BodyProviderConfigError(
+                f"MINEBOT_BODY_PROVIDER must be one of: {choices}"
+            ) from error
+
+
+@dataclass(frozen=True)
+class BodyProviderRuntime:
+    name: BodyProviderName
+    body: Body
+    governance: GovernancePolicy
+    scarpet_body: Body | None
+    java_body: JavaBody | None
+    real_client_body: RealClientBody | None = None
+
+
+def build_body_provider(
+    provider: str | BodyProviderName,
+    *,
+    bot_name: str,
+    natural_region: Region,
+    scarpet_body: Body | None = None,
+    java_body_url: str | None = None,
+    java_connect: Callable[[], DuplexTransport] | None = None,
+    real_client_ipc: RealClientIpc | None = None,
+    real_client_connect: Callable[[], RealClientIpc] | None = None,
+) -> BodyProviderRuntime:
+    """Build one selected Body and the single policy shared by its providers."""
+
+    name = BodyProviderName.parse(provider)
+    needs_scarpet = name in {BodyProviderName.SCARPET, BodyProviderName.COMPOSITE}
+    needs_java = name in {BodyProviderName.JAVA, BodyProviderName.COMPOSITE}
+    needs_real_client = name is BodyProviderName.REAL_CLIENT
+    if needs_scarpet and scarpet_body is None:
+        raise BodyProviderConfigError(f"{name.value} provider requires a Scarpet body")
+    if scarpet_body is not None and scarpet_body.bot_name != bot_name:
+        raise BodyProviderConfigError("Scarpet body bot_name does not match provider bot")
+
+    if needs_real_client and real_client_ipc is None:
+        if real_client_connect is None:
+            raise BodyProviderConfigError(
+                "real_client provider requires a RealClientIpc instance or connector"
+            )
+        real_client_ipc = real_client_connect()
+    if real_client_ipc is not None and not needs_real_client:
+        raise BodyProviderConfigError(
+            "real_client_ipc is only valid when MINEBOT_BODY_PROVIDER=real_client"
+        )
+    real_client_body = (
+        RealClientBody(bot_name, real_client_ipc)
+        if needs_real_client and real_client_ipc is not None
+        else None
+    )
+
+    java_client: JavaBodyClient | None = None
+    java_read_client: JavaBodyClient | None = None
+    java_body: JavaBody | None = None
+    if needs_java:
+        connect = java_connect
+        if connect is None:
+            if not java_body_url:
+                raise BodyProviderConfigError(
+                    f"{name.value} provider requires MINEBOT_JAVA_BODY_URL"
+                )
+            connect = websocket_transport(java_body_url)
+        java_client = JavaBodyClient(
+            bot_name,
+            connect,
+            survival_owner=name in {BodyProviderName.JAVA, BodyProviderName.COMPOSITE},
+        )
+        java_read_client = JavaBodyClient(bot_name, connect, subscribe_events=False)
+        java_client.configure_reconciliation_client(java_read_client)
+        java_body = JavaBody(java_client, bot_name, read_client=java_read_client)
+
+    if name is BodyProviderName.SCARPET:
+        assert scarpet_body is not None
+        selected: Body = scarpet_body
+    elif name is BodyProviderName.JAVA:
+        assert java_body is not None
+        selected = java_body
+    elif name is BodyProviderName.REAL_CLIENT:
+        assert real_client_body is not None
+        selected = real_client_body
+    else:
+        assert scarpet_body is not None and java_body is not None
+        from minebot.game.composite_body import CompositeBody
+
+        selected = CompositeBody(scarpet_body, java_body)
+
+    governance = GovernancePolicy(
+        natural_regions=[natural_region],
+        structure_risk_assessor=VoxelStructureRiskAssessor(selected),
+        require_structure_assessment=True,
+        bot_name=bot_name,
+        dimension=getattr(selected, "known_dimension", None),
+    )
+    if java_client is not None:
+        answerer = GovernanceAnswerer(governance)
+        java_client.configure_governance(answerer)
+        assert java_read_client is not None
+        java_read_client.configure_governance(answerer)
+    return BodyProviderRuntime(
+        name,
+        selected,
+        governance,
+        scarpet_body,
+        java_body,
+        real_client_body,
+    )
+
+
+def java_objectives_enabled(body: Body) -> bool:
+    if isinstance(body, JavaBody):
+        return True
+    from minebot.game.composite_body import CompositeBody
+
+    return isinstance(body, CompositeBody)
+
+
+__all__ = [
+    "BodyProviderConfigError",
+    "BodyProviderName",
+    "BodyProviderRuntime",
+    "build_body_provider",
+    "java_objectives_enabled",
+]

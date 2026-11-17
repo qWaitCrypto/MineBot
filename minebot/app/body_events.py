@@ -1,0 +1,355 @@
+"""Idle-safe Body event ingestion into the unified WorkIntent queue."""
+
+from __future__ import annotations
+
+import time
+from dataclasses import dataclass
+from typing import Protocol
+from uuid import uuid4
+
+from minebot.app.runtime_state import RuntimeScope, RuntimeStateStore
+from minebot.app.work_queue import WorkIntentKind, WorkIntentQueue, WorkIntentState
+from minebot.brain.volition import StanceWakeGate
+from minebot.contract import Event
+
+
+def _gate_clock(now: float | None) -> float:
+    return time.monotonic() if now is None else now
+
+
+ALWAYS_MATERIAL_BODY_EVENTS = {
+    "death",
+    "bodyMissing",
+    "world_disconnected",
+    "respawned",
+    "underAttack",
+    "mobilityBlocked",
+}
+
+TASK_TERMINAL_BODY_EVENTS = {
+    "action_terminal",
+    "moveDone",
+    "navigateDone",
+    "lookDone",
+    "jumpDone",
+    "selectSlotDone",
+    "selectItemDone",
+    "stopDone",
+    "mineDone",
+    "placeDone",
+    "useDone",
+    "rangedDone",
+    "igniteDone",
+    "sowDone",
+    "attackDone",
+    "engageDone",
+    "followDone",
+    "craftDone",
+    "containerDone",
+    "furnaceDone",
+    "dropDone",
+    "handoffDone",
+    "moveItemDone",
+    "itemPickup",
+}
+
+MATERIAL_BODY_EVENTS = ALWAYS_MATERIAL_BODY_EVENTS | TASK_TERMINAL_BODY_EVENTS
+
+# What happens to what a player drops on death, by the game's rules (vision-and-home-20261028.md §7.7).
+DEATH_DROPS = ("Dropped items that fall into lava or fire burn up, and those that fall into the void are lost; "
+               "the rest disappear about 5 minutes after the death, if that area stays loaded the whole time.")
+# Facts the Body loop adds on waking: the respawn point, home, the death place, home's storage.
+# Said once in the death notice when the Agent's look-down walk setting was on
+# (set_walk_gaze; user 2026-11-05: 死亡之后刷新).
+WALK_GAZE_RESET_ON_DEATH = "Walking gaze is back to level after the death; turn look-down on again if you want it."
+WAKING_KEYS = ("respawn_point", "home", "death_place", "home_storage")
+# Said in the death notice when the Agent's keep_moving was on (the client resets the legs to stand).
+MOVEMENT_RESET_ON_DEATH = "The legs are back to standing after the death; set_movement keep_moving again if you want it."
+
+
+
+def agent_event_data(event: Event) -> dict[str, object]:
+    """Project native lifecycle facts before context input length limits apply.
+
+    The native event/trace retains the full state. Process settings, inventory
+    slots and distant passive entities do not belong in a death notification.
+    A client-observed damage source is carried as a fact; no cause is inferred.
+    Projecting a projection gives the same facts: the SDK session projects
+    the event again when it reaches the Agent.
+    """
+    if event.name == "movement_ended":
+        return movement_ended_data(event.data)
+    if event.name not in {"death", "respawned"}:
+        return dict(event.data)
+    keys = ("position", "dimension", "sampled_at_ms", "health", "oxygen",
+            "food", "head_in_liquid", "on_ground", "in_lava", "on_fire", "cloud",
+            "hurt_source", "cause_of_death")
+    data = {key: event.data[key] for key in keys if key in event.data}
+    if event.name == "respawned":
+        data.update({key: event.data[key] for key in WAKING_KEYS if key in event.data})
+    if event.name == "death":
+        cause = _death_cause_sentence(event.data)
+        if cause:
+            data["cause_of_death"] = cause
+        previous = event.data.get("last_living_state")
+        if isinstance(previous, dict):
+            data["last_living_state"] = {key: previous[key] for key in keys if key in previous}
+        # What it carried, from its last living state: by the death state the inventory may be dropped already.
+        carried = previous.get("inventory") if isinstance(previous, dict) else None
+        if not isinstance(carried, dict):
+            carried = event.data.get("carried")
+        if isinstance(carried, dict):
+            data["carried"] = dict(carried)
+        data["drops"] = DEATH_DROPS
+        if "walking_gaze" in event.data:
+            data["walking_gaze"] = event.data["walking_gaze"]
+        if "movement" in event.data:
+            data["movement"] = event.data["movement"]
+        if "vital_samples" in event.data:
+            data["vital_samples"] = event.data["vital_samples"]
+        hostiles = [entity for entity in event.data.get("entities", [])
+                    if isinstance(entity, dict) and entity.get("hostile")]
+        nearest = min(hostiles, key=lambda entity: entity.get("dist2", float("inf")), default=None)
+        data["nearby_hostiles"] = event.data.get("nearby_hostiles") or {
+            "count": len(hostiles),
+            "nearest": None if nearest is None else {
+                key: nearest[key] for key in ("id", "type", "pos", "dist2") if key in nearest
+            },
+        }
+    return data
+
+
+def movement_ended_data(data: dict[str, object]) -> dict[str, object]:
+    """The leg mode ended by itself: where, why, and that the Body now stands."""
+    out = {key: data[key] for key in ("position", "dimension", "health", "reason") if key in data}
+    moving = data.get("keep_moving") if isinstance(data.get("keep_moving"), dict) else {}
+    out["keep_moving"] = {key: moving[key] for key in ("center", "radius", "points_visited", "last_refusals") if key in moving}
+    reason = str(data.get("reason") or "unknown")
+    words = {"cannot_move": "the Body could not move for 10 seconds",
+             "no_safe_point": "no safe point to walk to was left inside the area"}.get(reason, reason)
+    position = data.get("position")
+    where = f" at {[round(float(v)) for v in position]}" if isinstance(position, (list, tuple)) and len(position) == 3 else ""
+    out["message"] = f"keep_moving ended{where}: {words}. The Body stands now; set_movement again to move on."
+    return out
+
+
+def _death_cause_sentence(data: dict[str, object]) -> str | None:
+    """Render the observed death source for the Agent's wake text."""
+    source = data.get("hurt_source")
+    if isinstance(source, dict):
+        label = str(source.get("name") or source.get("type") or "an observed source")
+        source_id = source.get("id")
+        detail = f" ({source_id})" if source_id else ""
+        damage_type = source.get("damage_type")
+        suffix = f"; damage type was {damage_type}" if damage_type else ""
+        return f"The Body died after being hit by {label}{detail}{suffix}."
+    damage_type = data.get("damage_type")
+    if isinstance(damage_type, str) and damage_type:
+        return f"The Body died from damage type {damage_type}."
+    return None
+
+
+class EventBody(Protocol):
+    last_seq: int
+    last_chat_seq: int
+
+    def event_head(self, proposed_epoch: str) -> dict[str, object]: ...
+
+    def poll_events(self) -> list[Event]: ...
+
+    def poll_chat_events(self) -> list[Event]: ...
+
+
+@dataclass(frozen=True)
+class BodyEventPollResult:
+    observed: int
+    material: int
+    enqueued: int
+    last_seq: int
+    epoch: str
+
+
+class BodyEventPump:
+    """Poll Body events only while the outer session loop is idle."""
+
+    def __init__(
+        self,
+        body: EventBody,
+        queue: WorkIntentQueue,
+        store: RuntimeStateStore,
+        scope: RuntimeScope,
+        stance_gate: StanceWakeGate | None = None,
+    ) -> None:
+        self.body = body
+        self.queue = queue
+        self.store = store
+        self.scope = scope
+        # F4: None (default) means no ambient wake sources at all — exactly
+        # today's behavior. A gate is installed only when an owner grants a
+        # stance (brain-cognitive-framework.md §7.4).
+        self.stance_gate = stance_gate
+        head = body.event_head(f"app-{uuid4().hex}")
+        self.epoch = str(head["epoch"])
+        self.initial_owner = None if head.get("owner") is None else str(head["owner"])
+        head_seq = max(0, int(head.get("event_seq") or 0))
+        head_chat_seq = max(0, int(head.get("chat_seq") or 0))
+        persisted = store.get_event_cursor(scope)
+        if persisted is None:
+            body.last_seq = head_seq
+            body.last_chat_seq = head_chat_seq
+        elif (
+            persisted[2] == self.epoch
+            and persisted[0] <= head_seq
+            and persisted[1] <= head_chat_seq
+        ):
+            body.last_seq = persisted[0]
+            body.last_chat_seq = persisted[1]
+        else:
+            body.last_seq = 0
+            body.last_chat_seq = 0
+        store.set_event_cursor(
+            scope,
+            last_seq=body.last_seq,
+            last_chat_seq=body.last_chat_seq,
+            event_epoch=self.epoch,
+        )
+
+    def poll_once(
+        self,
+        *,
+        task_id: str | None = None,
+        generation: int | None = None,
+        task_waiting: bool = False,
+        wait_checkpoint_id: str | None = None,
+        wait_for: tuple[str, ...] = (),
+    ) -> BodyEventPollResult:
+        events = self.read_events()
+        selected = _coalesce_material_events(
+            events,
+            task_waiting=task_waiting,
+            wait_for=wait_for,
+            stance_gate=self.stance_gate,
+        )
+        enqueued = 0
+        for event in selected:
+            waits_for_terminal = event.name in TASK_TERMINAL_BODY_EVENTS
+            intent = self.queue.enqueue(
+                WorkIntentKind.BODY_EVENT,
+                source="body_event",
+                payload={
+                    "event": {
+                        "seq": event.seq,
+                        "tick": event.tick,
+                        "bot": event.bot,
+                        "name": event.name,
+                        "data": dict(event.data),
+                    },
+                    "wait_checkpoint_id": (
+                        wait_checkpoint_id if waits_for_terminal else None
+                    ),
+                },
+                dedupe_key=f"body:{self.epoch}:{event.seq}",
+                task_id=task_id if task_id is not None else None,
+                generation=generation if waits_for_terminal else None,
+            )
+            if intent.state is WorkIntentState.QUEUED:
+                enqueued += 1
+        self.acknowledge_cursor()
+        return BodyEventPollResult(
+            observed=len(events),
+            material=len(selected),
+            enqueued=enqueued,
+            last_seq=self.body.last_seq,
+            epoch=self.epoch,
+        )
+
+    def poll_chat_events(self) -> list[Event]:
+        return self.body.poll_chat_events()
+
+    def read_events(self) -> list[Event]:
+        return self.body.poll_events()
+
+    def acknowledge_cursor(self) -> None:
+        self.store.set_event_cursor(
+            self.scope,
+            last_seq=self.body.last_seq,
+            last_chat_seq=self.body.last_chat_seq,
+            event_epoch=self.epoch,
+        )
+
+
+def _coalesce_material_events(
+    events: list[Event],
+    *,
+    task_waiting: bool = False,
+    wait_for: tuple[str, ...] = (),
+    stance_gate: StanceWakeGate | None = None,
+    now: float | None = None,
+) -> list[Event]:
+    """Select material events.
+
+    F4 stance grants can add ambient wake sources (`stance_gate`); with no
+    grant the gate declines everything and selection is byte-identical to the
+    pre-stance behavior. Already-material events are never gated — throttling
+    death, bodyMissing, or an awaited terminal would suppress survival and
+    terminal truth.
+    """
+
+    selected: dict[tuple[str, str], Event] = {}
+    for event in events:
+        always_material = event.name in ALWAYS_MATERIAL_BODY_EVENTS
+        task_terminal = (
+            task_waiting
+            and event.name in TASK_TERMINAL_BODY_EVENTS
+            and event_matches_wait_conditions(event, wait_for)
+        )
+        stance_wake = False
+        if not always_material and not task_terminal and stance_gate is not None:
+            decision = stance_gate.decide(event.name, now=_gate_clock(now))
+            if decision.allow:
+                stance_gate.record(now=_gate_clock(now))
+                stance_wake = True
+        if not always_material and not task_terminal and not stance_wake:
+            continue
+        action_id = str(event.data.get("action_id") or "")
+        key = (event.name, action_id)
+        selected[key] = event
+    return sorted(selected.values(), key=lambda event: event.seq)
+
+
+def event_matches_wait_conditions(event: Event, conditions: tuple[str, ...]) -> bool:
+    event_name = event.name.strip().lower()
+    action_id = str(event.data.get("action_id") or "").strip().lower()
+    entity_values = {
+        str(event.data.get(key) or "").strip().lower()
+        for key in ("entity", "entity_id", "uuid", "target", "target_uuid", "name", "attacker")
+    }
+    for raw in conditions:
+        condition = str(raw).strip()
+        if not condition:
+            continue
+        prefix, separator, value = condition.partition(":")
+        if not separator:
+            if condition.lower() == event_name:
+                return True
+            continue
+        normalized = value.strip().lower()
+        if prefix.strip().lower() == "event" and normalized == event_name:
+            return True
+        if prefix.strip().lower() == "action" and normalized and normalized == action_id:
+            return True
+        if prefix.strip().lower() == "entity" and normalized and normalized in entity_values:
+            return True
+    return False
+
+
+__all__ = [
+    "ALWAYS_MATERIAL_BODY_EVENTS",
+    "BodyEventPollResult",
+    "BodyEventPump",
+    "DEATH_DROPS",
+    "MATERIAL_BODY_EVENTS",
+    "TASK_TERMINAL_BODY_EVENTS",
+    "WAKING_KEYS",
+    "event_matches_wait_conditions",
+]

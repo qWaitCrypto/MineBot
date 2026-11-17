@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "id": "minebot-client-body-gametest",
+  "version": "0.1.0",
+  "name": "MineBot Client Body GameTests",
+  "environment": "client",
+  "entrypoints": {
+    "fabric-client-gametest": [
+      "dev.minebot.client.body.gametest.BodyTruthClientGameTest",
+      "dev.minebot.client.body.gametest.BodyClientGameTest",
+      "dev.minebot.client.body.gametest.EnderEyeClientGameTest"
+    ]
+  },
+  "mixins": ["body-truth.mixins.json"],
+  "depends": {
+    "minebot-client-body": "*",
+    "fabric-client-gametest-api-v1": "*"
+  }
+}

@@ -1,0 +1,113 @@
+"""Neutral Body/Agent contract types.
+
+This package is intentionally type/data only.  Agent-side code and Body-side
+transport/transactions can import these names without crossing the
+`brain/ -> game/` boundary.
+"""
+
+from .governance import (
+    BotPlacement,
+    BreakContext,
+    InteractionContext,
+    LegalityDecision,
+    PlaceContext,
+    Position,
+    Region,
+    StructureRiskAssessment,
+    StructureRiskLevel,
+)
+from .harvest import (
+    MIN_PICKAXE_TIER,
+    PICKAXE_BY_TIER,
+    TOOL_TIER_ORDER,
+    best_owned_pickaxe,
+    required_pickaxe_tier,
+    tier_satisfies,
+)
+from .messages import (
+    Action,
+    BodyState,
+    CANDIDATE_SKIP_PREFIXES,
+    CANDIDATE_SKIP_REASONS,
+    Event,
+    InventorySlot,
+    JsonObject,
+    PerceptionResult,
+    Result,
+    ToolResult,
+    governance_confirmation_from,
+    is_candidate_skip,
+    is_governance_decision_required,
+    is_partial_progress,
+    perception_next_cursor,
+    perception_resume_params,
+)
+from .body_iface import Body
+from .execution import (
+    action_with_timeout,
+    action_wait_timeout_s,
+    ExecutionCancellation,
+    ExecutionCancelled,
+    execution_cancellation_scope,
+    execution_checkpoint,
+)
+from .progress import (
+    LocalProgressController,
+    REVIEWABLE_STOP_REASONS,
+    ProgressAbort,
+    ProgressController,
+    ProgressFacts,
+    ProgressStopReason,
+    dominant_progress_abort,
+)
+from .results import body_rejection_to_tool_result, terminal_event_to_tool_result
+
+__all__ = [
+    "Action",
+    "action_with_timeout",
+    "action_wait_timeout_s",
+    "Body",
+    "BodyState",
+    "BotPlacement",
+    "BreakContext",
+    "CANDIDATE_SKIP_PREFIXES",
+    "CANDIDATE_SKIP_REASONS",
+    "InteractionContext",
+    "Event",
+    "ExecutionCancellation",
+    "ExecutionCancelled",
+    "InventorySlot",
+    "JsonObject",
+    "LegalityDecision",
+    "MIN_PICKAXE_TIER",
+    "PerceptionResult",
+    "perception_next_cursor",
+    "perception_resume_params",
+    "PlaceContext",
+    "PICKAXE_BY_TIER",
+    "Position",
+    "ProgressAbort",
+    "ProgressController",
+    "ProgressFacts",
+    "ProgressStopReason",
+    "REVIEWABLE_STOP_REASONS",
+    "dominant_progress_abort",
+    "LocalProgressController",
+    "Region",
+    "Result",
+    "ToolResult",
+    "StructureRiskAssessment",
+    "StructureRiskLevel",
+    "TOOL_TIER_ORDER",
+    "best_owned_pickaxe",
+    "execution_cancellation_scope",
+    "execution_checkpoint",
+    "governance_confirmation_from",
+    "is_candidate_skip",
+    "is_governance_decision_required",
+    "is_partial_progress",
+    "required_pickaxe_tier",
+    "tier_satisfies",
+    "terminal_event_to_tool_result",
+    "body_rejection_to_tool_result",
+]

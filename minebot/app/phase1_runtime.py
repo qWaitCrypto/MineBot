@@ -1,0 +1,2141 @@
+"""Formal Agent Phase 1 runtime wiring.
+
+This app-layer composition root owns the formal real-server tool surface. Narrow
+helpers such as ``resource_runtime`` may delegate here, but the real harness must
+not silently expose only a resource-only registry.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable, Mapping
+import time
+from dataclasses import dataclass, replace
+
+from agents import Session
+
+from minebot.app.body_capability_tools import (
+    _java_dig_down,
+    _reflex_leave_lava_tool,
+    _reflex_step_tool,
+    _reflex_cushion_fall_tool,
+    _reflex_use_item_tool,
+    _reflex_look_tool,
+    VECTOR_SCHEMA,
+    body_capability_tools,
+)
+from minebot.app.body_tool_catalog import CanonicalBodyToolCatalog
+from minebot.app.client_body_tools import client_body_tools
+from minebot.app.spatial_exploration import SpatialExploration, spatial_exploration_tools
+from minebot.app.model_provider import ModelProviderRegistry
+from minebot.app.conversation_tools import register_conversation_archive_tools
+from minebot.app.ladder_view import LadderNotices, ladder_section, shots_section
+from minebot.app.life_profile import LifeProfileUnreadable, LifeStore, life_summary, register_life_tools
+from minebot.app.home_view import furnace_section, home_section
+from minebot.app.world_record import is_place_block, observe_tool_result
+from minebot.app.memory import MemoryWorkspace, register_memory_tools
+from minebot.app.recall import (
+    ConversationRecallSource,
+    FanOutRecall,
+    MemoryRecallSource,
+    ObservationRecallSource,
+    SkillRecallSource,
+    WikiRecallSource,
+)
+from minebot.app.skills import SkillWorkspace, register_skill_tools
+from minebot.app.skill_mounts import SkillMounts, ladder_mounts, merged_mounts, skill_mount_check
+from minebot.app.wiki import WikiKnowledge, register_wiki_tools
+from minebot.app.runner import AgentRuntime, RecoveryOutcome, RuntimeTrace
+from minebot.app.reflex_question import daylight_sentence
+from minebot.app.reflex_tools import ReflexManager, register_reflex_tools
+from minebot.app.runner import sdk_tool_for
+from minebot.app.observation_artifacts import (
+    ToolObservationArchive,
+    register_tool_observation_tools,
+)
+from minebot.app.progress_epochs import ProgressEpochArchive
+from minebot.app.tasks import TaskWorkspace, register_task_tools
+from minebot.app.wiring import AgentRuntimeParts, build_agent_runtime
+from minebot.body import (
+    BlockApproachTransactions,
+    BlockWork,
+    ContainerTransactions,
+    ExplorationCoverageStore,
+    ExplorationTransactions,
+    FurnaceTransactions,
+    InteractionTransactions,
+    InventoryTransactions,
+    LifecycleTransactions,
+    NavigationRunConfig,
+    NavigationTransactions,
+    ObjectiveNavigationTransactions,
+    MemoryExplorationCoverageStore,
+    PickupTransactions,
+    ResourceCollectionTransactions,
+    UseTransactions,
+    VoxelStructureRiskAssessor,
+)
+from minebot.body.cluster_collection import collect_native_cluster
+from minebot.body.combat import CombatTransactions
+from minebot.body.furnace import DEFAULT_SMELT_SECONDS_PER_ITEM, resolve_smelt_output, select_fuel
+from minebot.body.inventory import _parse_recipe_variants
+from minebot.body.storage import StorageTransactions
+from minebot.body.world_read import read_block_facts
+from minebot.brain.acquisition import RecipeVariant
+from minebot.brain.composition import (
+    CompositionBudget,
+    CompositionContext,
+    collect_resource_tool,
+    ensure_tool_for_tool,
+    inventory_tool,
+)
+from minebot.brain.context import AgentContext
+from minebot.app.observability import sanitize_observation
+from minebot.app.projection import bounded_summary_value, top_reasons
+from minebot.brain.registry import RegisteredTool, ToolRegistry, ToolSidecar
+from minebot.contract import Action, JsonObject, terminal_event_to_tool_result
+from minebot.brain.progress import ProgressAuthority
+from minebot.contract import Body, BreakContext, InventorySlot, PerceptionResult, Position, Region, ToolResult, perception_next_cursor
+from minebot.game import GovernancePolicy
+from minebot.game.navigation import GoalNear
+
+
+@dataclass(frozen=True)
+class Phase1RuntimeConfig:
+    natural_region: Region
+    budget: CompositionBudget = CompositionBudget(max_candidates=96, max_mutating_calls=96, max_wall_s=900.0)
+    recovery_respawn_pos: Position | None = None
+    recovery_gamemode: str | None = None
+    speech_sink: Callable[[str], None] | None = None
+    conversation_session: Session | None = None
+    task_workspace: TaskWorkspace | None = None
+    observation_archive: ToolObservationArchive | None = None
+    progress_epoch_archive: ProgressEpochArchive | None = None
+    memory_workspace: MemoryWorkspace | None = None
+    life_store: LifeStore | None = None
+    skill_workspace: SkillWorkspace | None = None
+    wiki_knowledge: WikiKnowledge | None = None
+    exploration_coverage_store: ExplorationCoverageStore | None = None
+    body_provider: str = "java"
+    governance_policy: GovernancePolicy | None = None
+    goal_facts_refresher: Callable[[AgentContext], None] | None = None
+
+
+@dataclass(frozen=True)
+class Phase1ToolManifestEntry:
+    name: str
+    source: str
+    tool_type: str
+    permission: str
+    mutating: bool
+    body_scope: tuple[str, ...]
+
+
+def build_phase1_agent_runtime(
+    *,
+    body: Body,
+    goal_text: str,
+    model_provider: ModelProviderRegistry | None,
+    config: Phase1RuntimeConfig,
+    agent_name: str = "MineBot",
+    language: str = "English",
+    trace: RuntimeTrace | None = None,
+) -> AgentRuntimeParts:
+    authority = ProgressAuthority()
+    policy = config.governance_policy or GovernancePolicy(
+        natural_regions=[config.natural_region],
+        structure_risk_assessor=VoxelStructureRiskAssessor(body),
+        require_structure_assessment=True,
+        bot_name=body.bot_name,
+    )
+    policy.begin_confirmation_epoch(_governance_confirmation_scope(config.task_workspace))
+    runtime_config = replace(config, governance_policy=policy)
+    registry = build_phase1_registry(body, runtime_config, authority=authority)
+    parts = build_agent_runtime(
+        body=body,
+        registry=registry,
+        goal_text=goal_text,
+        model_provider=model_provider,
+        agent_name=agent_name,
+        language=language,
+        trace=trace,
+        recovery_handler=_phase1_recovery_handler(body, config),
+        authority=authority,
+        speech_sink=config.speech_sink,
+        conversation_session=config.conversation_session,
+        observation_archive=config.observation_archive,
+        progress_epoch_archive=config.progress_epoch_archive,
+        progress_task_id=(
+            None if config.task_workspace is None
+            else lambda: (
+                None if (task := config.task_workspace.current_task) is None
+                else task.task_id
+            )
+        ),
+        memory_workspace=config.memory_workspace,
+    )
+    parts.runtime.native_task_workspace = config.task_workspace
+    # Reflex frames can state which observed beds belong to this Body.  The
+    # ledger remains the source of truth; this is only a read projection.
+    parts.runtime.governance_policy = policy
+    block_observer = getattr(body, "set_block_observer", None)
+    if callable(block_observer):
+        block_observer(parts.runtime.body_loop.reconcile_ownership)
+    recall_sources = []
+    if config.memory_workspace is not None:
+        recall_sources.append(MemoryRecallSource(config.memory_workspace))
+    if config.conversation_session is not None and callable(getattr(config.conversation_session, "query_archive", None)):
+        recall_sources.append(ConversationRecallSource(config.conversation_session))
+    if config.observation_archive is not None:
+        recall_sources.append(ObservationRecallSource(config.observation_archive))
+    if config.skill_workspace is not None:
+        recall_sources.append(SkillRecallSource(config.skill_workspace))
+    if config.wiki_knowledge is not None:
+        recall_sources.append(WikiRecallSource(config.wiki_knowledge))
+    if recall_sources:
+        parts.runtime.set_recall(FanOutRecall(recall_sources))
+    # Stage 2 reflex management is model-visible only after the runtime exists,
+    # because the tools close over the single Body/Decision owner.
+    reflex_manager = ReflexManager(parts.runtime)
+    parts.runtime.reflex_manager = reflex_manager
+    parts.runtime.event_wait_mode = True
+    register_reflex_tools(registry, reflex_manager)
+    context = CompositionContext(
+        registry=registry,
+        weld_context=parts.runtime.weld_context,
+        runtime_profile=parts.modes.profile_for(parts.lifecycle.state),
+        budget=config.budget,
+        recipe_lookup=_recipe_lookup(body),
+        trace=lambda event, payload: parts.runtime.trace.emit(event, **payload),
+    )
+    add_walk_gaze_listener = getattr(body, "add_walk_gaze_listener", None)
+    if config.body_provider == "real_client" and callable(add_walk_gaze_listener):
+        # The Agent's standing walk gaze: on, off, or back to level on a death.
+        add_walk_gaze_listener(lambda *, on, cause: parts.runtime.trace.emit(
+            "walk_gaze_changed", change=cause if cause == "reset_on_death" else ("on" if on else "off"),
+            look_down=on))
+    catalog = CanonicalBodyToolCatalog(registry, config.body_provider)
+    catalog.register(collect_resource_tool(context))
+    catalog.register(ensure_tool_for_tool(context, _recipe_lookup(body)))
+    catalog.assert_stage_complete("composition")
+    registry.register(_confirm_governance_scope_tool(policy))
+    if config.task_workspace is not None:
+        register_task_tools(
+            registry,
+            config.task_workspace,
+            body_fingerprint=lambda: _task_body_fingerprint(body, authority),
+            evidence_cursor=parts.runtime.current_run_evidence_cursor,
+            generation=authority.current_generation,
+            ended_activity=reflex_manager.ended_activity,
+        )
+    if (
+        config.conversation_session is not None
+        and callable(getattr(config.conversation_session, "query_archive", None))
+        and callable(getattr(config.conversation_session, "read_archive_turn", None))
+    ):
+        register_conversation_archive_tools(registry, config.conversation_session)
+    if config.observation_archive is not None:
+        register_tool_observation_tools(registry, config.observation_archive)
+    if config.memory_workspace is not None:
+        register_memory_tools(registry, config.memory_workspace)
+    if config.life_store is not None:
+        life_store = config.life_store
+        register_life_tools(
+            registry, life_store,
+            skill_check=None if config.skill_workspace is None else skill_mount_check(config.skill_workspace))
+        parts.runtime.life_store = life_store
+        parts.runtime.body_loop.attach_life_store(life_store)
+        # Whose things are whose follows the profile as the Body reads it each frame.
+        policy.attach_ownership(parts.runtime.body_loop.current_life_profile)
+
+        def observe_world(tool_name: str, params: Mapping[str, object], result: object) -> None:
+            # A result names a place but not its dimension; the last state read does.
+            dimension = (parts.runtime.last_known_body_state or {}).get("dimension")
+            observe_tool_result(life_store.world, tool_name, params, result, dimension)
+
+        parts.runtime.world_observer = observe_world
+
+        def sync_life(context: AgentContext) -> None:
+            try:
+                record = life_store.read()
+            except LifeProfileUnreadable as exc:
+                context.observe_life({"unreadable": str(exc)[:500]})
+                return
+            context.observe_life(life_summary(record))
+            manager = parts.runtime.reflex_manager
+            ladder = ladder_section(
+                record, life_store.project_state, timeline=manager.body_timeline(),
+                notices=parts.runtime.ladder_notices.since_last_turn(), held=manager.ladder_held(),
+                account_of=life_store.project_account)
+            shot_log = getattr(parts.runtime.body_loop, "shot_log", None)
+            shots = shots_section(shot_log() if callable(shot_log) else [],
+                                  since=parts.runtime.ladder_notices.last_turn_started)
+            context.observe_ladder(ladder + "\n" + shots if shots else ladder)
+            own = [{"dimension": dimension, "pos": list(pos), "block": entry.block_type}
+                   for dimension, entries in policy.all_bot_placements().items()
+                   for pos, entry in entries.items() if is_place_block(entry.block_type)]
+            world = life_store.world.snapshot()
+            here = parts.runtime.last_known_body_state
+            home = home_section(record["profile"], world, here=here, own_places=own)
+            furnaces = furnace_section(world, here=here)
+            context.observe_home(home + "\n" + furnaces if furnaces else home)
+
+        # Plan ends that only tell the Agent wait here for its next turn (§7.4).
+        parts.runtime.ladder_notices = LadderNotices()
+        sync_life(parts.context)
+        parts.runtime.add_context_refresher(sync_life)
+    if config.skill_workspace is not None:
+        register_skill_tools(registry, config.skill_workspace)
+    if config.wiki_knowledge is not None:
+        register_wiki_tools(registry, config.wiki_knowledge)
+    if config.skill_workspace is not None:
+        config.skill_workspace.bind_registry(registry)
+        config.skill_workspace.sync_context(parts.context)
+        parts.runtime.add_context_refresher(config.skill_workspace.sync_context)
+    if config.skill_workspace is not None:
+        # Skills mounted on ladder items and on running delegate_work plans
+        # enter the conversation as messages (agent-skills-v2-20261105.md
+        # §2.1; dragon-unit-tests-20261030.md §6.y.22 item 2); the Agent
+        # writes every mount.
+        mount_store = config.life_store
+        skill_mounts = SkillMounts(config.skill_workspace, deliver=parts.context.queue_conversation_item,
+                                   emit=parts.runtime.trace.emit)
+
+        def ladder_skill_mounts() -> list[tuple[str, str]] | None:
+            if mount_store is None:
+                return []
+            try:
+                record = mount_store.read()
+            except LifeProfileUnreadable:
+                return None
+            return ladder_mounts(record["profile"].get("projects") or [], mount_store.project_state)
+
+        reflex_manager.skill_check = skill_mount_check(config.skill_workspace)
+        reflex_manager.ladder_mounts = ladder_skill_mounts
+
+        def sync_skill_mounts(_context: AgentContext) -> None:
+            wanted = ladder_skill_mounts()
+            if wanted is not None:
+                # Ladder holders first, then running plans (plan:<activity id>).
+                skill_mounts.sync(merged_mounts(wanted, reflex_manager.plan_skill_mounts()))
+
+        # A restart finds its mounts already in the conversation; the
+        # compactor shows any the visible history no longer holds.
+        seeded = ladder_skill_mounts()
+        if seeded is not None:
+            skill_mounts.sync(seeded, announce=False)
+        parts.runtime.skill_mounts = skill_mounts
+        parts.runtime.add_context_refresher(sync_skill_mounts)
+    if config.goal_facts_refresher is not None:
+        # This only supplies observed completion facts to the model. The
+        # strategy model still chooses every action through the normal tools.
+        config.goal_facts_refresher(parts.context)
+        parts.runtime.add_context_refresher(config.goal_facts_refresher)
+    parts.runtime.registry = registry
+    parts.runtime.agent = parts.runtime.agent.clone(
+        tools=[sdk_tool_for(registry.get(name)) for name in registry.model_names()]
+    )
+    parts.runtime.trace.emit("tool_manifest", tools=tool_manifest(registry))
+    return replace(parts, skill_workspace=config.skill_workspace)
+
+
+def _governance_confirmation_scope(
+    workspace: TaskWorkspace | None,
+) -> Callable[[], object]:
+    """Keep bounded permits for one durable task, not one physical action."""
+
+    if workspace is None:
+        return lambda: "single-goal-runtime"
+
+    def current_task_id() -> object:
+        task = workspace.current_task
+        return None if task is None else task.task_id
+
+    return current_task_id
+
+
+def _phase1_recovery_handler(body: Body, config: Phase1RuntimeConfig):
+    lifecycle = LifecycleTransactions(body)
+
+    def recover(runtime: AgentRuntime) -> RecoveryOutcome:
+        pre_recovery_inventory = _pre_recovery_inventory_facts(runtime, body)
+        before_state, before_state_errors = _body_state_with_transport_retry(body)
+        respawn_pos = _recovery_respawn_pos(runtime, config)
+        runtime.trace.emit(
+            "recovery_driver_start",
+            respawn_pos=None if respawn_pos is None else list(respawn_pos),
+            state_before_missing=before_state.missing,
+            state_before_pos=list(before_state.pos),
+            inventory_before_recovery=pre_recovery_inventory,
+            last_known_body_state=runtime.last_known_body_state,
+            state_before_recheck_errors=before_state_errors,
+        )
+        result = lifecycle.recover_after_death(
+            respawn_pos=respawn_pos,
+            yaw=_maybe_float_from_state(runtime.last_known_body_state, "yaw"),
+            pitch=_maybe_float_from_state(runtime.last_known_body_state, "pitch"),
+            dimension=_maybe_str_from_state(runtime.last_known_body_state, "dimension"),
+            gamemode=config.recovery_gamemode,
+        )
+        facts: dict[str, object] = {
+            "respawn_pos": None if respawn_pos is None else list(respawn_pos),
+            "state_before_missing": before_state.missing,
+            "state_before_pos": list(before_state.pos),
+            "recovery_reason": result.reason,
+            "inventory_before_recovery": pre_recovery_inventory,
+        }
+        if before_state_errors:
+            facts["state_before_recheck_errors"] = before_state_errors
+        if runtime.last_known_body_state is not None:
+            facts["last_known_body_state"] = dict(runtime.last_known_body_state)
+        if isinstance(result.metrics, dict):
+            facts["recovery_metrics"] = dict(result.metrics)
+        reconciled_existing_body = (
+            not result.success
+            and result.reason == "body_not_missing"
+            and isinstance(result.metrics, dict)
+            and result.metrics.get("state_before_missing") is False
+        )
+        if reconciled_existing_body:
+            facts["recovery_reconciliation"] = "body_already_present"
+        elif not result.success:
+            return RecoveryOutcome(False, result.reason, facts=facts, can_retry=result.can_retry)
+        after_state, after_state_errors = _body_state_with_transport_retry(body)
+        if after_state_errors:
+            facts["state_after_recheck_errors"] = after_state_errors
+        if reconciled_existing_body and after_state.missing:
+            facts["state_after_pos"] = list(after_state.pos)
+            facts["state_after_missing"] = True
+            return RecoveryOutcome(
+                False,
+                "body_missing_during_reconciliation",
+                facts=facts,
+                can_retry=True,
+            )
+        safe_respawn = _ensure_safe_recovery_stand(body, lifecycle, after_state, config)
+        if safe_respawn is not None:
+            facts["safe_respawn"] = safe_respawn.to_payload()
+            if not safe_respawn.success:
+                return RecoveryOutcome(False, safe_respawn.reason, facts=facts, can_retry=safe_respawn.can_retry)
+            after_state, safe_after_errors = _body_state_with_transport_retry(body)
+            if safe_after_errors:
+                facts["safe_respawn_state_recheck_errors"] = safe_after_errors
+        runtime._remember_body_state(after_state)
+        post_recovery_inventory = _safe_inventory_counts(body)
+        facts["inventory_after_recovery"] = post_recovery_inventory
+        facts["inventory_recovery_delta"] = _inventory_delta(pre_recovery_inventory, post_recovery_inventory)
+        facts.update(
+            {
+                "state_after_pos": list(after_state.pos),
+                "state_after_missing": after_state.missing,
+                "state_after_inventory_hash": after_state.inventory_hash,
+            }
+        )
+        reason = "body_reconciled" if reconciled_existing_body else "respawned"
+        return RecoveryOutcome(True, reason, facts=facts, can_retry=False)
+
+    return recover
+
+
+def _body_state_with_transport_retry(body: Body, *, attempts: int = 5, delay_s: float = 0.2):
+    errors: list[dict[str, object]] = []
+    last_exc: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return body.get_state(), errors
+        except Exception as exc:
+            if not _is_recheckable_recovery_transport_error(exc):
+                raise
+            last_exc = exc
+            errors.append({"attempt": attempt, "error_type": type(exc).__name__, "message": str(exc)})
+            if attempt < attempts:
+                time.sleep(delay_s)
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("body state recheck failed")
+
+
+def _is_recheckable_recovery_transport_error(exc: Exception) -> bool:
+    if isinstance(exc, (OSError, TimeoutError)):
+        return True
+    error_type = type(exc).__name__
+    if error_type in {"BodyProtocolError", "EnvelopeError", "RconError", "TruncatedPayloadError", "IncompletePayloadError"}:
+        return True
+    return "RCON" in str(exc)
+
+
+def _pre_recovery_inventory_facts(runtime: AgentRuntime, body: Body) -> dict[str, object]:
+    slot = runtime.mode_runtime.suspend_slot
+    progress = slot.last_progress if slot is not None else {}
+    event_counts = progress.get("inventory_counts_before")
+    if isinstance(event_counts, dict):
+        return {"ok": True, "source": "death_event", "counts": _normalized_counts(event_counts)}
+    return _safe_inventory_counts(body, source="body_recount")
+
+
+def _recovery_respawn_pos(runtime: AgentRuntime, config: Phase1RuntimeConfig) -> Position | None:
+    if config.recovery_respawn_pos is not None:
+        return tuple(int(value) for value in config.recovery_respawn_pos)
+    state = runtime.last_known_body_state or {}
+    if _last_known_state_is_hazardous_for_respawn(state):
+        return None
+    pos = state.get("pos")
+    if isinstance(pos, list) and len(pos) == 3:
+        return (round(float(pos[0])), round(float(pos[1])), round(float(pos[2])))
+    return None
+
+
+def _last_known_state_is_hazardous_for_respawn(state: dict[str, object]) -> bool:
+    oxygen = state.get("oxygen")
+    if oxygen is None:
+        return False
+    try:
+        return float(oxygen) <= 80.0
+    except (TypeError, ValueError):
+        return False
+
+
+def _ensure_safe_recovery_stand(
+    body: Body,
+    lifecycle: LifecycleTransactions,
+    state,
+    config: Phase1RuntimeConfig,
+) -> ToolResult | None:
+    if not _state_requires_safe_respawn(state):
+        return None
+    safe_pos = _find_recovery_dry_stand(body, state.pos)
+    if safe_pos is None:
+        return ToolResult(
+            False,
+            "respawn_unsafe:no_dry_stand",
+            True,
+            metrics={"state_after": _recovery_state_metrics(state)},
+        )
+    despawn = body.despawn()
+    if not (despawn.ok and despawn.accepted):
+        return ToolResult(
+            False,
+            f"respawn_unsafe:despawn_failed:{despawn.error or 'despawn_failed'}",
+            True,
+            metrics={
+                "state_after": _recovery_state_metrics(state),
+                "safe_respawn_pos": list(safe_pos),
+                "despawn": {
+                    "ok": despawn.ok,
+                    "accepted": despawn.accepted,
+                    "complete": despawn.complete,
+                    "error": despawn.error,
+                    "data": despawn.data,
+                },
+            },
+        )
+    result = lifecycle.recover_after_death(
+        respawn_pos=safe_pos,
+        yaw=getattr(state, "yaw", None),
+        pitch=getattr(state, "pitch", None),
+        dimension=getattr(state, "dimension", None),
+        gamemode=config.recovery_gamemode,
+    )
+    metrics = dict(result.metrics or {})
+    metrics["safe_respawn_pos"] = list(safe_pos)
+    metrics["unsafe_state_after_default_spawn"] = _recovery_state_metrics(state)
+    return ToolResult(result.success, f"safe_{result.reason}", result.can_retry, result.next_suggestion, metrics)
+
+
+def _state_requires_safe_respawn(state) -> bool:
+    if getattr(state, "missing", False):
+        return True
+    oxygen = getattr(state, "oxygen", None)
+    if oxygen is not None:
+        try:
+            if float(oxygen) <= 80.0:
+                return True
+        except (TypeError, ValueError):
+            pass
+    health = getattr(state, "health", None)
+    if health is not None:
+        try:
+            if float(health) <= 0.0:
+                return True
+        except (TypeError, ValueError):
+            pass
+    return False
+
+
+def _find_recovery_dry_stand(body: Body, pos: tuple[float, float, float]) -> Position | None:
+    bx, by, bz = round(float(pos[0])), round(float(pos[1])), round(float(pos[2]))
+    origins: list[Position] = []
+    for radius in range(0, 7):
+        for dx in range(-radius, radius + 1):
+            for dz in range(-radius, radius + 1):
+                if max(abs(dx), abs(dz)) != radius:
+                    continue
+                for dy in range(4, -7, -1):
+                    origins.append((bx + dx, by + dy, bz + dz))
+    wanted: list[Position] = []
+    for x, y, z in origins:
+        wanted.extend(((x, y, z), (x, y + 1, z), (x, y - 1, z)))
+    try:
+        facts = read_block_facts(body, tuple(wanted), page_size=96, failure_label="recovery_safe_stand")
+    except ValueError:
+        return None
+    for stand in origins:
+        feet = facts.get(stand)
+        head = facts.get((stand[0], stand[1] + 1, stand[2]))
+        support = facts.get((stand[0], stand[1] - 1, stand[2]))
+        if feet is None or head is None or support is None:
+            continue
+        if _is_recovery_clear(feet) and _is_recovery_clear(head) and _is_recovery_support(support):
+            return stand
+    return None
+
+
+def _is_recovery_clear(perception: PerceptionResult) -> bool:
+    block_type = _normalize_block_type(str(perception.data.get("type") or "unknown"))
+    block_state = str(perception.data.get("state") or "UNKNOWN")
+    return block_type == "air" or block_state == "CLEAR"
+
+
+def _is_recovery_support(perception: PerceptionResult) -> bool:
+    block_type = _normalize_block_type(str(perception.data.get("type") or "unknown"))
+    block_state = str(perception.data.get("state") or "UNKNOWN")
+    return block_type not in {"air", "water", "lava"} and block_state not in {"CLEAR", "LIQUID"}
+
+
+def _normalize_block_type(value: str) -> str:
+    return value.removeprefix("minecraft:")
+
+
+def _recovery_state_metrics(state) -> dict[str, object]:
+    return {
+        "pos": list(getattr(state, "pos", ())),
+        "health": getattr(state, "health", None),
+        "food": getattr(state, "food", None),
+        "oxygen": getattr(state, "oxygen", None),
+        "missing": getattr(state, "missing", None),
+        "dimension": getattr(state, "dimension", None),
+    }
+
+
+def _maybe_float_from_state(state: dict[str, object] | None, key: str) -> float | None:
+    if not state:
+        return None
+    value = state.get(key)
+    return None if value is None else float(value)
+
+
+def _maybe_str_from_state(state: dict[str, object] | None, key: str) -> str | None:
+    if not state:
+        return None
+    value = state.get(key)
+    return None if value is None else str(value)
+
+
+def _safe_inventory_counts(body: Body, *, source: str = "body_recount") -> dict[str, object]:
+    try:
+        return {"ok": True, "source": source, "counts": _inventory_counts_snapshot(body)}
+    except Exception as exc:
+        return {"ok": False, "source": source, "error": str(exc), "error_type": type(exc).__name__}
+
+
+def _task_body_fingerprint(body: Body, authority: ProgressAuthority) -> dict[str, object]:
+    try:
+        state = body.get_state()
+    except Exception as exc:
+        raise ValueError(
+            f"task checkpoint body fingerprint failed: {type(exc).__name__}: {exc}"
+        ) from exc
+    return {
+        "fingerprint": authority.fingerprint(state),
+        "generation": authority.current_generation(),
+        "pos": list(state.pos),
+        "health": state.health,
+        "food": state.food,
+        "oxygen": state.oxygen,
+        "inventory_hash": state.inventory_hash,
+        "dimension": state.dimension,
+        "missing": state.missing,
+    }
+
+
+def _inventory_counts_snapshot(body: Body, *, page_size: int = 12) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    start: int | None = 0
+    saw_page = False
+    seen_starts: set[int] = set()
+    while start is not None:
+        if start in seen_starts:
+            raise ValueError(
+                f"inventory perception failed during recovery recount: repeated cursor {start}"
+            )
+        seen_starts.add(start)
+        perception = body.perceive("inventory", {"start": start, "limit": page_size})
+        saw_page = True
+        next_start = _next_start(perception)
+        if not perception.ok or (not perception.complete and next_start is None):
+            raise ValueError(
+                "inventory perception failed during recovery recount: "
+                f"ok={perception.ok} complete={perception.complete} error={perception.error}"
+            )
+        for payload in perception.data.get("slots") or []:
+            if not isinstance(payload, dict):
+                continue
+            slot = InventorySlot.from_payload(payload)
+            if slot.empty or not slot.item:
+                continue
+            item = str(slot.item).removeprefix("minecraft:")
+            counts[item] = counts.get(item, 0) + slot.count
+        start = int(next_start) if next_start is not None else None
+    if not saw_page:
+        raise ValueError("inventory perception failed during recovery recount: no pages read")
+    return counts
+
+
+def _inventory_delta(before: dict[str, object], after: dict[str, object]) -> dict[str, object]:
+    if before.get("ok") is not True or after.get("ok") is not True:
+        return {"ok": False, "before_ok": before.get("ok"), "after_ok": after.get("ok")}
+    before_counts = before.get("counts")
+    after_counts = after.get("counts")
+    if not isinstance(before_counts, dict) or not isinstance(after_counts, dict):
+        return {"ok": False, "reason": "counts_missing"}
+    deltas: dict[str, int] = {}
+    for item in sorted(set(before_counts) | set(after_counts)):
+        delta = int(after_counts.get(item, 0) or 0) - int(before_counts.get(item, 0) or 0)
+        if delta:
+            deltas[item] = delta
+    lost = {item: -delta for item, delta in deltas.items() if delta < 0}
+    gained = {item: delta for item, delta in deltas.items() if delta > 0}
+    return {"ok": True, "deltas": deltas, "lost": lost, "gained": gained}
+
+
+def _normalized_counts(counts: dict[object, object]) -> dict[str, int]:
+    normalized: dict[str, int] = {}
+    for key, value in counts.items():
+        item = str(key).removeprefix("minecraft:")
+        normalized[item] = int(value or 0)
+    return normalized
+
+
+def _next_start(perception) -> object | None:
+    return perception_next_cursor(perception)
+
+
+def build_phase1_registry(
+    body: Body,
+    config: Phase1RuntimeConfig,
+    *,
+    authority: ProgressAuthority | None = None,
+) -> ToolRegistry:
+    policy = config.governance_policy or GovernancePolicy(
+        natural_regions=[config.natural_region],
+        structure_risk_assessor=VoxelStructureRiskAssessor(body),
+        require_structure_assessment=True,
+        bot_name=body.bot_name,
+    )
+    progress = authority or ProgressAuthority()
+    legacy_navigator = NavigationTransactions.server_side(body, policy, progress=progress)
+    registry = ToolRegistry()
+    catalog = CanonicalBodyToolCatalog(registry, config.body_provider)
+    move_objective_body = catalog.objective_body("move_to", body)
+    surface_objective_body = catalog.objective_body("go_to_surface", body)
+    navigator = (
+        ObjectiveNavigationTransactions(move_objective_body)
+        if move_objective_body is not None
+        else legacy_navigator
+    )
+    approach_navigator = navigator
+    pickup = PickupTransactions(body, navigator)
+    work = BlockWork(body, policy, navigator=navigator, pickup=pickup)
+    def mobility_egress(timeout_s: float) -> ToolResult:
+        if surface_objective_body is not None:
+            return _java_ascend(surface_objective_body, timeout_s=timeout_s)
+        return work.go_to_surface(
+            context=BreakContext.TRAVEL,
+            timeout_s=timeout_s,
+            surface_scan_height=16,
+            surface_scan_radius=2,
+            require_mobility_egress=True,
+        )
+
+    def bounded_resource_egress(timeout_s: float, mutation_budget: int) -> ToolResult:
+        if surface_objective_body is not None:
+            return _java_ascend(
+                surface_objective_body,
+                timeout_s=timeout_s,
+                max_mutations=max(0, mutation_budget),
+            )
+        return work.go_to_surface(
+            context=BreakContext.TRAVEL,
+            timeout_s=timeout_s,
+            surface_scan_height=16,
+            surface_scan_radius=2,
+            max_steps=max(1, mutation_budget),
+            require_mobility_egress=True,
+        )
+
+    exploration = ExplorationTransactions(
+        body,
+        navigator,
+        config.exploration_coverage_store or MemoryExplorationCoverageStore(),
+        mobility_egress=mobility_egress,
+    )
+    spatial_tools = spatial_exploration_tools(SpatialExploration(exploration)) if config.body_provider == "real_client" else None
+    block_approach = BlockApproachTransactions(body, approach_navigator)
+    collect_objective_body = catalog.objective_body("collect_block_domain", body)
+    dig_down_objective_body = catalog.objective_body("dig_down", body)
+    dig_up_objective_body = catalog.objective_body("dig_up", body)
+    designated_collector = None
+    if collect_objective_body is not None:
+        def designated_collector(pos, expected_block_id, expected_item_ids, excavation_budget, timeout_s):
+            return _java_break_collect(
+                collect_objective_body,
+                pos,
+                expected_block_id=expected_block_id,
+                expected_item_ids=expected_item_ids,
+                excavation_budget=excavation_budget,
+                timeout_s=timeout_s,
+            )
+    def bounded_resource_descent(
+        target_y: int,
+        timeout_s: float,
+        mutation_budget: int,
+    ) -> ToolResult:
+        if dig_down_objective_body is not None:
+            return _java_dig_down(
+                dig_down_objective_body,
+                {
+                    "target_y": target_y,
+                    "max_steps": max(1, mutation_budget),
+                    "max_mutations": max(0, mutation_budget),
+                    "max_clear_fall": 2,
+                    "timeout_s": timeout_s,
+                },
+            )
+        return work.dig_down_to_y(
+            target_y,
+            context=BreakContext.COLLECT_APPROACH,
+            max_steps=max(1, mutation_budget),
+            move_timeout_s=min(15.0, timeout_s),
+            dig_timeout_s=min(30.0, timeout_s),
+        )
+
+    # Targets no path reached and when; collection lets the memory fade.
+    unreachable_targets: dict[tuple[int, int, int], float] = {}
+    resource_collection = ResourceCollectionTransactions(
+        body,
+        navigator,
+        work,
+        mobility_egress=mobility_egress,
+        bounded_mobility_egress=bounded_resource_egress,
+        bounded_vertical_descent=bounded_resource_descent,
+        designated_collector=designated_collector,
+        batch_collector=(lambda **kwargs: collect_native_cluster(body, unreachable=unreachable_targets, **kwargs))
+            if config.body_provider == "real_client" else None,
+    )
+    inventory_txn = InventoryTransactions(body, navigator=approach_navigator, governance=policy, work=work)
+    furnace_txn = FurnaceTransactions(body, navigator=approach_navigator, governance=policy, work=work)
+    use_txn = UseTransactions(body, navigator=approach_navigator, inventory=inventory_txn)
+    interaction_txn = InteractionTransactions(
+        body,
+        navigator=approach_navigator,
+        inventory=inventory_txn,
+        use=use_txn,
+        work=work,
+        governance=policy,
+    )
+    container_txn = ContainerTransactions(body, navigator=approach_navigator, governance=policy)
+    life_store = config.life_store
+    storage_txn = StorageTransactions(
+        body,
+        container_txn,
+        navigator=approach_navigator,
+        # The Agent's storage plan and the Body's own container record; none without a life store.
+        profile=lambda: life_store.profile() if life_store is not None else None,
+        places=lambda: life_store.world.snapshot()["places"] if life_store is not None else [],
+        dimension=lambda: _body_dimension(body),
+    )
+    combat = CombatTransactions(body, progress=progress)
+    # Existing attention capability for the life range, not another public
+    # Agent tool or a new canonical player intent.
+    registry.register(_reflex_look_tool(interaction_txn))
+    if config.body_provider == "real_client":
+        registry.register(_reflex_leave_lava_tool(body))
+        registry.register(_reflex_step_tool(body))
+        registry.register(_reflex_cushion_fall_tool(body))
+        registry.register(_reflex_use_item_tool(body))
+    catalog.register_many(
+        (
+            _read_state_tool(body),
+            inventory_tool(body),
+            _move_to_tool(navigator, move_objective_body),
+            spatial_tools[1] if spatial_tools is not None else _explore_for_tool(exploration),
+            _go_to_surface_tool(work, surface_objective_body),
+            _follow_tool(navigator),
+            _engage_tool(combat),
+            _ranged_tool(combat),
+            _search_tool(work),
+            _mine_collect_tool(work, collect_objective_body),
+            _craft_tool(inventory_txn),
+            _equip_tool(inventory_txn),
+            _smelt_tool(body, furnace_txn),
+            *body_capability_tools(
+                body=body,
+                block_approach=block_approach,
+                navigator=navigator,
+                work=work,
+                inventory=inventory_txn,
+                furnace=furnace_txn,
+                container=container_txn,
+                storage=storage_txn,
+                interaction=interaction_txn,
+                pickup=pickup,
+                resource_collection=resource_collection,
+                use=use_txn,
+                dig_down_objective_body=dig_down_objective_body,
+                dig_up_objective_body=dig_up_objective_body,
+            ),
+        )
+    )
+    catalog.assert_stage_complete("base")
+    if config.body_provider == "real_client":
+        catalog.register(spatial_tools[0])
+        catalog.register_many(client_body_tools(body, policy.natural_regions))
+        catalog.assert_stage_complete("client")
+    return registry
+
+
+def _body_dimension(body: Body) -> str | None:
+    """The dimension the Body reports, or None when it does not say."""
+    try:
+        dimension = body.get_state().dimension
+    except Exception:
+        return None
+    return dimension if isinstance(dimension, str) and dimension else None
+
+
+def _recipe_lookup(body: Body):
+    def lookup(item: str) -> list[RecipeVariant] | None:
+        perception = body.perceive("recipeData", {"item": item})
+        if not perception.ok:
+            return None
+        # Lets the planner tell "no recipe" from "not unlocked on this Body".
+        lookup.recipe_source = perception.data.get("recipe_source")
+        parsed = _parse_recipe_variants(item, perception)
+        if isinstance(parsed, ToolResult):
+            return None
+        return [
+            RecipeVariant(
+                output_item=_phase1_recipe_item(variant.output_item),
+                output_count=variant.output_count,
+                ingredient_groups=tuple(tuple(_phase1_recipe_item(item) for item in group) for group in variant.ingredient_groups if group),
+                requires_table=variant.requires_table,
+                recipe_kind=variant.recipe_kind,
+            )
+            for variant in parsed
+        ]
+
+    return lookup
+
+
+def _phase1_recipe_item(item: object) -> str:
+    return str(item).removeprefix("minecraft:").strip().lower()
+
+
+def tool_manifest(registry: ToolRegistry) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    canonical_by_tool = {
+        binding.tool_name: binding
+        for binding in registry.canonical_bindings()
+    }
+    for name in registry.names():
+        tool = registry.get(name)
+        sidecar = tool.sidecar
+        binding = canonical_by_tool.get(name)
+        rows.append(
+            {
+                "name": tool.name,
+                "source": sidecar.source,
+                "tool_type": sidecar.tool_type,
+                "permission": sidecar.permission,
+                "mutating": sidecar.mutating,
+                "body_mutating": sidecar.can_mutate_body,
+                "body_scope": list(sidecar.body_scope),
+                "terminal_truth": list(sidecar.terminal_truth),
+                "model_visible": sidecar.model_visible,
+                "intent": binding.intent if binding is not None else None,
+                "implementation": binding.implementation if binding is not None else None,
+            }
+        )
+    return rows
+
+
+def inventory_count(body: Body, item: str) -> int:
+    wanted = item.removeprefix("minecraft:")
+    total = 0
+    start: int | None = 0
+    while start is not None:
+        perception = body.perceive("inventory", {"start": start, "limit": 12})
+        if not perception.ok:
+            raise ValueError(f"inventory perception failed: {perception.error}")
+        for payload in perception.data.get("slots") or []:
+            slot = payload if hasattr(payload, "get") else None
+            if not isinstance(slot, dict):
+                continue
+            slot_item = slot.get("item")
+            slot_count = slot.get("count")
+            if slot_item is not None and str(slot_item).removeprefix("minecraft:") == wanted:
+                total += int(slot_count or 0)
+        next_start = _next_start(perception)
+        start = int(next_start) if next_start is not None else None
+    return total
+
+
+def _read_state_tool(body: Body) -> RegisteredTool:
+    return RegisteredTool(
+        "read_state",
+        "Read authoritative bot state: position, health, food, oxygen, dimension, and inventory hash.",
+        {"type": "object", "properties": {}, "additionalProperties": False},
+        lambda _params: _read_state(body),
+        ToolSidecar(
+            "read_state",
+            mutating=False,
+            source="body.perception",
+            tool_type="state",
+            permission="read_state",
+            body_scope=("state",),
+            terminal_truth=("BodyState",),
+            timeout_s=5.0,
+        ),
+    )
+
+
+def _confirm_governance_scope_tool(policy: GovernancePolicy) -> RegisteredTool:
+    def confirm(params: JsonObject) -> ToolResult:
+        result = policy.confirm_scope(
+            str(params.get("challenge_id") or ""),
+            str(params.get("purpose") or ""),
+        )
+        confirmed = result.get("confirmed") is True
+        return ToolResult(
+            confirmed,
+            str(result.get("reason") or "governance_confirmation_failed"),
+            False,
+            next_suggestion=(
+                "Retry the original player objective; every affected block will still receive a fresh exact governance check."
+                if confirmed
+                else "Use a currently pending challenge_id or choose another resource candidate."
+            ),
+            metrics={
+                key: value
+                for key, value in result.items()
+                if key != "confirmed"
+            },
+        )
+
+    def project(_reason: str, metrics: dict[str, object]) -> JsonObject:
+        return {
+            key: bounded_summary_value(metrics[key])
+            for key in ("challenge_id", "permit")
+            if key in metrics
+        }
+
+    return RegisteredTool(
+        "confirm_governance_scope",
+        "Confirm one Body-issued discretionary natural-work scope after reviewing its evidence. "
+        "This does not override protected regions, functional blocks, high structure risk, incomplete reads, "
+        "changed blocks, another context, another block type, or an expired/task-stale challenge. "
+        "One confirmation covers the bounded region and block count shown in the challenge, so do not confirm per block.",
+        {
+            "type": "object",
+            "properties": {
+                "challenge_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64,
+                    "description": "Exact challenge_id returned by a governance_confirmation_required result.",
+                },
+                "purpose": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 160,
+                    "description": "Short task reason for approving this bounded natural-work scope.",
+                },
+            },
+            "required": ["challenge_id", "purpose"],
+            "additionalProperties": False,
+        },
+        confirm,
+        ToolSidecar(
+            "confirm_governance_scope",
+            mutating=False,
+            source="governance.policy",
+            tool_type="governance",
+            permission="confirm_governance_scope",
+            terminal_truth=("GovernancePolicy",),
+            timeout_s=1.0,
+            body_mutating=False,
+        ),
+        projector=project,
+    )
+
+
+def _move_to_tool(
+    navigator: NavigationTransactions,
+    java_objective_body: Body | None = None,
+) -> RegisteredTool:
+    def run(params: JsonObject) -> ToolResult:
+        if java_objective_body is None:
+            return navigator.navigate_to(
+                _nav_goal(params),
+                break_context=BreakContext.TRAVEL,
+                config=NavigationRunConfig(
+                    max_segments=32,
+                    segment_timeout_s=float(params.get("timeout_s") or 12.0),
+                ),
+            )
+        pos = tuple(int(value) for value in params["pos"])
+        if len(pos) != 3:
+            return ToolResult(False, "invalid_position", False)
+        radius = int(params.get("radius") or 0)
+        timeout_s = float(params.get("timeout_s") or 12.0)
+        action = Action.create(
+            "navigate",
+            {
+                "goal": {
+                    "kind": "near",
+                    "x": pos[0],
+                    "y": pos[1],
+                    "z": pos[2],
+                    "range": float(radius) if radius > 0 else 0.75,
+                },
+                "timeout_ticks": max(20, min(12_000, int(timeout_s * 20))),
+            },
+        )
+        try:
+            result = java_objective_body.execute(action)
+        except Exception as error:
+            return ToolResult(
+                False,
+                "java_body_unavailable",
+                True,
+                metrics={"error": type(error).__name__},
+            )
+        if result.ok and result.accepted and not result.complete:
+            await_terminal = getattr(java_objective_body, "await_action_terminal", None)
+            if not callable(await_terminal):
+                return ToolResult(
+                    False,
+                    "java_body_unavailable",
+                    True,
+                    metrics={"error": "async_body_missing_terminal_wait"},
+                )
+            try:
+                terminal = await_terminal(action.id, timeout_s=timeout_s + 5.0)
+            except Exception as error:
+                return ToolResult(
+                    False,
+                    "java_body_unavailable",
+                    True,
+                    metrics={"error": type(error).__name__},
+                )
+            terminal_data = dict(terminal.data)
+            terminal_success = bool(terminal_data.get("success"))
+            reason = "arrived" if terminal_success else str(
+                terminal_data.get("reason") or "body_rejected"
+            )
+            return ToolResult(
+                terminal_success,
+                reason,
+                not terminal_success,
+                metrics=terminal_data,
+            )
+        success = bool(result.ok and result.accepted and result.complete)
+        reason = "arrived" if success else str(result.error or "body_rejected")
+        return ToolResult(success, reason, not success, metrics=dict(result.data))
+
+    return RegisteredTool(
+        "move_to",
+        "Travel to a coordinate or coordinate radius through the Body navigation transaction. "
+        "never invent a coordinate for a target you have not observed; you may choose a waypoint "
+        "as a planning hypothesis, including unobserved terrain. "
+        "Do not claim an unobserved target exists there. Use explore_for for directed search while "
+        "walking, observe_environment to choose useful terrain, and go_to_surface for vertical egress. "
+        "This is generic spatial travel: arrival does not prove line of sight, interaction readiness, "
+        "or access to a nearby block. Use get_to_block for one block-approach objective and "
+        "collect_resource for count-based acquisition. A portal block's own cell as pos (radius 0) is "
+        "walked into: the Body walks beside it and steps in; the walk ends when the dimension changes "
+        "(a nether portal: when the Body stands in it).",
+        {
+            "type": "object",
+            "properties": {
+                "pos": {"type": "array", "items": {"type": "integer"}, "minItems": 3, "maxItems": 3},
+                "radius": {"type": "integer", "minimum": 0},
+                "timeout_s": {"type": "number", "exclusiveMinimum": 0},
+            },
+            "required": ["pos"],
+            "additionalProperties": False,
+        },
+        run,
+        ToolSidecar(
+            "move_to",
+            mutating=True,
+            source=("java_body" if java_objective_body is not None else "body.navigation"),
+            tool_type="navigation",
+            permission="move",
+            body_scope=("navigation",),
+            terminal_truth=("navigateDone", "position"),
+            timeout_s=120.0,
+        ),
+        supervision_explanation="The Body normally plans a route, walks toward the requested coordinate, and returns an authoritative arrival or failure result.",
+    )
+
+
+def exploration_observation_projector(reason: str, metrics: dict[str, object]) -> JsonObject:
+    """Model-visible projection for explore_for."""
+    summary: JsonObject = {
+        key: bounded_summary_value(metrics[key])
+        for key in (
+            "dimension",
+            "origin",
+            "final_pos",
+            "budget",
+            "coverage_revision",
+            "resume_cursor",
+            "complete",
+        )
+        if key in metrics
+    }
+    if "continuation" in metrics:
+        continuation = sanitize_observation(metrics["continuation"])
+        summary["continuation"] = (
+            continuation
+            if isinstance(continuation, dict) or continuation is None
+            else bounded_summary_value(continuation)
+        )
+    targets = metrics.get("targets")
+    if isinstance(targets, dict):
+        summary["targets"] = bounded_summary_value(targets.get("requested") or targets)
+    covered = metrics.get("covered_regions")
+    if isinstance(covered, list):
+        summary["covered_region_count"] = len(covered)
+        summary["covered_regions"] = [
+            bounded_summary_value(item) for item in covered[:16]
+        ]
+        summary["covered_regions_complete"] = len(covered) <= 16
+    candidate_count = 0
+    for field_name, count_field in (("blocks", "block_count"), ("entities", "entity_count")):
+        values = metrics.get(field_name)
+        if not isinstance(values, list):
+            continue
+        candidate_count += len(values)
+        summary[count_field] = len(values)
+        summary[field_name] = [bounded_summary_value(item) for item in values[:8]]
+        summary[f"{field_name}_complete"] = len(values) <= 8
+    summary["candidate_count"] = candidate_count
+    failures = metrics.get("candidate_failures")
+    if isinstance(failures, list):
+        summary["candidate_failure_count"] = len(failures)
+        summary["candidate_failure_reasons"] = top_reasons(failures)
+    evidence_keys = metrics.get("evidence_keys")
+    if isinstance(evidence_keys, list):
+        summary["evidence_key_count"] = len(evidence_keys)
+    if "source_reason" in metrics:
+        summary["source_reason"] = bounded_summary_value(metrics["source_reason"])
+    uncertainty = metrics.get("uncertainty")
+    if isinstance(uncertainty, list):
+        summary["uncertainty_count"] = len(uncertainty)
+        summary["uncertainty_reasons"] = top_reasons(uncertainty)
+    summary["unloaded_boundary"] = reason == "unloaded_boundary" or any(
+        isinstance(item, dict)
+        and str(item.get("reason") or "").startswith("unloaded_boundary")
+        for item in (failures if isinstance(failures, list) else ())
+    )
+    return summary
+
+
+def _explore_for_tool(exploration: ExplorationTransactions) -> RegisteredTool:
+    return RegisteredTool(
+        "explore_for",
+        "Explore safe new world frontiers for one or more block or entity target classes. "
+        "Choose WHAT to find; the Body owns frontier selection, navigation, coverage, and "
+        "terminal verification. Ordinary task progress returns immediately when the first requested "
+        "target is seen, so act on that fact before exploring farther; the result carries a cursor "
+        "for resuming the same search later. Use supported target groups such as '#logs' and '#flowers' "
+        "when any member of that family satisfies the objective; reserve exact block names "
+        "such as 'oak_log' for exact-species goals. Do not use exploration as a pre-step for a "
+        "resource-count objective: call collect_resource directly so its persistent Body process owns "
+        "discovery, rescanning, candidate blacklisting, mining, and pickup. If the exact coordinate itself "
+        "is the task intent, a returned block coordinate may be passed to mine_block_collect. "
+        "Resumable exploration results include a typed continuation "
+        "whose target descriptor must remain unchanged.",
+        {
+            "type": "object",
+            "properties": {
+                "block_targets": {
+                    "type": "array",
+                    "items": {"type": "string", "minLength": 1, "maxLength": 128},
+                    "description": (
+                        "Block target names or supported groups. Use '#logs' for any log/stem "
+                        "and '#flowers' for any flower when the exact member is interchangeable."
+                    ),
+                    "maxItems": 32,
+                },
+                "entity_targets": {
+                    "type": "array",
+                    "items": {"type": "string", "minLength": 1, "maxLength": 128},
+                    "maxItems": 32,
+                },
+                "max_distance": {"type": "integer", "minimum": 16, "maximum": 512},
+                "max_regions": {"type": "integer", "minimum": 1, "maximum": 32},
+                "return_policy": {
+                    "type": "string",
+                    "enum": ["first_match", "region_budget"],
+                    "default": "first_match",
+                    "description": (
+                        "Use first_match (the default) for ordinary task progress: return as soon as any "
+                        "requested target is found. Use region_budget only when completing an explicit "
+                        "area survey is itself the objective; it keeps walking after useful targets are seen."
+                    ),
+                },
+                "scan_radius": {"type": "integer", "minimum": 4, "maximum": 32},
+                "resume_cursor": {
+                    "type": ["object", "null"],
+                    "description": (
+                        "Opaque cursor from a resumable explore_for result. Pass it unchanged "
+                        "only with the exact target descriptor returned by that result."
+                    ),
+                    "properties": {
+                        "query_signature": {"type": "string"},
+                        "dimension": {"type": "string"},
+                        "coverage_revision": {"type": "integer", "minimum": 0},
+                    },
+                    "required": ["query_signature", "dimension", "coverage_revision"],
+                    "additionalProperties": False,
+                },
+            },
+            "additionalProperties": False,
+        },
+        lambda params: exploration.explore_for(
+            block_targets=tuple(str(item) for item in params.get("block_targets", [])),
+            entity_targets=tuple(str(item) for item in params.get("entity_targets", [])),
+            max_distance=int(params.get("max_distance") or 192),
+            max_regions=int(params.get("max_regions") or 12),
+            return_policy=str(params.get("return_policy") or "first_match"),
+            scan_radius=int(params.get("scan_radius") or 12),
+            resume_cursor=(
+                dict(params["resume_cursor"])
+                if isinstance(params.get("resume_cursor"), dict)
+                else None
+            ),
+        ),
+        ToolSidecar(
+            "explore_for",
+            mutating=True,
+            source="body.exploration",
+            tool_type="exploration",
+            permission="explore_world",
+            body_scope=("navigation", "blocks", "entities", "state"),
+            terminal_truth=("ToolResult", "position", "exploration_coverage"),
+            timeout_s=900.0,
+            body_mutating=True,
+        ),
+        projector=exploration_observation_projector,
+    )
+
+
+def _go_to_surface_tool(
+    work: BlockWork,
+    java_objective_body: Body | None = None,
+) -> RegisteredTool:
+    def run(params: JsonObject) -> ToolResult:
+        if java_objective_body is None:
+            return work.go_to_surface(
+                context=BreakContext.COLLECT_APPROACH,
+                timeout_s=float(params.get("timeout_s") or 30.0),
+                surface_scan_height=32,
+                surface_scan_radius=2,
+                max_steps=None,
+                world_top_y=320,
+            )
+        # A player who cannot swim up seals the water and digs or pillars;
+        # going to the surface is the caller's leave to do that (B11).
+        return _java_ascend(
+            java_objective_body,
+            timeout_s=float(params.get("timeout_s") or 120.0),
+            make_way=True,
+        )
+
+    return RegisteredTool(
+        "go_to_surface",
+        "Move from a pit, water pocket, or below-grade position to a verified nearby natural surface using Body-owned navigation/ascent logic.",
+        {
+            "type": "object",
+            "properties": {
+                "timeout_s": {"type": "number", "exclusiveMinimum": 0},
+            },
+            "additionalProperties": False,
+        },
+        run,
+        ToolSidecar(
+            "go_to_surface",
+            mutating=True,
+            source=("java_body" if java_objective_body is not None else "body.block_work"),
+            tool_type="navigation",
+            permission="move",
+            body_scope=("navigation", "surface"),
+            terminal_truth=("position", "ToolResult"),
+            timeout_s=120.0,
+        ),
+        supervision_explanation=(
+            "The Body normally finds a nearby safe surface, ascends or swims toward it, "
+            "and verifies the resulting position."
+        ),
+    )
+
+
+def _java_ascend(
+    java_objective_body: Body,
+    *,
+    timeout_s: float,
+    max_mutations: int | None = None,
+    make_way: bool = False,
+) -> ToolResult:
+    action_params: JsonObject = {
+        "timeout_ticks": max(20, min(12_000, int(timeout_s * 20))),
+    }
+    if make_way:
+        action_params["make_way"] = True
+    if max_mutations is not None:
+        action_params["max_mutations"] = max(0, int(max_mutations))
+    action = Action.create("ascend", action_params)
+    try:
+        result = java_objective_body.execute(action)
+        if result.ok and result.accepted and not result.complete:
+            return terminal_event_to_tool_result(java_objective_body.await_action_terminal(action.id, timeout_s=timeout_s + 5.0))
+    except Exception as error:
+        return ToolResult(
+            False,
+            "java_body_unavailable",
+            True,
+            metrics={"error": type(error).__name__},
+        )
+    success = bool(result.ok and result.accepted and result.complete)
+    reason = "surface_reached" if success else str(result.error or "body_rejected")
+    return ToolResult(success, reason, not success, metrics=dict(result.data))
+
+
+def _follow_tool(navigator: NavigationTransactions) -> RegisteredTool:
+    return RegisteredTool(
+        "follow_entity",
+        "Follow a moving player or named entity, keeping a distance. The Body re-plans the path server-side as the target moves.",
+        {
+            "type": "object",
+            "properties": {
+                "target": {"type": "string", "minLength": 1},
+                "keep_distance": {"type": "number", "minimum": 0},
+                "timeout_s": {"type": "number", "exclusiveMinimum": 0},
+            },
+            "required": ["target"],
+            "additionalProperties": False,
+        },
+        lambda params: navigator.follow_entity(
+            str(params["target"]),
+            keep_distance=float(params.get("keep_distance") or 3.0),
+            timeout_s=float(params.get("timeout_s") or 30.0),
+        ),
+        ToolSidecar(
+            "follow_entity",
+            mutating=True,
+            source="body.navigation",
+            tool_type="navigation",
+            permission="move",
+            body_scope=("navigation",),
+            terminal_truth=("followDone", "position"),
+            timeout_s=120.0,
+        ),
+    )
+
+
+def _engage_tool(combat: CombatTransactions) -> RegisteredTool:
+    return RegisteredTool(
+        "engage_entity",
+        "Fight in melee, starting with one target named by its kind (such as zombie, or 'nearest_hostile') and, when several are seen, near: the position where it was seen. The Body approaches, swings when the blow is charged and the mob is in reach, backs off out of its reach while the blow recharges, and after a kill goes on with the next hostile mob in sight within 6 blocks (never a creeper) until none is left. It stops early only at disengage_health, if you give one. within: fight only a target that is this many blocks from the Body or nearer; if none is, the call ends at once and says how far the nearest one is.",
+        {
+            "type": "object",
+            "properties": {
+                "target": {"type": "string", "minLength": 1},
+                "near": VECTOR_SCHEMA,
+                "attack_range": {"type": "number", "minimum": 1.2, "maximum": 3.0},
+                "cooldown_ticks": {"type": "integer", "minimum": 1},
+                "timeout_s": {"type": "number", "exclusiveMinimum": 0},
+                "disengage_health": {"type": "number", "minimum": 0},
+                "within": {"type": "number", "exclusiveMinimum": 0},
+            },
+            "required": ["target"],
+            "additionalProperties": False,
+        },
+        lambda params: combat.engage_entity(
+            str(params["target"]),
+            attack_range=float(params.get("attack_range") or 3.0),
+            cooldown_ticks=int(params.get("cooldown_ticks") or 10),
+            timeout_s=float(params.get("timeout_s") or 20.0),
+            # No hidden floor: a rule "fight it" at 1.4 health was refused at once and the
+            # Body stood still beside the zombie (run-13 23:31:57; body-tool-boundaries-20261110).
+            disengage_health=float(0.0 if params.get("disengage_health") is None else params["disengage_health"]),
+            near=_near(params),
+            within=None if params.get("within") is None else float(params["within"]),
+        ),
+        ToolSidecar(
+            "engage_entity",
+            mutating=True,
+            source="body.combat",
+            tool_type="combat",
+            permission="combat",
+            body_scope=("combat", "nearby_entities"),
+            terminal_truth=("engageDone", "position"),
+            timeout_s=120.0,
+        ),
+    )
+
+
+def _near(params: JsonObject) -> tuple[float, float, float] | None:
+    near = params.get("near")
+    if isinstance(near, (list, tuple)) and len(near) == 3:
+        return (float(near[0]), float(near[1]), float(near[2]))
+    return None
+
+
+def _ranged_tool(combat: CombatTransactions) -> RegisteredTool:
+    return RegisteredTool(
+        "ranged_attack",
+        "Shoot one arrow at one target, named by its kind (such as end_crystal or skeleton) and, when several are seen, near: the position where it was seen. The Body draws the weapon, aims allowing for the arrow's drop and shoots once; the call ends when the arrow is loosed, and whether it hit, or where it landed, arrives afterwards as last_shot in the Body state. It does not walk toward the target: beyond max_range it fails with out_of_range and the distance. Shooting again is another call. Requires a weapon and ammunition.",
+        {
+            "type": "object",
+            "properties": {
+                "target": {"type": "string", "minLength": 1},
+                "near": VECTOR_SCHEMA,
+                "weapon": {"type": "string", "enum": ["bow", "crossbow"]},
+                "max_range": {"type": "number", "minimum": 2, "maximum": 64},
+                "timeout_s": {"type": "number", "exclusiveMinimum": 0, "maximum": 300},
+            },
+            "required": ["target"],
+            "additionalProperties": False,
+        },
+        lambda params: combat.ranged_attack(
+            str(params["target"]), near=_near(params), weapon=str(params.get("weapon", "bow")),
+            max_range=float(params.get("max_range", 24)),
+            timeout_s=float(params.get("timeout_s", 20)),
+        ),
+        ToolSidecar(
+            "ranged_attack", mutating=True, source="body.combat", tool_type="combat",
+            permission="combat", body_scope=("combat", "nearby_entities", "inventory"),
+            terminal_truth=("rangedDone", "target_health", "target_gone"), timeout_s=305.0,
+        ),
+    )
+
+
+
+def craft_observation_projector(reason: str, metrics: dict[str, object]) -> JsonObject:
+    if reason == "crafting_table_not_available":
+        # Every rejected table is evidence for workspace unavailability,
+        # rather than incidental execution history to sample away.
+        return {key: sanitize_observation(metrics[key]) for key in (
+            "crafting_table_item", "search_radius", "search_performed", "tables_found",
+            "attempted_targets", "carried_table_count", "search_result",
+            "temporary_table_placement_available",
+        ) if key in metrics}
+    if reason != "craft_plan_not_available":
+        return {}
+    failures = metrics.get("variant_failures")
+    if not isinstance(failures, list):
+        return {}
+    # These short records are the diagnosis, not per-step history. Preserve
+    # every variant's cause, table requirement and missing ingredients; the
+    # generic list bound would sample only the first three records.
+    return {"variant_failures": sanitize_observation(failures)}
+
+
+def _craft_tool(inventory_txn: InventoryTransactions) -> RegisteredTool:
+    return RegisteredTool(
+        "craft_item",
+        "Craft at least the requested count from materials already in inventory, rounding up to complete recipe batches. Handles recipe lookup, nearby/temporary crafting table lifecycle, and residue cleanup. Fails honestly with missing materials if ingredients are absent; it does not gather them.",
+        {
+            "type": "object",
+            "properties": {
+                "item": {
+                    "type": "string",
+                    "description": "Output item to craft, e.g. 'stone_pickaxe'.",
+                },
+                "count": {
+                    "type": "integer", "minimum": 1, "default": 1,
+                    "description": "Minimum number of new items to craft. Rounded up to whole recipe batches; crafted_count reports the actual output.",
+                },
+                "auto_equip": {"type": "boolean", "default": False},
+            },
+            "required": ["item"],
+            "additionalProperties": False,
+        },
+        lambda params: inventory_txn.craft_recipe(
+            item=str(params["item"]),
+            count=int(params.get("count") or 1),
+            auto_equip=bool(params.get("auto_equip", False)),
+            search_radius=min(max(1, int(params.get("search_radius") or 8)), 64),
+            keep_temporary_table=bool(params.get("keep_temporary_table", False)),
+            cleanup_existing_bot_table=bool(params.get("cleanup_existing_bot_table", False)),
+        ),
+        ToolSidecar(
+            "craft_item",
+            mutating=True,
+            source="body.inventory",
+            tool_type="inventory",
+            permission="craft",
+            body_scope=("inventory", "blocks"),
+            terminal_truth=("inventory", "ToolResult"),
+            # Finite recipe batches each own an execution deadline. A fixed
+            # wrapper deadline otherwise cancels valid large requests midway.
+            timeout_s=None,
+        ),
+        projector=craft_observation_projector,
+        supervision_explanation="The Body normally finds or creates the crafting context, performs complete recipe batches, and verifies the inventory result.",
+    )
+
+
+def _equip_tool(inventory_txn: InventoryTransactions) -> RegisteredTool:
+    return RegisteredTool(
+        "equip_item",
+        "Equip an owned item into the appropriate equipment slot or the requested slot, then verify the inventory/equipment delta. It fails honestly if the item is not in inventory.",
+        {
+            "type": "object",
+            "properties": {
+                "item": {"type": "string"},
+                "target": {
+                    "type": "string",
+                    "enum": ["auto", "mainhand", "offhand", "head", "chest", "legs", "feet"],
+                    "default": "auto",
+                },
+            },
+            "required": ["item"],
+            "additionalProperties": False,
+        },
+        lambda params: inventory_txn.equip_item(
+            item=str(params["item"]),
+            target=str(params.get("target") or "auto"),
+        ),
+        ToolSidecar(
+            "equip_item",
+            mutating=True,
+            source="body.inventory",
+            tool_type="inventory",
+            permission="equip",
+            body_scope=("inventory",),
+            terminal_truth=("inventory", "ToolResult"),
+            timeout_s=10.0,
+        ),
+    )
+
+
+def _smelt_tool(body: Body, furnace_txn: FurnaceTransactions) -> RegisteredTool:
+    return RegisteredTool(
+        "smelt_item",
+        "Load items already in inventory into a furnace, with fuel, and go on: the furnace keeps smelting while "
+        "the Body does other things (one item every 10 seconds while its area is loaded). It uses the nearest "
+        "furnace within 8 blocks that is empty, or places a carried furnace and leaves it there. The result says "
+        "where; the FURNACES section shows what is in your furnaces until you take it out with "
+        "clear_furnace(take='output'). With stay=true (at most 16) the Body waits by the furnace and takes the "
+        "output itself. Fuel is chosen from inventory unless fuel_item is given. It fails honestly if the input "
+        "has no smelting recipe, no fuel is owned, or no empty furnace is near or carried.",
+        {
+            "type": "object",
+            "properties": {
+                "input_item": {
+                    "type": "string",
+                    "description": "Input item to smelt, e.g. 'raw_iron'.",
+                },
+                "count": {"type": "integer", "minimum": 1, "maximum": 64},
+                "fuel_item": {"type": "string"},
+                "stay": {"type": "boolean", "default": False,
+                         "description": "Wait by the furnace and take the output (at most 16 items)."},
+            },
+            "required": ["input_item", "count"],
+            "additionalProperties": False,
+        },
+        lambda params: _run_smelt_tool(body, furnace_txn, params),
+        ToolSidecar(
+            "smelt_item",
+            mutating=True,
+            source="body.furnace",
+            tool_type="inventory",
+            permission="smelt",
+            body_scope=("inventory", "blocks"),
+            terminal_truth=("inventory", "furnace", "ToolResult"),
+            timeout_s=190.0,
+        ),
+        supervision_explanation="The Body approaches or places a furnace and puts input and fuel in; it leaves the furnace smelting unless asked to stay for the output.",
+    )
+
+
+def _smelt_remaining_from_transaction(metrics: Mapping[str, object]) -> dict[str, object]:
+    """Summarize only observed furnace contents from transfer evidence."""
+    slots: dict[str, object] = {}
+    sources: list[Mapping[str, object]] = []
+
+    def collect(value: object) -> None:
+        if isinstance(value, Mapping):
+            executed = value.get("executed")
+            reclaim = value.get("reclaim")
+            if isinstance(executed, list):
+                for entry in executed:
+                    if isinstance(entry, Mapping):
+                        sources.append(entry)
+            if isinstance(reclaim, list):
+                for entry in reclaim:
+                    if isinstance(entry, Mapping):
+                        sources.append(entry)
+            nested = value.get("nearest_furnace_result")
+            if isinstance(nested, Mapping):
+                collect(nested)
+    collect(metrics)
+    for entry in sources:
+        slot = entry.get("furnace_slot")
+        payload = entry.get("result")
+        payload_metrics = payload.get("metrics") if isinstance(payload, Mapping) else None
+        if isinstance(payload_metrics, Mapping):
+            after = payload_metrics.get("furnace_after")
+            if isinstance(after, Mapping) and slot:
+                slots[str(slot)] = dict(after)
+    return {
+        "furnace_slots": slots,
+        "evidence": "Observed furnace slot contents after the recorded transfer and reclaim operations.",
+    }
+
+
+def _smelt_result_with_remaining(result: ToolResult, *, input_item: str, input_count: int, output_item: str, output_count: int) -> ToolResult:
+    if not (result.reason == "preempted" or result.reason.endswith(":preempted")):
+        return result
+    metrics = dict(result.metrics or {})
+    # Do not report requested totals as if they were still in the furnace.
+    # The transaction's executed/reclaim transfer records are the only source
+    # for what remained when the call was interrupted.
+    metrics.setdefault("remaining", _smelt_remaining_from_transaction(metrics))
+    return replace(result, metrics=metrics)
+
+def _run_smelt_tool(body: Body, furnace_txn: FurnaceTransactions, params: dict[str, object]) -> ToolResult:
+    input_item = str(params["input_item"])
+    count = int(params.get("count") or 1)
+    stay = bool(params.get("stay"))
+    if count <= 0 or count > (16 if stay else 64):
+        return ToolResult(
+            success=False,
+            reason="invalid_smelt_count",
+            can_retry=False,
+            metrics={"input_item": input_item, "count": count},
+        )
+
+    output = resolve_smelt_output(input_item, lambda item: body.perceive("recipeData", {"item": item, "type": "smelting"}))
+    if output is None:
+        return ToolResult(
+            success=False,
+            reason="smelt_recipe_not_found",
+            can_retry=False,
+            next_suggestion="choose an input item with a furnace smelting recipe",
+            metrics={"input_item": input_item, "count": count},
+        )
+    output_item, output_count_per_input = output
+    output_count = output_count_per_input * count
+
+    counts_result = _tool_inventory_counts(body)
+    if isinstance(counts_result, ToolResult):
+        return counts_result
+    counts = counts_result
+
+    fuel_item = str(params.get("fuel_item") or "")
+    fuel_count: int | None = None
+    if fuel_item:
+        normalized_fuel = fuel_item.removeprefix("minecraft:")
+        if counts.get(normalized_fuel, 0) <= 0:
+            return ToolResult(
+                success=False,
+                reason="fuel_not_found",
+                can_retry=False,
+                next_suggestion="choose a fuel item currently present in inventory",
+                metrics={"fuel_item": fuel_item, "counts": counts},
+            )
+    else:
+        seconds_needed = max(count, output_count) * DEFAULT_SMELT_SECONDS_PER_ITEM
+        selected = select_fuel(counts, seconds_needed)
+        if selected is None:
+            return ToolResult(
+                success=False,
+                reason="fuel_not_found",
+                can_retry=False,
+                next_suggestion="collect or craft a valid furnace fuel before smelting",
+                metrics={
+                    "input_item": input_item,
+                    "count": count,
+                    "seconds_needed": seconds_needed,
+                    "usable_fuels": {
+                        item: amount
+                        for item, amount in counts.items()
+                        if select_fuel({item: amount}, seconds_needed) is not None
+                    },
+                },
+            )
+        fuel_item, fuel_count = selected
+
+    smelt_timeout_s = count * DEFAULT_SMELT_SECONDS_PER_ITEM + 10.0
+    result = furnace_txn.smelt_nearest_furnace(
+        input_item=input_item,
+        input_count=count,
+        fuel_item=fuel_item,
+        fuel_count=fuel_count,
+        output_item=output_item,
+        output_count=output_count,
+        smelt_timeout_s=smelt_timeout_s,
+        transfer_timeout_s=6.0,
+        approach_timeout_s=15.0,
+        leave=not stay,
+    )
+    if result.success or not result.can_retry or counts.get("furnace", 0) <= 0:
+        return _smelt_result_with_remaining(
+            result, input_item=input_item, input_count=count,
+            output_item=output_item, output_count=output_count,
+        )
+    temporary = furnace_txn.smelt_with_nearby_temporary_furnace(
+        input_item=input_item,
+        input_count=count,
+        fuel_item=fuel_item,
+        fuel_count=fuel_count,
+        output_item=output_item,
+        output_count=output_count,
+        smelt_timeout_s=smelt_timeout_s,
+        transfer_timeout_s=6.0,
+        place_timeout_s=8.0,
+        reclaim_timeout_s=8.0,
+        leave=not stay,
+    )
+    metrics = dict(temporary.metrics or {})
+    metrics["nearest_furnace_result"] = result.to_payload()
+    return _smelt_result_with_remaining(
+        ToolResult(
+            temporary.success,
+            temporary.reason,
+            temporary.can_retry,
+            temporary.next_suggestion,
+            metrics=metrics,
+        ),
+        input_item=input_item, input_count=count,
+        output_item=output_item, output_count=output_count,
+    )
+
+
+def _tool_inventory_counts(body: Body, *, page_size: int = 12) -> dict[str, int] | ToolResult:
+    counts: dict[str, int] = {}
+    start: int | None = 0
+    saw_page = False
+    while start is not None:
+        perception = body.perceive("inventory", {"start": start, "limit": page_size})
+        saw_page = True
+        if not perception.ok:
+            return ToolResult(
+                success=False,
+                reason="perception_failed",
+                can_retry=True,
+                metrics={
+                    "scope": "inventory",
+                    "error": perception.error,
+                    "uncertainty": list(perception.uncertainty or ()),
+                },
+            )
+        for payload in perception.data.get("slots") or []:
+            if not isinstance(payload, dict):
+                continue
+            slot = InventorySlot.from_payload(payload)
+            if slot.empty or not slot.item:
+                continue
+            item = str(slot.item).removeprefix("minecraft:")
+            counts[item] = counts.get(item, 0) + slot.count
+        next_start = _next_start(perception)
+        start = int(next_start) if next_start is not None else None
+        if start is None and not perception.complete:
+            return ToolResult(
+                success=False,
+                reason="perception_failed",
+                can_retry=True,
+                metrics={
+                    "scope": "inventory",
+                    "error": perception.error,
+                    "uncertainty": list(perception.uncertainty or ()),
+                },
+            )
+    if not saw_page:
+        return ToolResult(False, "perception_failed", True, metrics={"scope": "inventory", "error": "no pages read"})
+    return counts
+
+
+def _search_tool(work: BlockWork) -> RegisteredTool:
+    return RegisteredTool(
+        "search_for_block",
+        "Read nearby block candidates without moving. A hit verifies block identity and geometric "
+        "distance only; it does not verify line of sight, a usable stand point, or interaction readiness. "
+        "Use get_to_block for one block-approach objective and collect_resource for count-based acquisition. "
+        "For interchangeable material families, pass the full accepted block list rather than a representative species.",
+        {
+            "type": "object",
+            "properties": {
+                "block_types": {"type": "array", "items": {"type": "string"}},
+                "search_radius": {"type": "integer"},
+                "find_limit": {"type": "integer"},
+                "max_pages": {"type": "integer"},
+            },
+            "required": ["block_types"],
+            "additionalProperties": True,
+        },
+        lambda params: work.search_for_block(
+            block_types=tuple(str(item) for item in params.get("block_types", [])),
+            search_radius=min(max(1, int(params.get("search_radius") or 16)), 64),
+            find_limit=int(params.get("find_limit") or 6),
+            max_pages=min(max(1, int(params.get("max_pages") or 1)), 8),
+            timeout_s=12.0,
+        ),
+        ToolSidecar(
+            "search_for_block",
+            mutating=False,
+            source="body.block_work",
+            tool_type="perception",
+            permission="read_world",
+            body_scope=("blocks",),
+            # The Body search owns its finite page/time terminal. Do not let a
+            # fixed Runner deadline cut a partial perception off mid-transaction.
+            timeout_s=None,
+            body_mutating=False,
+        ),
+    )
+
+
+def _java_break_collect(
+    body: Body,
+    pos: Position,
+    *,
+    expected_block_id: str,
+    expected_item_ids: tuple[str, ...],
+    excavation_budget: int,
+    timeout_s: float,
+) -> ToolResult:
+    try:
+        result = body.execute(
+            Action.create(
+                "collectBlock",
+                {
+                    "target": list(pos),
+                    "expected_block_id": _namespaced(expected_block_id),
+                    "expected_item_ids": [
+                        _namespaced(item) for item in expected_item_ids
+                    ],
+                    "excavation_budget": max(0, excavation_budget),
+                    "timeout_ticks": max(20, min(12_000, int(timeout_s * 20))),
+                },
+            )
+        )
+    except Exception as error:
+        return ToolResult(
+            False,
+            "java_body_unavailable",
+            True,
+            metrics={"error": type(error).__name__, "target": list(pos)},
+        )
+    success = bool(result.ok and result.accepted and result.complete)
+    reason = "collected" if success else str(result.error or "body_rejected")
+    metrics = dict(result.data)
+    if (
+        not success
+        and reason == "no_path"
+        and metrics.get("phase_reason") == "missing_required_tool"
+    ):
+        reason = "missing_required_tool"
+    return ToolResult(
+        success,
+        reason,
+        reason in {
+            "target_gone",
+            "target_block_mismatch",
+            "no_path",
+            "excavation_budget_exhausted",
+            "pickup_not_observed",
+            "timeout",
+        },
+        metrics=metrics,
+    )
+
+
+def _namespaced(value: str) -> str:
+    normalized = value.strip().lower()
+    return normalized if ":" in normalized else f"minecraft:{normalized}"
+
+
+# What stands in a cell that holds no block to break.
+NOTHING_TO_BREAK = frozenset({"air", "cave_air", "void_air", "water", "lava", "bubble_column"})
+
+
+def _mine_collect_tool(
+    work: BlockWork,
+    java_objective_body: Body | None = None,
+) -> RegisteredTool:
+    def run(params: JsonObject) -> ToolResult:
+        pos = tuple(int(v) for v in params["pos"])
+        if java_objective_body is None:
+            # Naming one exact block the bot placed itself is removing its own
+            # work, as a player would; the ledger still checks the type. Search-
+            # driven collection keeps COLLECT and cannot take the bot's builds
+            # (life-stage c3: a misplaced door could not be taken back).
+            own = pos in getattr(work.governance, "bot_placements", {})
+            expected_drops = tuple(str(item) for item in params.get("expected_drops", []))
+            target_types = tuple(str(item) for item in params.get("target_block_types", []))
+            # The Agent naming an exact cell means "break this block", as a
+            # player does. What stands there is read first: no block is said as
+            # such, and another block than the one named is broken all the same
+            # and said in the result. run-45 15:44-16:06: the Agent's own wall
+            # read as stone, not the cobblestone it named, and was refused five
+            # times as break_denied:collect_target_required while the Body sat
+            # in a flooded box (project-review-20261110 §9.16). Decision's
+            # wayside ore keeps the strict match (strict_type): a mined-out ore
+            # turned to stone is not worth a stop.
+            seen = work.body.perceive("blockAt", {"x": pos[0], "y": pos[1], "z": pos[2]})
+            here = str(seen.data.get("type") or "").removeprefix("minecraft:") if seen.ok else ""
+            if here in NOTHING_TO_BREAK:
+                return ToolResult(False, "nothing_to_break", False, metrics={"target": list(pos), "block_type": here})
+            named = {item.removeprefix("minecraft:") for item in target_types}
+            if here and named and here not in named and not params.get("strict_type"):
+                target_types, expected_drops = (here,), ()
+            return work.mine_block_collect(
+                pos,
+                context=BreakContext.BOT_CLEANUP if own else BreakContext.COLLECT,
+                expected_drops=expected_drops,
+                target_block_types=target_types or ((here,) if here else ()),
+                dry=bool(params.get("dry", False)),
+                settle_s=0.1,
+                pickup_timeout_s=2.0,
+                timeout_s=10.0,
+            )
+        observed = work.body.perceive(
+            "blockAt",
+            {"x": pos[0], "y": pos[1], "z": pos[2]},
+        )
+        if not observed.ok:
+            return ToolResult(False, "target_gone", True, metrics={"target": list(pos)})
+        expected_block = str(observed.data.get("type") or "minecraft:air")
+        allowed = {
+            _namespaced(str(item)) for item in params.get("target_block_types", [])
+        }
+        if allowed and _namespaced(expected_block) not in allowed:
+            return ToolResult(
+                False,
+                "target_block_mismatch",
+                True,
+                metrics={"target": list(pos), "observed": expected_block},
+            )
+        expected_items = tuple(
+            str(item) for item in params.get("expected_drops", [])
+        ) or (expected_block,)
+        return _java_break_collect(
+            java_objective_body,
+            pos,
+            expected_block_id=expected_block,
+            expected_item_ids=expected_items,
+            excavation_budget=0,
+            timeout_s=10.0,
+        )
+
+    return RegisteredTool(
+        "mine_block_collect",
+        "Surgically mine one deliberately selected exact coordinate and verify any immediate pickup by "
+        "authoritative inventory delta. Use this only when the exact block position itself is the intent. "
+        "Never use it to acquire a resource quantity: collect_resource owns discovery, alternative targets, "
+        "continuous mining, deferred pickup, and the final inventory goal.",
+        {
+            "type": "object",
+            "properties": {
+                "pos": {"type": "array", "items": {"type": "integer"}, "minItems": 3, "maxItems": 3},
+                "expected_drops": {"type": "array", "items": {"type": "string"}},
+                "target_block_types": {"type": "array", "items": {"type": "string"}},
+                "dry": {"type": "boolean"},
+            },
+            "required": ["pos"],
+            "additionalProperties": True,
+        },
+        run,
+        ToolSidecar(
+            "mine_block_collect",
+            mutating=True,
+            source=("java_body" if java_objective_body is not None else "body.block_work"),
+            tool_type="work",
+            permission="break_collect",
+            body_scope=("mine",),
+            terminal_truth=("mineDone", "inventory"),
+            # The Body transaction has its own finite approach, action, and pickup terminals.
+            # An outer runner deadline must not preempt it before those facts settle.
+            timeout_s=None,
+        ),
+    )
+
+
+def _read_state(body: Body) -> ToolResult:
+    state = body.get_state()
+    # Without the clock the Agent judged daylight from absent mobs and worked
+    # outdoors into the night (eval-20261019; M2 run-1 deaths 2-5 at night).
+    clock = {"time_of_day": state.time % 24000, "daylight": daylight_sentence(state.time)} \
+        if isinstance(state.time, int) and not isinstance(state.time, bool) else {}
+    return ToolResult(
+        True,
+        "state_read",
+        False,
+        metrics={
+            "bot": state.bot,
+            "pos": list(state.pos),
+            "health": state.health,
+            "food": state.food,
+            "oxygen": state.oxygen,
+            "dimension": state.dimension,
+            **clock,
+            **_last_shot(body),
+            "inventory_hash": state.inventory_hash,
+            "inventory_counts": dict(state.inventory_counts or {}),
+            "selected_slot": state.selected_slot,
+            "selected_item": state.selected_item,
+            "offhand_item": state.offhand_item,
+            "body_owner": state.body_owner,
+            "pending_action_count": state.pending_action_count,
+            "complete": state.complete,
+            "missing": state.missing,
+        },
+    )
+
+
+def _last_shot(body: Body) -> dict[str, object]:
+    """Where the last arrow went, as the Body follows it after the shot (real client only)."""
+    reader = getattr(body, "get_reflex_facts", None)
+    if not callable(reader):
+        return {}
+    try:
+        shot = reader().get("last_shot")
+    except Exception:
+        return {}
+    return {"last_shot": dict(shot)} if isinstance(shot, dict) else {}
+
+
+def _nav_goal(params: dict[str, object]) -> Position | GoalNear:
+    pos = tuple(int(value) for value in params["pos"])
+    if len(pos) != 3:
+        raise ValueError("pos must contain exactly three coordinates")
+    radius = int(params.get("radius") or 0)
+    if radius > 0:
+        return GoalNear(pos, radius=radius)
+    return pos
+
+
+__all__ = [
+    "Phase1RuntimeConfig",
+    "Phase1ToolManifestEntry",
+    "build_phase1_agent_runtime",
+    "build_phase1_registry",
+    "inventory_count",
+    "tool_manifest",
+]

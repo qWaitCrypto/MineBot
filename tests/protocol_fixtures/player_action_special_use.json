@@ -1,0 +1,96 @@
+{
+  "name": "player_action_special_use",
+  "description": "PLAYER_ACTION carries governed physical-first ignite and sow requests with observed world and inventory terminals.",
+  "steps": [
+    {
+      "send": {"builder": "hello", "args": {}},
+      "expect_message": {"channel": "fakeplayer-body", "protocol": "fakeplayer-body/1", "type": "HELLO", "request_id": "r-1"}
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body", "type": "HELLO_ACK", "request_id": "r-1",
+        "protocol": "fakeplayer-body/1", "minecraft_version": "26.1.2",
+        "max_request_bytes": 16384, "max_requests_per_second": 40,
+        "request_types": ["HELLO", "PLAYER_ACTION", "MUTATION_VERDICT"]
+      },
+      "expect": [{"kind": "response", "type": "HELLO_ACK", "request_type": "HELLO"}]
+    },
+    {
+      "send": {
+        "builder": "player_action",
+        "args": {
+          "bot_name": "MineBot_1", "action_id": "ignite-0001", "action": "igniteBlock",
+          "params": {"target": [4, 70, 0], "item": "minecraft:flint_and_steel", "allow_server_substitute": true, "timeout_ticks": 120}
+        }
+      },
+      "expect_message": {
+        "channel": "fakeplayer-body", "protocol": "fakeplayer-body/1", "type": "PLAYER_ACTION",
+        "request_id": "r-2", "bot_name": "MineBot_1", "action_id": "ignite-0001", "action": "igniteBlock",
+        "params": {"target": [4, 70, 0], "item": "minecraft:flint_and_steel", "allow_server_substitute": true, "timeout_ticks": 120}
+      }
+    },
+    {
+      "recv": {"channel": "fakeplayer-body", "type": "PLAYER_ACTION_ACK", "request_id": "r-2", "action_id": "ignite-0001", "state": "accepted"},
+      "expect": [{"kind": "response", "type": "PLAYER_ACTION_ACK", "request_type": "PLAYER_ACTION"}]
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body", "type": "MUTATION_PROPOSAL", "proposal_id": "mp-ignite",
+        "bot": "MineBot_1", "action_id": "ignite-0001",
+        "mutation": {"kind": "interact", "x": 4, "y": 70, "z": 0, "block_id": "minecraft:air", "context": "activate"}
+      },
+      "expect": [{"kind": "proposal", "proposal_id": "mp-ignite", "block_id": "minecraft:air", "mutation_kind": "interact", "context": "activate", "x": 4, "y": 70, "z": 0}]
+    },
+    {
+      "send": {"builder": "mutation_verdict", "args": {"proposal_id": "mp-ignite", "allow": true, "reason": "allowed_interaction"}},
+      "expect_message": {"channel": "fakeplayer-body", "protocol": "fakeplayer-body/1", "type": "MUTATION_VERDICT", "proposal_id": "mp-ignite", "allow": true, "reason": "allowed_interaction"}
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body", "type": "EVENT", "bot": "MineBot_1", "seq": 1, "tick": 700,
+        "event": "action_terminal", "action_id": "ignite-0001",
+        "data": {"classification": "completed", "reason": "completed", "success": true, "target": [4, 70, 0], "expected_type": "minecraft:fire", "block_after": "minecraft:fire", "method": "physical"}
+      },
+      "expect": [{"kind": "event", "name": "action_terminal", "seq": 1, "data_contains": {"block_after": "minecraft:fire"}}]
+    },
+    {
+      "send": {
+        "builder": "player_action",
+        "args": {
+          "bot_name": "MineBot_1", "action_id": "sow-0001", "action": "sowCrop",
+          "params": {"target": [6, 70, 0], "crop_block": "minecraft:wheat", "seed_item": "minecraft:wheat_seeds", "allow_server_substitute": true, "timeout_ticks": 120}
+        }
+      },
+      "expect_message": {
+        "channel": "fakeplayer-body", "protocol": "fakeplayer-body/1", "type": "PLAYER_ACTION",
+        "request_id": "r-3", "bot_name": "MineBot_1", "action_id": "sow-0001", "action": "sowCrop",
+        "params": {"target": [6, 70, 0], "crop_block": "minecraft:wheat", "seed_item": "minecraft:wheat_seeds", "allow_server_substitute": true, "timeout_ticks": 120}
+      }
+    },
+    {
+      "recv": {"channel": "fakeplayer-body", "type": "PLAYER_ACTION_ACK", "request_id": "r-3", "action_id": "sow-0001", "state": "accepted"},
+      "expect": [{"kind": "response", "type": "PLAYER_ACTION_ACK", "request_type": "PLAYER_ACTION"}]
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body", "type": "MUTATION_PROPOSAL", "proposal_id": "mp-sow",
+        "bot": "MineBot_1", "action_id": "sow-0001",
+        "mutation": {"kind": "interact", "x": 6, "y": 70, "z": 0, "block_id": "minecraft:farmland", "context": "farm"}
+      },
+      "expect": [{"kind": "proposal", "proposal_id": "mp-sow", "block_id": "minecraft:farmland", "mutation_kind": "interact", "context": "farm", "x": 6, "y": 70, "z": 0}]
+    },
+    {
+      "send": {"builder": "mutation_verdict", "args": {"proposal_id": "mp-sow", "allow": true, "reason": "allowed_interaction"}},
+      "expect_message": {"channel": "fakeplayer-body", "protocol": "fakeplayer-body/1", "type": "MUTATION_VERDICT", "proposal_id": "mp-sow", "allow": true, "reason": "allowed_interaction"}
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body", "type": "EVENT", "bot": "MineBot_1", "seq": 2, "tick": 704,
+        "event": "action_terminal", "action_id": "sow-0001",
+        "data": {"classification": "completed", "reason": "completed", "success": true, "target": [6, 70, 0], "crop_pos": [6, 71, 0], "expected_type": "minecraft:wheat", "block_after": "minecraft:wheat", "item_count_before": 3, "item_count_after": 2, "method": "physical"}
+      },
+      "expect": [{"kind": "event", "name": "action_terminal", "seq": 2, "data_contains": {"block_after": "minecraft:wheat", "item_count_after": 2}}]
+    }
+  ],
+  "final": {"supports": ["PLAYER_ACTION", "MUTATION_VERDICT"], "pending_requests": 0, "last_seq": {"MineBot_1": 2}}
+}

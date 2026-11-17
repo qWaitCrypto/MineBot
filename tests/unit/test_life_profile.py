@@ -1,0 +1,121 @@
+from minebot.app.life_profile import life_intent
+from minebot.app import reflex_question as rq
+
+def test_idle_profile_adds_only_generic_player_and_home_actions():
+    facts={"position":[10,64,10],"nearby_entities":[{"type":"player","id":"Visitor","name":"Visitor","pos":[14,64,10]}],
+           "life_profile":{"routine":"Stay near home.","home":{"pos":[0,64,0]},"relationships":[{"player":"Visitor","note":"Say hello."}]}}
+    options=rq.idle_options(facts)
+    assert list(options)[:3] == ["look_player", "approach_player","follow_player"]
+    assert "go_home" in options and "stay" in options
+    assert "Stay near home." in life_intent(facts["life_profile"])
+
+def test_idle_profile_has_no_world_write_option_without_profile_targets():
+    assert rq.idle_options({"position":[0,64,0]}) == {"stay":"Stay where the Body is and wait for the next step."}
+
+
+def test_life_frame_reports_native_time_player_distance_and_arrival_band():
+    facts = {"time": 12500, "position": [0, 64, 0], "life_intent": "Return at dusk.",
+             "life_profile": {"home": {"pos": [1,64,0]}},
+             "nearby_entities": [{"type":"minecraft:player", "name":"Visitor", "pos":[2,64,0]}]}
+    options = rq.idle_options(facts)
+    assert "approach_player" not in options and "go_home" not in options
+    request = rq.idle_question(facts, options)
+    assert request["state"]["daylight"] == "It is dusk; night falls soon."
+    assert request["state"]["players"] == "Player Visitor is 2 blocks away."
+
+
+def test_thinking_filters_life_ranges_but_keeps_protection_and_current_first():
+    facts = {"agent_thinking": True, "position": [10,64,0], "oxygen":100,
+             "life_profile":{"home":{"pos":[0,64,0]},"relationships":[{"player":"Absent"}]},
+             "nearby_entities":[{"type":"player","name":"Visitor","pos":[20,64,0]}]}
+    options = rq.life_running_options(facts, "approach_player")
+    assert list(options)[0] == "approach_player"
+    assert {"look_player", "approach_player", "stay", "surface"} <= options.keys()
+    assert not {"go_home", "follow_player", "seek_player"} & options.keys()
+
+
+def test_missing_profile_does_not_offer_unrequested_social_actions():
+    assert set(rq.idle_options({"nearby_entities":[{"type":"player", "name":"Visitor"}]})) == {"stay"}
+
+
+def test_life_running_uses_same_idle_range_without_completion_option():
+    from minebot.app.direct_call_supervision import CallSupervisor
+    from types import SimpleNamespace
+    facts = {"position":[10,64,0], "life_profile":{"home":{"pos":[0,64,0]}}}
+    record = {"tool":"move_to", "params":{"pos":[0,64,0]},
+              "supervision_context":{"is_life_action":True, "reflex_action_choice":"go_home"}}
+    options = CallSupervisor._options_for(SimpleNamespace(name="move_to"), record,
+                                         execution={"facts":facts, "state":"running"})
+    # The running action under its own name, first; no "keep doing <raw call>".
+    assert list(options)[0] == "go_home" and "keep_going" not in options
+    assert "next_step" not in options
+    assert "call_agent" in options and "stay" in options
+
+
+def test_life_write_scope_digs_without_placing_and_restores_on_failure():
+    from minebot.app.body_loop import BodyLoop
+    from minebot.brain.registry import RegisteredTool, ToolSidecar
+    from types import SimpleNamespace
+    import pytest
+    actions = []
+    body = SimpleNamespace(get_reflex_facts=lambda:{"allow_break":False, "allow_place":True},
+                           execute=lambda action: actions.append(action) or SimpleNamespace(ok=True))
+    def failed(params):
+        assert actions[-1].params == {"allow_break":True, "allow_place":False}
+        raise RuntimeError("native failure")
+    tool = RegisteredTool("move_to", "", {}, failed, ToolSidecar("move_to", True))
+    loop = BodyLoop.__new__(BodyLoop)
+    loop.runtime = SimpleNamespace(body=body)
+    with pytest.raises(RuntimeError, match="native failure"):
+        loop._life_tool(tool).callable({})
+    assert actions[-1].params == {"allow_break":False, "allow_place":True}
+
+
+def test_life_movement_waits_for_settings_to_be_applied_not_merely_accepted():
+    from minebot.app.body_loop import BodyLoop
+    from minebot.brain.registry import RegisteredTool, ToolSidecar
+    from types import SimpleNamespace
+    timeline=[]
+    def accepted(action):
+        timeline.append("accepted")
+        return SimpleNamespace(ok=True,complete=False)
+    def terminal(*args,**kwargs):
+        timeline.append("applied")
+        return SimpleNamespace(data={"success":True})
+    body=SimpleNamespace(get_reflex_facts=lambda:{"allow_break":True,"allow_place":True},
+                         execute=accepted, await_action_terminal=terminal)
+    tool=RegisteredTool("move_to","",{},lambda params:timeline.append("moved"),
+                        ToolSidecar("move_to",True,timeout_s=60))
+    loop=BodyLoop.__new__(BodyLoop);loop.runtime=SimpleNamespace(body=body)
+    loop._life_tool(tool).callable({})
+    assert timeline == ["accepted","applied","moved","accepted","applied"]
+
+
+def test_following_a_walking_player_is_offered_as_itself_and_carries_on():
+    """Offered as "Keep doing the current life activity: follow_entity(...)", it
+    was never chosen and the Body switched every frame (step8-extra-claude2)."""
+    from minebot.app.body_loop import BodyLoop
+    from minebot.app.direct_call_supervision import CallSupervisor
+    from types import SimpleNamespace
+    facts = {"position": [0, 64, 0], "life_profile": {"relationships": [{"player": "Visitor"}]},
+             "nearby_entities": [{"type": "player", "name": "Visitor", "id": "p1", "pos": [6, 64, 0]}]}
+    record = {"tool": "follow_entity", "params": {"target": "p1"},
+              "supervision_context": {"is_life_action": True, "is_reflex_action": True,
+                                      "reflex_action_choice": "follow_player"}}
+    options = CallSupervisor._options_for(SimpleNamespace(name="follow_entity"), record,
+                                         execution={"facts": facts, "state": "running"})
+    assert list(options)[0] == "follow_player" and "keep_going" not in options
+    loop = BodyLoop.__new__(BodyLoop)
+    assert loop._continues_protection(record, "follow_player", {"facts": facts})
+    assert not loop._continues_protection(record, "approach_player", {"facts": facts})
+
+
+def test_a_walk_home_or_to_a_player_ends_inside_the_at_place_band():
+    """Radius 2 on block cells ended the walk 2.3 blocks from home, still
+    offered "go home", re-run every 1.5 s (step8-extra-claude3)."""
+    from minebot.app.direct_call_supervision import CallSupervisor
+    facts = {"position": [10, 64, 0], "life_profile": {"home": {"pos": [0, 64, 0]}},
+             "nearby_entities": [{"type": "player", "name": "Visitor", "id": "p1", "pos": [20, 64, 0]}]}
+    for choice in ("go_home", "approach_player"):
+        tool, args = CallSupervisor._default_action(choice, {"facts": facts})
+        assert tool == "move_to" and args["radius"] < rq.AT_PLACE_BLOCKS

@@ -1,0 +1,1171 @@
+import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
+
+from minebot.body import InventoryTransactions
+from minebot.body.inventory import _parse_recipe_variants
+from minebot.contract import Action, Event, InventorySlot, PerceptionResult, Result, ToolResult
+
+
+DOOR_RECIPE = '[[[[acacia_door, 3]], [[acacia_planks], [acacia_planks], [acacia_planks], [acacia_planks], [acacia_planks], [acacia_planks]], [shaped, 2, 3]]]'
+
+
+class FakeInventoryBody:
+    bot_name = "Bot1"
+
+    def __init__(
+        self,
+        pages,
+        *,
+        accepted: bool = True,
+        drop_delta: int | None = None,
+        select_success: bool = True,
+        select_reason: str = "completed",
+        select_rejected: bool = False,
+        craft_outcomes: list[tuple[bool, str]] | None = None,
+        recipe_data: dict[str, str] | None = None,
+        entities: list[dict[str, object]] | None = None,
+    ):
+        self.pages = list(pages)
+        self.accepted = accepted
+        self.drop_delta = drop_delta
+        self.select_success = select_success
+        self.select_reason = select_reason
+        self.select_rejected = select_rejected
+        self.craft_outcomes = list(craft_outcomes or [])
+        self.recipe_data = recipe_data or {}
+        self.entities = list(entities or [])
+        self.actions: list[Action] = []
+        self.perceptions: list[tuple[str, dict[str, object]]] = []
+
+    def perceive(self, scope: str, params: dict[str, object]) -> PerceptionResult:
+        self.perceptions.append((scope, params))
+        if scope == "inventory":
+            return self.pages.pop(0)
+        if scope == "nearbyEntities":
+            return PerceptionResult(
+                bot="Bot1", scope=scope, type="perception", ok=True, complete=True,
+                data={"entities": self.entities}, uncertainty=[],
+            )
+        if scope == "recipeData":
+            item = params.get("item")
+            raw = self.recipe_data.get(str(item))
+            return PerceptionResult(
+                bot="Bot1",
+                scope="recipeData",
+                type="perception",
+                ok=raw is not None,
+                complete=True,
+                data={"item": item, "recipe_raw": raw} if raw is not None else {},
+                uncertainty=[],
+                next=None,
+                error=None if raw is not None else "recipe_not_found",
+            )
+        raise AssertionError(f"unexpected scope {scope}")
+
+    def execute(self, action: Action) -> Result:
+        self.actions.append(action)
+        ok = self.accepted
+        accepted = self.accepted and not (action.name == "selectItem" and self.select_rejected)
+        return Result(
+            id=action.id,
+            bot="Bot1",
+            type="result",
+            ok=ok,
+            accepted=accepted,
+            complete=True,
+            data={"action": action.name},
+            error=None if ok else "rejected",
+        )
+
+    def await_action_terminal(self, action_id: str, timeout_s: float = 15.0) -> Event:
+        action = next(action for action in self.actions if action.id == action_id)
+        assert timeout_s == action.params["timeout_ms"] / 1000 + 5
+        if action.name == "moveItem":
+            return Event(
+                seq=len(self.actions),
+                tick=20,
+                bot="Bot1",
+                name="moveItemDone",
+                data={
+                    "action_id": action_id,
+                    "success": True,
+                    "stopped_reason": "completed",
+                    "count": action.params.get("count", 1),
+                },
+            )
+        if action.name == "selectItem":
+            return Event(
+                seq=len(self.actions),
+                tick=20,
+                bot="Bot1",
+                name="selectItemDone",
+                data={
+                    "action_id": action_id,
+                    "success": self.select_success,
+                    "item": action.params["item"],
+                    "slot": 0 if self.select_success else -1,
+                    "count": 1 if self.select_success else 0,
+                    "stopped_reason": self.select_reason,
+                },
+            )
+        if action.name == "dropItem":
+            count = self.drop_delta if self.drop_delta is not None else 64
+            after = 0 if action.params.get("mode") == "all" else max(0, count - 1)
+            return Event(
+                seq=len(self.actions),
+                tick=20,
+                bot="Bot1",
+                name="dropDone",
+                data={
+                    "action_id": action_id,
+                    "success": True,
+                    "stopped_reason": "completed",
+                    "slot": action.params["slot"],
+                    "count_before": count,
+                    "count_after": after,
+                },
+            )
+        if action.name == "craftItem":
+            craft_success, craft_reason = (
+                self.craft_outcomes.pop(0)
+                if self.craft_outcomes
+                else (True, "completed")
+            )
+            remainders = {entry["slot"]: entry for entry in action.params.get("remainders") or []}
+            input_after = []
+            for entry in action.params["inputs"]:
+                remainder = remainders.get(entry["slot"])
+                if remainder is not None:
+                    input_after.append(
+                        {
+                            "slot": entry["slot"],
+                            "empty": False,
+                            "item": remainder["item"],
+                            "count": remainder["count"],
+                        }
+                    )
+                else:
+                    input_after.append({"slot": entry["slot"], "empty": True, "item": None, "count": 0})
+            return Event(
+                seq=len(self.actions),
+                tick=20,
+                bot="Bot1",
+                name="craftDone",
+                data={
+                    "action_id": action_id,
+                    "success": craft_success,
+                    "item": action.params["output"]["item"],
+                    "count": action.params["output"]["count"],
+                    "output_slot": action.params["output"]["slot"],
+                    "stopped_reason": craft_reason,
+                    "inputs_after": input_after,
+                },
+            )
+        raise AssertionError(f"unexpected action {action.name}")
+
+
+def perception(slots, *, complete=True, next_start=None, ok=True):
+    return PerceptionResult(
+        bot="Bot1",
+        scope="inventory",
+        type="perception",
+        ok=ok,
+        complete=complete,
+        data={
+            "start": 0,
+            "limit": len(slots),
+            "nextStart": next_start,
+            "totalSlots": len(slots),
+            "slots": slots,
+        },
+        uncertainty=[] if complete else [{"reason": "page_limit"}],
+        next=None if complete else str(next_start),
+        error=None if ok else "failed",
+    )
+
+
+def slot(index, item=None, count=0):
+    return {"slot": index, "empty": item is None or count <= 0, "item": item, "count": count}
+
+
+class InventoryRuntimeTests(unittest.TestCase):
+    def test_crafting_workspace_absence_reports_search_and_no_carried_table(self):
+        body = FakeInventoryBody([])
+        runtime = InventoryTransactions(body, governance=SimpleNamespace(), work=SimpleNamespace())
+        with patch("minebot.body.inventory.find_nearby_block_targets", return_value=ToolResult(
+            False, "crafting_table_not_found", True, metrics={"search_radius": 8}
+        )) as search:
+            result = runtime._resolve_crafting_workspace(
+                item="furnace", crafting_table_item="minecraft:crafting_table", search_radius=8,
+                temporary_table_radius=2, temporary_table_context="normal",
+                approach_timeout_s=10, place_timeout_s=10, inventory_slots=[],
+            )
+        self.assertEqual(result.reason, "crafting_table_not_available")
+        self.assertEqual(result.metrics["search_radius"], 8)
+        self.assertEqual(result.metrics["tables_found"], 0)
+        self.assertEqual(result.metrics["attempted_targets"], [])
+        self.assertEqual(result.metrics["carried_table_count"], 0)
+        self.assertIsNone(result.next_suggestion)
+        self.assertEqual(search.call_args.args[2], 8)
+        self.assertEqual(body.actions, [])
+
+    def test_crafting_workspace_reports_denied_and_unreachable_tables(self):
+        from minebot.body.interaction_support import NearbyBlockTarget
+
+        governance = SimpleNamespace(can_interact=lambda pos, *_: SimpleNamespace(
+            allowed=pos[0] != 1, reason="protected"))
+        runtime = InventoryTransactions(FakeInventoryBody([]), governance=governance, work=SimpleNamespace())
+        targets = [NearbyBlockTarget((x, 64, 0), "crafting_table", float(x)) for x in (1, 2)]
+        with patch("minebot.body.inventory.find_nearby_block_targets", return_value=targets), patch(
+            "minebot.body.inventory.ensure_interaction_range", return_value=ToolResult(
+                False, "crafting_table_no_stand_point", True, next_suggestion="move elsewhere")):
+            result = runtime._resolve_crafting_workspace(
+                item="furnace", crafting_table_item="crafting_table", search_radius=8,
+                temporary_table_radius=2, temporary_table_context="normal",
+                approach_timeout_s=10, place_timeout_s=10, inventory_slots=[],
+            )
+        self.assertEqual(result.reason, "crafting_table_not_available")
+        self.assertEqual(result.metrics["tables_found"], 2)
+        self.assertEqual(result.metrics["attempted_targets"][0]["interaction_denied"], "protected")
+        self.assertEqual(result.metrics["attempted_targets"][1]["approach_result"]["reason"],
+                         "crafting_table_no_stand_point")
+        self.assertNotIn("nextSuggestion", result.metrics["attempted_targets"][1]["approach_result"])
+
+    def test_carried_table_selection_failure_keeps_selection_reason(self):
+        body = FakeInventoryBody([], select_success=False, select_reason="blocked")
+        runtime = InventoryTransactions(body, work=SimpleNamespace())
+        result = runtime._resolve_crafting_workspace(
+            item="furnace", crafting_table_item="crafting_table", search_radius=8,
+            temporary_table_radius=2, temporary_table_context="normal", approach_timeout_s=10,
+            place_timeout_s=10, inventory_slots=[InventorySlot(0, "crafting_table", 1, False)],
+        )
+        self.assertEqual(result.reason, "crafting_table_select_failed:blocked")
+
+    def test_nearby_usable_table_still_works_without_a_carried_table(self):
+        from minebot.body.interaction_support import NearbyBlockTarget
+
+        body = FakeInventoryBody([])
+        governance = SimpleNamespace(can_interact=lambda *_: SimpleNamespace(allowed=True))
+        runtime = InventoryTransactions(body, governance=governance, work=SimpleNamespace())
+        with patch("minebot.body.inventory.find_nearby_block_targets", return_value=[
+            NearbyBlockTarget((2, 64, 0), "crafting_table", 2.0)
+        ]), patch("minebot.body.inventory.ensure_interaction_range", return_value={"already_in_range": True}):
+            result = runtime._resolve_crafting_workspace(
+                item="furnace", crafting_table_item="crafting_table", search_radius=8,
+                temporary_table_radius=2, temporary_table_context="normal", approach_timeout_s=10,
+                place_timeout_s=10, inventory_slots=[],
+            )
+        self.assertEqual(result["mode"], "existing_table")
+        self.assertEqual(result["table_pos"], [2, 64, 0])
+        self.assertEqual(body.actions, [])
+
+    def test_recipe_parser_accepts_java_structured_variants(self):
+        perception_result = PerceptionResult(
+            bot="Bot1",
+            scope="recipeData",
+            type="perception",
+            ok=True,
+            complete=True,
+            data={
+                "item": "minecraft:oak_planks",
+                "variantCount": 1,
+                "variants": [{
+                    "recipe_id": "minecraft:oak_planks",
+                    "output_item": "minecraft:oak_planks",
+                    "output_count": 4,
+                    "recipe_kind": "shapeless",
+                    "width": 0,
+                    "height": 0,
+                    "ingredient_groups": [["minecraft:oak_log", "minecraft:oak_wood"]],
+                    "requires_table": False,
+                }],
+            },
+        )
+
+        variants = _parse_recipe_variants("minecraft:oak_planks", perception_result)
+
+        self.assertIsInstance(variants, list)
+        self.assertEqual(len(variants), 1)
+        self.assertEqual(variants[0].output_count, 4)
+        self.assertEqual(
+            variants[0].ingredient_groups,
+            (("minecraft:oak_log", "minecraft:oak_wood"),),
+        )
+
+    def test_recipe_parser_unwraps_compact_server_variant_list(self):
+        perception_result = PerceptionResult(
+            bot="Bot1",
+            scope="recipeData",
+            type="perception",
+            ok=True,
+            complete=True,
+            data={
+                "item": "minecraft:leather_helmet",
+                "variantCount": 2,
+                "recipe_raw": "[[[[[leather_helmet, 1]], [[leather], [leather]], [shaped, 2, 1]], "
+                "[[[leather_helmet, 1]], [[leather_helmet], [red_dye]], [custom]]]]",
+            },
+        )
+
+        variants = _parse_recipe_variants("minecraft:leather_helmet", perception_result)
+
+        self.assertIsInstance(variants, list)
+        self.assertEqual(len(variants), 2)
+        self.assertEqual(variants[0].recipe_kind, "shaped")
+        self.assertEqual(variants[1].ingredient_groups[1], ("minecraft:red_dye",))
+
+    def test_inventory_reads_small_pages_and_merges_slots(self):
+        body = FakeInventoryBody(
+            [
+                PerceptionResult(
+                    bot="Bot1",
+                    scope="inventory",
+                    type="perception",
+                    ok=True,
+                    complete=False,
+                    data={"start": 0, "limit": 12, "nextStart": 12, "totalSlots": 46, "slots": [slot(0)]},
+                    uncertainty=[{"reason": "page_limit"}],
+                    next="12",
+                ),
+                PerceptionResult(
+                    bot="Bot1",
+                    scope="inventory",
+                    type="perception",
+                    ok=True,
+                    complete=True,
+                    data={
+                        "start": 12,
+                        "limit": 12,
+                        "nextStart": None,
+                        "totalSlots": 46,
+                        "slots": [slot(12, "minecraft:diamond", 3)],
+                    },
+                    uncertainty=[],
+                    next=None,
+                ),
+            ]
+        )
+        runtime = InventoryTransactions(body)
+
+        result = runtime.discard_item(item="minecraft:diamond", count=1)
+
+        self.assertTrue(result.success, result.to_payload())
+        inventory_reads = [params for scope, params in body.perceptions if scope == "inventory"]
+        self.assertEqual(inventory_reads, [{"start": 0, "limit": 12}, {"start": 12, "limit": 12}])
+        self.assertEqual(body.actions[0].name, "moveItem")
+        self.assertEqual(body.actions[0].params["from_slot"], 12)
+
+    def test_inventory_reads_follow_envelope_next_when_data_cursor_is_absent(self):
+        body = FakeInventoryBody(
+            [
+                PerceptionResult(
+                    bot="Bot1",
+                    scope="inventory",
+                    type="perception",
+                    ok=True,
+                    complete=False,
+                    data={"start": 0, "limit": 12, "totalSlots": 46, "slots": [slot(0)]},
+                    uncertainty=[{"reason": "page_limit"}],
+                    next="12",
+                ),
+                PerceptionResult(
+                    bot="Bot1",
+                    scope="inventory",
+                    type="perception",
+                    ok=True,
+                    complete=True,
+                    data={"start": 12, "limit": 12, "totalSlots": 46, "slots": [slot(12, "minecraft:diamond", 1)]},
+                    uncertainty=[],
+                    next=None,
+                ),
+            ],
+            drop_delta=1,
+        )
+        runtime = InventoryTransactions(body)
+
+        result = runtime.discard_item(item="diamond", count=1)
+
+        self.assertTrue(result.success, result.to_payload())
+        inventory_reads = [params for scope, params in body.perceptions if scope == "inventory"]
+        self.assertEqual(inventory_reads, [{"start": 0, "limit": 12}, {"start": 12, "limit": 12}])
+
+    def test_discards_matching_hotbar_stack_without_staging(self):
+        body = FakeInventoryBody([perception([slot(0, "minecraft:dirt", 5), slot(1)])], drop_delta=5)
+        runtime = InventoryTransactions(body)
+
+        result = runtime.discard_item(item="minecraft:dirt", count=5)
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.metrics["dropped_count"], 5)
+        self.assertEqual([action.name for action in body.actions], ["dropItem"])
+        self.assertEqual({k: body.actions[0].params[k] for k in ("slot", "mode")}, {"slot": 0, "mode": "all"})
+
+    def test_discard_toward_entity_reports_target_facts_and_uuid(self):
+        body = FakeInventoryBody(
+            [perception([slot(0, "minecraft:gold_ingot", 3)])], drop_delta=1,
+            entities=[{"id": "piglin-1", "dist2": 25}],
+        )
+        result = InventoryTransactions(body).discard_item(
+            item="gold_ingot", count=1, target_entity_id="piglin-1",
+        )
+        self.assertTrue(result.success)
+        self.assertEqual(body.actions[0].params["target_uuid"], "piglin-1")
+        self.assertEqual(result.metrics["dropped_count"], 1)
+        self.assertEqual(result.metrics["target_entity_id"], "piglin-1")
+        self.assertEqual(result.metrics["target_distance"], 5)
+        self.assertTrue(result.metrics["target_seen_after"])
+
+    def test_discard_toward_unknown_entity_drops_nothing(self):
+        body = FakeInventoryBody([perception([slot(0, "minecraft:gold_ingot", 3)])])
+        result = InventoryTransactions(body).discard_item(
+            item="gold_ingot", count=1, target_entity_id="unknown",
+        )
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "target_not_seen")
+        self.assertEqual(result.metrics["dropped_count"], 0)
+        self.assertEqual(body.actions, [])
+
+    def test_partial_hotbar_discard_uses_single_item_drops(self):
+        body = FakeInventoryBody([perception([slot(0, "minecraft:dirt", 5), slot(1)])], drop_delta=5)
+        runtime = InventoryTransactions(body)
+
+        result = runtime.discard_item(item="minecraft:dirt", count=2)
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.metrics["dropped_count"], 2)
+        self.assertEqual([action.name for action in body.actions], ["dropItem", "dropItem"])
+        self.assertEqual([action.params["mode"] for action in body.actions], ["one", "one"])
+
+    def test_stages_non_hotbar_item_to_empty_hotbar_then_drops(self):
+        body = FakeInventoryBody([perception([slot(0), slot(9, "minecraft:diamond", 3)])], drop_delta=3)
+        runtime = InventoryTransactions(body)
+
+        result = runtime.discard_item(item="diamond", count=3)
+
+        self.assertTrue(result.success)
+        self.assertEqual([action.name for action in body.actions], ["moveItem", "dropItem"])
+        self.assertEqual(body.actions[0].params["from_slot"], 9)
+        self.assertEqual(body.actions[0].params["to_slot"], 0)
+        self.assertEqual(body.actions[0].params["count"], 3)
+        self.assertEqual(body.actions[1].params["slot"], 0)
+
+    def test_reports_item_not_available_without_executing(self):
+        body = FakeInventoryBody([perception([slot(0, "minecraft:stone", 5), slot(1)])])
+        runtime = InventoryTransactions(body)
+
+        result = runtime.discard_item(item="minecraft:diamond", count=1)
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "item_not_available")
+        self.assertEqual(body.actions, [])
+
+    def test_reports_hotbar_full_for_non_hotbar_item_without_overwriting(self):
+        slots = [slot(i, f"minecraft:item_{i}", 1) for i in range(9)]
+        slots.append(slot(9, "minecraft:diamond", 2))
+        body = FakeInventoryBody([perception(slots)])
+        runtime = InventoryTransactions(body)
+
+        result = runtime.discard_item(item="minecraft:diamond", count=1)
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "hotbar_full")
+        self.assertEqual(body.actions, [])
+        self.assertEqual(result.metrics["available_count"], 2)
+
+    def test_refuses_incomplete_inventory(self):
+        body = FakeInventoryBody(
+            [
+                PerceptionResult(
+                    bot="Bot1",
+                    scope="inventory",
+                    type="perception",
+                    ok=True,
+                    complete=False,
+                    data={
+                        "start": 0,
+                        "limit": 1,
+                        "nextStart": None,
+                        "totalSlots": 1,
+                        "slots": [slot(0, "minecraft:dirt", 1)],
+                    },
+                    uncertainty=[{"reason": "truncated"}],
+                    next=None,
+                )
+            ]
+        )
+        runtime = InventoryTransactions(body)
+
+        result = runtime.discard_item(item="minecraft:dirt", count=1)
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "perception_failed")
+        self.assertEqual(body.actions, [])
+
+    def test_refuses_missing_body_inventory_perception(self):
+        body = FakeInventoryBody(
+            [
+                PerceptionResult(
+                    bot="Bot1",
+                    scope="inventory",
+                    type="perception",
+                    ok=False,
+                    complete=True,
+                    data={},
+                    uncertainty=[{"reason": "missing_body"}],
+                    next=None,
+                    error="missing_body",
+                )
+            ]
+        )
+        runtime = InventoryTransactions(body)
+
+        result = runtime.discard_item(item="minecraft:dirt", count=1)
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "perception_failed")
+        self.assertEqual(body.actions, [])
+
+    def test_reports_body_rejection_with_plan_facts(self):
+        body = FakeInventoryBody([perception([slot(0, "minecraft:dirt", 1)])], accepted=False)
+        runtime = InventoryTransactions(body)
+
+        result = runtime.discard_item(item="minecraft:dirt", count=1)
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "body_rejected")
+        self.assertEqual(result.metrics["planned_count"], 1)
+        self.assertEqual(len(body.actions), 1)
+
+    def test_equip_mainhand_uses_select_item(self):
+        body = FakeInventoryBody([perception([slot(0), slot(12, "minecraft:diamond_sword", 1)])])
+        runtime = InventoryTransactions(body)
+
+        result = runtime.equip_item(item="minecraft:diamond_sword", target="mainhand")
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.reason, "completed")
+        self.assertEqual([action.name for action in body.actions], ["selectItem"])
+        self.assertEqual(result.metrics["target"], "mainhand")
+
+    def test_equip_mainhand_maps_missing_item(self):
+        body = FakeInventoryBody(
+            [perception([slot(0), slot(12, "minecraft:dirt", 1)])],
+            select_success=False,
+            select_reason="not_in_inventory",
+        )
+        runtime = InventoryTransactions(body)
+
+        result = runtime.equip_item(item="minecraft:diamond_sword", target="mainhand")
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "item_not_available")
+
+    def test_equip_mainhand_reads_select_terminal_after_sync_rejection(self):
+        body = FakeInventoryBody(
+            [perception([slot(0), slot(12, "minecraft:dirt", 1)])],
+            select_success=False,
+            select_reason="not_in_inventory",
+            select_rejected=True,
+        )
+        runtime = InventoryTransactions(body)
+
+        result = runtime.equip_item(item="minecraft:diamond_sword", target="mainhand")
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "item_not_available")
+        self.assertEqual(result.metrics["select"]["stopped_reason"], "not_in_inventory")
+
+    def test_equip_offhand_moves_item_into_slot_40(self):
+        body = FakeInventoryBody(
+            [
+                perception([slot(0), slot(18, "minecraft:arrow", 16), slot(40)]),
+                perception([slot(0), slot(18), slot(40, "minecraft:arrow", 16)]),
+            ]
+        )
+        runtime = InventoryTransactions(body)
+
+        result = runtime.equip_item(item="minecraft:arrow", target="offhand")
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.reason, "completed")
+        self.assertEqual([action.name for action in body.actions], ["moveItem"])
+        self.assertEqual(body.actions[0].params["from_slot"], 18)
+        self.assertEqual(body.actions[0].params["to_slot"], 40)
+        self.assertNotIn("count", body.actions[0].params)
+
+    def test_equip_armor_stages_existing_target_item_before_equip(self):
+        body = FakeInventoryBody(
+            [
+                perception(
+                    [
+                        slot(0, "minecraft:cobblestone", 1),
+                        slot(1, "minecraft:stick", 1),
+                        slot(2, "minecraft:dirt", 1),
+                        slot(3, "minecraft:torch", 1),
+                        slot(4, "minecraft:bread", 1),
+                        slot(5),
+                        slot(22, "minecraft:diamond_helmet", 1),
+                        slot(39, "minecraft:iron_helmet", 1),
+                    ]
+                ),
+                perception(
+                    [
+                        slot(0, "minecraft:cobblestone", 1),
+                        slot(1, "minecraft:stick", 1),
+                        slot(2, "minecraft:dirt", 1),
+                        slot(3, "minecraft:torch", 1),
+                        slot(4, "minecraft:bread", 1),
+                        slot(5, "minecraft:iron_helmet", 1),
+                        slot(22),
+                        slot(39, "minecraft:diamond_helmet", 1),
+                    ]
+                ),
+            ]
+        )
+        runtime = InventoryTransactions(body)
+
+        result = runtime.equip_item(item="minecraft:diamond_helmet", target="head")
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.reason, "completed")
+        self.assertEqual([action.name for action in body.actions], ["moveItem", "moveItem"])
+        self.assertEqual(body.actions[0].params["from_slot"], 39)
+        self.assertEqual(body.actions[0].params["to_slot"], 5)
+        self.assertEqual(body.actions[1].params["from_slot"], 22)
+        self.assertEqual(body.actions[1].params["to_slot"], 39)
+        self.assertEqual(body.actions[1].params["count"], 1)
+
+    def test_equip_refuses_to_overwrite_when_no_swap_space(self):
+        slots = [slot(i, f"minecraft:item_{i}", 1) for i in range(36)]
+        slots[22] = slot(22, "minecraft:diamond_helmet", 1)
+        slots.append(slot(39, "minecraft:iron_helmet", 1))
+        slots.append(slot(40))
+        body = FakeInventoryBody([perception(slots)])
+        runtime = InventoryTransactions(body)
+
+        result = runtime.equip_item(item="minecraft:diamond_helmet", target="head")
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "no_swap_space")
+        self.assertEqual(body.actions, [])
+
+    def test_equip_reports_already_equipped(self):
+        body = FakeInventoryBody([perception([slot(39, "minecraft:diamond_helmet", 1)])])
+        runtime = InventoryTransactions(body)
+
+        result = runtime.equip_item(item="minecraft:diamond_helmet", target="head")
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.reason, "already_equipped")
+        self.assertEqual(body.actions, [])
+
+    def test_craft_exact_dispatches_explicit_recipe_and_verifies_slot_deltas(self):
+        body = FakeInventoryBody(
+            [
+                perception([slot(0, "minecraft:oak_log", 1), slot(1)]),
+                perception([slot(0), slot(1, "minecraft:oak_planks", 4)]),
+            ]
+        )
+        runtime = InventoryTransactions(body)
+
+        result = runtime.craft_exact(
+            inputs=[{"slot": 0, "item": "minecraft:oak_log", "count": 1}],
+            output={"slot": 1, "item": "minecraft:oak_planks", "count": 4},
+        )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.reason, "completed")
+        self.assertEqual([action.name for action in body.actions], ["craftItem"])
+        self.assertEqual(
+            {k: v for k, v in body.actions[0].params.items() if not k.startswith("timeout_")},
+            {
+                "inputs": [{"slot": 0, "item": "minecraft:oak_log", "count": 1}],
+                "output": {"slot": 1, "item": "minecraft:oak_planks", "count": 4},
+                "remainders": [],
+                "max_stack": 64,
+            },
+        )
+        self.assertEqual(result.metrics["input_before"][0]["count"], 1)
+        self.assertEqual(result.metrics["input_after"][0]["count"], 0)
+        self.assertEqual(result.metrics["output_after"]["count"], 4)
+
+    def test_craft_exact_rejects_invalid_request_without_dispatch(self):
+        body = FakeInventoryBody([perception([slot(0, "minecraft:oak_log", 1)])])
+        runtime = InventoryTransactions(body)
+
+        result = runtime.craft_exact(inputs=[], output={"slot": 1, "item": "minecraft:oak_planks", "count": 4})
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "invalid_craft_request")
+        self.assertEqual(body.actions, [])
+
+    def test_craft_exact_rejects_non_storage_input_output_and_remainder_slots(self):
+        for index in (-1, 36, 40, 41, 44, 45, 46):
+            for role in ("inputs", "output", "remainders"):
+                with self.subTest(slot=index, role=role):
+                    body = FakeInventoryBody([])
+                    params = {
+                        "inputs": [{"slot": 0, "item": "minecraft:oak_log", "count": 1}],
+                        "output": {"slot": 1, "item": "minecraft:oak_planks", "count": 4},
+                        "remainders": [],
+                    }
+                    entry = {"slot": index, "item": "minecraft:bucket", "count": 1}
+                    params[role] = entry if role == "output" else [entry]
+                    result = InventoryTransactions(body).craft_exact(**params)
+                    self.assertEqual(result.reason, "invalid_craft_request")
+                    self.assertEqual(body.actions, [])
+                    self.assertEqual(body.perceptions, [])
+
+    def test_craft_recipe_rejects_non_storage_output_before_cleanup(self):
+        for index in (-1, 36, 40, 41, 45):
+            with self.subTest(slot=index):
+                body = FakeInventoryBody([])
+                result = InventoryTransactions(body).craft_recipe(item="stick", output_slot=index)
+                self.assertEqual(result.reason, "invalid_craft_output_slot")
+                self.assertEqual(body.actions, [])
+                self.assertEqual(body.perceptions, [])
+
+    def test_craft_recipe_uses_storage_inputs_and_outputs_only(self):
+        before = [slot(0), slot(35, "minecraft:oak_log", 1),
+                  slot(36, "minecraft:oak_planks", 8), slot(40, "minecraft:oak_log", 64), slot(41)]
+        after = [slot(0, "minecraft:oak_planks", 4), slot(35),
+                 slot(36, "minecraft:oak_planks", 8), slot(40, "minecraft:oak_log", 64), slot(41)]
+        body = FakeInventoryBody(
+            [perception(before), perception(before), perception(before), perception(after), perception(after)],
+            recipe_data={"minecraft:oak_planks": '[[[[oak_planks, 4, {count:4,id:"minecraft:oak_planks"}]], [[oak_log]], [shapeless]]]'},
+        )
+        result = InventoryTransactions(body).craft_recipe(item="minecraft:oak_planks", count=4)
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual(body.actions[0].params["inputs"], [{"slot": 35, "item": "minecraft:oak_log", "count": 1}])
+        self.assertEqual(body.actions[0].params["output"]["slot"], 0)
+
+    def test_craft_exact_reports_craft_unverified_when_post_slots_do_not_match(self):
+        body = FakeInventoryBody(
+            [
+                perception([slot(0, "minecraft:oak_log", 1), slot(1)]),
+                perception([slot(0), slot(1, "minecraft:stick", 2)]),
+            ]
+        )
+        runtime = InventoryTransactions(body)
+
+        result = runtime.craft_exact(
+            inputs=[{"slot": 0, "item": "minecraft:oak_log", "count": 1}],
+            output={"slot": 1, "item": "minecraft:oak_planks", "count": 4},
+        )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "craft_unverified")
+        self.assertEqual([action.name for action in body.actions], ["craftItem"])
+
+    def test_craft_exact_reports_craft_unverified_when_unrelated_slot_changes(self):
+        body = FakeInventoryBody(
+            [
+                perception([slot(0, "minecraft:oak_log", 1), slot(1), slot(5, "minecraft:torch", 3)]),
+                perception([slot(0), slot(1, "minecraft:oak_planks", 4), slot(5, "minecraft:stick", 1)]),
+            ]
+        )
+        runtime = InventoryTransactions(body)
+
+        result = runtime.craft_exact(
+            inputs=[{"slot": 0, "item": "minecraft:oak_log", "count": 1}],
+            output={"slot": 1, "item": "minecraft:oak_planks", "count": 4},
+        )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "craft_unverified")
+        self.assertEqual([action.name for action in body.actions], ["craftItem"])
+
+    def test_craft_exact_verifies_same_slot_remainder_output(self):
+        body = FakeInventoryBody(
+            [
+                perception([slot(0, "minecraft:milk_bucket", 1), slot(1, "minecraft:wheat", 3), slot(9)]),
+                perception([slot(0, "minecraft:bucket", 1), slot(1), slot(9, "minecraft:cake", 1)]),
+            ]
+        )
+        runtime = InventoryTransactions(body)
+
+        result = runtime.craft_exact(
+            inputs=[
+                {"slot": 0, "item": "minecraft:milk_bucket", "count": 1},
+                {"slot": 1, "item": "minecraft:wheat", "count": 3},
+            ],
+            output={"slot": 9, "item": "minecraft:cake", "count": 1},
+            remainders=[{"slot": 0, "item": "minecraft:bucket", "count": 1}],
+        )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.reason, "completed")
+        self.assertEqual(body.actions[0].params["remainders"], [{"slot": 0, "item": "minecraft:bucket", "count": 1}])
+
+    def test_craft_recipe_uses_runtime_recipe_truth_for_non_table_recipe(self):
+        body = FakeInventoryBody(
+            [
+                perception([slot(0), slot(41), slot(42)]),
+                perception([slot(0, "minecraft:oak_log", 1), slot(1), slot(41), slot(42)]),
+                perception([slot(0, "minecraft:oak_log", 1), slot(1)]),
+                perception([slot(0), slot(1, "minecraft:oak_planks", 4)]),
+                perception([slot(0), slot(1, "minecraft:oak_planks", 4), slot(41), slot(42)]),
+            ],
+            recipe_data={
+                "minecraft:oak_planks": '[[[[oak_planks, 4, {count:4,id:"minecraft:oak_planks"}]], [[oak_log, oak_wood]], [shapeless]]]'
+            },
+        )
+        runtime = InventoryTransactions(body)
+
+        result = runtime.craft_recipe(item="minecraft:oak_planks", count=4, output_slot=1)
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.reason, "completed")
+        self.assertEqual([action.name for action in body.actions], ["craftItem"])
+        self.assertEqual(body.actions[0].params["inputs"], [{"slot": 0, "item": "minecraft:oak_log", "count": 1}])
+        self.assertEqual(body.actions[0].params["output"], {"slot": 1, "item": "minecraft:oak_planks", "count": 4})
+
+    def test_craft_recipe_rounds_up_to_complete_recipe_batches(self):
+        for requested, crafted in ((1, 3), (4, 6), (3, 3)):
+            with self.subTest(requested=requested):
+                before = [slot(0, "minecraft:acacia_planks", crafted * 2), slot(1)]
+                after = [slot(0), slot(1, "minecraft:acacia_door", crafted)]
+                body = FakeInventoryBody(
+                    [perception(before)] * 3 + [perception(after)] * 2,
+                    recipe_data={"minecraft:acacia_door": DOOR_RECIPE},
+                )
+                runtime = InventoryTransactions(body)
+                with patch.object(runtime, "_resolve_crafting_workspace", return_value={"mode": "existing_table", "table_pos": [0, 64, 0]}):
+                    result = runtime.craft_recipe(item="minecraft:acacia_door", count=requested)
+                self.assertTrue(result.success, result.to_payload())
+                self.assertEqual(result.metrics["requested_count"], requested)
+                self.assertEqual(result.metrics["crafted_count"], crafted)
+                self.assertEqual(body.actions[0].params["output"]["count"], crafted)
+                self.assertEqual(body.actions[0].params["inputs"][0]["count"], crafted * 2)
+
+    def test_craft_recipe_rounds_across_output_stack_boundary(self):
+        before = [slot(i, "minecraft:acacia_planks", 44) for i in range(3)] + [slot(3), slot(4)]
+        middle = [slot(i, "minecraft:acacia_planks", 2) for i in range(3)] + [slot(3, "minecraft:acacia_door", 63), slot(4)]
+        after = [slot(i) for i in range(3)] + [slot(3, "minecraft:acacia_door", 63), slot(4, "minecraft:acacia_door", 3)]
+        body = FakeInventoryBody(
+            [perception(before)] * 5 + [perception(middle)] * 5 + [perception(after)] * 2,
+            recipe_data={"minecraft:acacia_door": DOOR_RECIPE},
+        )
+        runtime = InventoryTransactions(body)
+        with patch.object(runtime, "_resolve_crafting_workspace", return_value={"mode": "existing_table", "table_pos": [0, 64, 0]}):
+            result = runtime.craft_recipe(item="minecraft:acacia_door", count=64)
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual(result.metrics["requested_count"], 64)
+        self.assertEqual(result.metrics["crafted_count"], 66)
+        self.assertEqual([action.params["output"]["count"] for action in body.actions], [63, 3])
+
+    def test_craft_recipe_checks_rounded_materials_and_output_capacity(self):
+        for planks, doors, failure in ((6, 0, "inputs_not_available"), (12, 60, "output_no_space")):
+            with self.subTest(failure=failure):
+                before = [slot(0, "minecraft:acacia_planks", planks), slot(1, "minecraft:acacia_door", doors)]
+                body = FakeInventoryBody([perception(before)] * 2, recipe_data={"minecraft:acacia_door": DOOR_RECIPE})
+                result = InventoryTransactions(body).craft_recipe(item="minecraft:acacia_door", count=4, output_slot=1)
+                self.assertFalse(result.success)
+                self.assertEqual(result.metrics["variant_failures"][0]["reason"], failure)
+                self.assertEqual(body.actions, [])
+
+    def test_craft_recipe_auto_equip_selects_mainhand_outputs(self):
+        body = FakeInventoryBody(
+            [
+                perception([slot(0, "minecraft:oak_planks", 2), slot(1), slot(41), slot(42)]),
+                perception([slot(0, "minecraft:oak_planks", 2), slot(1), slot(41), slot(42)]),
+                perception([slot(0, "minecraft:oak_planks", 2), slot(1), slot(41), slot(42)]),
+                perception([slot(0), slot(1), slot(2, "minecraft:stick", 4), slot(41), slot(42)]),
+                perception([slot(0), slot(1), slot(2, "minecraft:stick", 4), slot(41), slot(42)]),
+                perception([slot(0), slot(1), slot(2, "minecraft:stick", 4), slot(41), slot(42)]),
+            ],
+            recipe_data={
+                "minecraft:stick": "[[[[stick, 4]], [[oak_planks], [oak_planks]], [shaped, 1, 2]]]"
+            },
+        )
+        runtime = InventoryTransactions(body)
+
+        result = runtime.craft_recipe(item="minecraft:stick", count=4, output_slot=2, auto_equip=True)
+
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual(result.metrics["equip"]["reason"], "completed")
+        self.assertEqual([action.name for action in body.actions], ["craftItem", "selectItem"])
+
+    def test_craft_recipe_treats_select_item_sync_rejection_as_terminal_for_temporary_table(self):
+        body = FakeInventoryBody(
+            [
+                perception([slot(0), slot(41), slot(42)]),
+                perception([slot(0, "minecraft:crafting_table", 1), slot(1, "minecraft:cobblestone", 8), slot(2)]),
+                perception([slot(0, "minecraft:crafting_table", 1), slot(1, "minecraft:cobblestone", 8), slot(2)]),
+                perception([slot(0, "minecraft:crafting_table", 1), slot(1), slot(2, "minecraft:furnace", 1)]),
+                perception([slot(0, "minecraft:crafting_table", 1), slot(1), slot(2, "minecraft:furnace", 1), slot(41), slot(42)]),
+            ],
+            select_rejected=True,
+            recipe_data={
+                "minecraft:furnace": '[[[[furnace, 1, {count:1,id:"minecraft:furnace"}]], [[cobblestone], [cobblestone], [cobblestone], [cobblestone], [cobblestone], [cobblestone], [cobblestone], [cobblestone]], [shaped, 3, 3]]]'
+            },
+        )
+
+        class FakeWork:
+            def __init__(self):
+                self.place_calls = []
+                self.collect_calls = []
+
+            def place_here(self, block_type, *, radius, context, purpose, timeout_s):
+                self.place_calls.append((block_type, radius, context, purpose, timeout_s))
+                return ToolResult(
+                    True,
+                    "completed",
+                    False,
+                    metrics={"place_here": {"chosen_target": [2, 64, 0]}},
+                )
+
+            def mine_block_collect(self, pos, **kwargs):
+                self.collect_calls.append((pos, kwargs))
+                return ToolResult(True, "completed", False)
+
+        work = FakeWork()
+        runtime = InventoryTransactions(body, work=work)
+
+        result = runtime.craft_recipe(item="minecraft:furnace", count=1, output_slot=2)
+
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual(result.reason, "completed")
+        self.assertEqual([action.name for action in body.actions], ["selectItem", "craftItem"])
+        self.assertEqual(work.place_calls[0][0], "minecraft:crafting_table")
+        self.assertEqual(work.collect_calls[0][0], (2, 64, 0))
+        self.assertEqual(work.collect_calls[0][1]["expected_drops"], ("minecraft:crafting_table",))
+        self.assertEqual(work.collect_calls[0][1]["target_block_types"], ("minecraft:crafting_table",))
+
+    def test_craft_recipe_reports_completed_craft_when_workstation_reclaim_times_out(self):
+        body = FakeInventoryBody(
+            [
+                perception([slot(0), slot(41), slot(42)]),
+                perception([slot(0, "minecraft:crafting_table", 1), slot(1, "minecraft:cobblestone", 8), slot(2)]),
+                perception([slot(0, "minecraft:crafting_table", 1), slot(1, "minecraft:cobblestone", 8), slot(2)]),
+                perception([slot(0, "minecraft:crafting_table", 1), slot(1), slot(2, "minecraft:furnace", 1)]),
+                perception([slot(0, "minecraft:crafting_table", 1), slot(1), slot(2, "minecraft:furnace", 1), slot(41), slot(42)]),
+            ],
+            recipe_data={
+                "minecraft:furnace": '[[[[furnace, 1, {count:1,id:"minecraft:furnace"}]], [[cobblestone], [cobblestone], [cobblestone], [cobblestone], [cobblestone], [cobblestone], [cobblestone], [cobblestone]], [shaped, 3, 3]]]'
+            },
+        )
+
+        class FakeWork:
+            def place_here(self, block_type, *, radius, context, purpose, timeout_s):
+                return ToolResult(
+                    True,
+                    "completed",
+                    False,
+                    metrics={"place_here": {"chosen_target": [2, 64, 0]}},
+                )
+
+            def mine_block_collect(self, pos, **kwargs):
+                return ToolResult(False, "timeout", True, metrics={"target": list(pos)})
+
+        runtime = InventoryTransactions(body, work=FakeWork())
+
+        result = runtime.craft_recipe(item="minecraft:furnace", count=1, output_slot=2)
+
+        self.assertFalse(result.success, result.to_payload())
+        self.assertEqual(result.reason, "craft_workstation_reclaim_failed")
+        self.assertTrue(result.can_retry)
+        self.assertTrue(result.metrics["craft"]["success"], "the crafted item remains authoritative progress")
+        self.assertFalse(result.metrics["reclaim"]["success"])
+        self.assertEqual(result.metrics["reclaim"]["reason"], "timeout")
+
+    def test_craft_recipe_can_keep_temporary_table_for_composition_chain(self):
+        body = FakeInventoryBody(
+            [
+                perception([slot(0), slot(41), slot(42)]),
+                perception([slot(0, "minecraft:crafting_table", 1), slot(1, "minecraft:cobblestone", 8), slot(2)]),
+                perception([slot(0, "minecraft:crafting_table", 1), slot(1, "minecraft:cobblestone", 8), slot(2)]),
+                perception([slot(0, "minecraft:crafting_table", 1), slot(1), slot(2, "minecraft:furnace", 1)]),
+                perception([slot(0, "minecraft:crafting_table", 1), slot(1), slot(2, "minecraft:furnace", 1), slot(41), slot(42)]),
+            ],
+            recipe_data={
+                "minecraft:furnace": '[[[[furnace, 1, {count:1,id:"minecraft:furnace"}]], [[cobblestone], [cobblestone], [cobblestone], [cobblestone], [cobblestone], [cobblestone], [cobblestone], [cobblestone]], [shaped, 3, 3]]]'
+            },
+        )
+
+        class FakeWork:
+            def __init__(self):
+                self.place_calls = []
+                self.collect_calls = []
+
+            def place_here(self, block_type, *, radius, context, purpose, timeout_s):
+                self.place_calls.append((block_type, radius, context, purpose, timeout_s))
+                return ToolResult(
+                    True,
+                    "completed",
+                    False,
+                    metrics={"place_here": {"chosen_target": [2, 64, 0]}},
+                )
+
+            def mine_block_collect(self, pos, **kwargs):
+                self.collect_calls.append((pos, kwargs))
+                return ToolResult(True, "completed", False)
+
+        work = FakeWork()
+        runtime = InventoryTransactions(body, work=work)
+
+        result = runtime.craft_recipe(item="minecraft:furnace", count=1, output_slot=2, keep_temporary_table=True)
+
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual(result.reason, "completed")
+        self.assertEqual(work.place_calls[0][0], "minecraft:crafting_table")
+        self.assertEqual(work.collect_calls, [])
+        self.assertTrue(result.metrics["workspace"]["retained"])
+        self.assertNotIn("reclaim", result.metrics)
+
+    def test_craft_recipe_replans_once_when_workspace_activity_fills_output_slot(self):
+        before_workspace = [
+            slot(0, "minecraft:crafting_table", 1),
+            slot(1, "minecraft:cobblestone", 8),
+            slot(2),
+            slot(3),
+            slot(41),
+            slot(42),
+        ]
+        after_workspace = [
+            slot(0),
+            slot(1, "minecraft:cobblestone", 8),
+            slot(2, "minecraft:dirt", 1),
+            slot(3),
+            slot(41),
+            slot(42),
+        ]
+        after_craft = [
+            slot(0, "minecraft:furnace", 1),
+            slot(1),
+            slot(2, "minecraft:dirt", 1),
+            slot(3),
+            slot(41),
+            slot(42),
+        ]
+        body = FakeInventoryBody(
+            [
+                perception([slot(41), slot(42)]),
+                perception(before_workspace),
+                perception(after_workspace),
+                perception(after_workspace),
+                perception(after_workspace),
+                perception(after_craft),
+                perception(after_craft),
+            ],
+            craft_outcomes=[(False, "destination_occupied"), (True, "completed")],
+            recipe_data={
+                "minecraft:furnace": '[[[[furnace, 1, {count:1,id:"minecraft:furnace"}]], [[cobblestone], [cobblestone], [cobblestone], [cobblestone], [cobblestone], [cobblestone], [cobblestone], [cobblestone]], [shaped, 3, 3]]]'
+            },
+        )
+
+        class FakeWork:
+            def place_here(self, block_type, *, radius, context, purpose, timeout_s):
+                return ToolResult(
+                    True,
+                    "completed",
+                    False,
+                    metrics={"place_here": {"chosen_target": [2, 64, 0]}},
+                )
+
+            def mine_block_collect(self, pos, **kwargs):
+                return ToolResult(True, "completed", False)
+
+        runtime = InventoryTransactions(body, work=FakeWork())
+
+        result = runtime.craft_recipe(item="minecraft:furnace", count=1)
+
+        self.assertTrue(result.success, result.to_payload())
+        crafts = [action for action in body.actions if action.name == "craftItem"]
+        self.assertEqual([action.params["output"]["slot"] for action in crafts], [2, 0])
+        self.assertEqual(result.metrics["craft_reconciliation"]["reason"], "inventory_drift_replanned")
+        self.assertEqual([attempt["reason"] for attempt in result.metrics["craft_attempts"]], ["destination_occupied", "completed"])
+
+    def test_cleanup_crafting_residue_merges_then_moves_to_empty_inventory_slot(self):
+        body = FakeInventoryBody(
+            [
+                perception(
+                    [
+                        slot(0, "minecraft:stick", 60),
+                        slot(1),
+                        slot(41, "minecraft:stick", 6),
+                        slot(42, "minecraft:string", 2),
+                    ]
+                ),
+                perception(
+                    [
+                        slot(0, "minecraft:stick", 64),
+                        slot(1),
+                        slot(41, "minecraft:stick", 2),
+                        slot(42, "minecraft:string", 2),
+                    ]
+                ),
+                perception(
+                    [
+                        slot(0, "minecraft:stick", 64),
+                        slot(1, "minecraft:stick", 2),
+                        slot(41),
+                        slot(42, "minecraft:string", 2),
+                    ]
+                ),
+                perception(
+                    [
+                        slot(0, "minecraft:stick", 64),
+                        slot(1, "minecraft:stick", 2),
+                        slot(2, "minecraft:string", 2),
+                        slot(41),
+                        slot(42),
+                    ]
+                ),
+            ]
+        )
+        runtime = InventoryTransactions(body)
+
+        result = runtime.cleanup_crafting_residue(residue_slots=(41, 42), destination_slots=(0, 1, 2))
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.reason, "completed")
+        self.assertEqual([action.name for action in body.actions], ["moveItem", "moveItem", "moveItem"])
+        self.assertEqual([tuple(action.params[k] for k in ("from_slot", "to_slot", "count")) for action in body.actions],
+                         [(41, 0, 4), (41, 1, 2), (42, 2, 2)])
+
+    def test_cleanup_crafting_residue_reports_already_clean_without_dispatch(self):
+        body = FakeInventoryBody([perception([slot(0), slot(41), slot(42)])])
+        runtime = InventoryTransactions(body)
+
+        result = runtime.cleanup_crafting_residue(residue_slots=(41, 42), destination_slots=(0, 1))
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.reason, "already_clean")
+        self.assertEqual(body.actions, [])
+
+    def test_cleanup_crafting_residue_rejects_invalid_source_or_destination(self):
+        for sources, destinations in (((40,), (0,)), ((45,), (0,)), ((41,), (36,)), ((41,), (0, 45))):
+            with self.subTest(sources=sources, destinations=destinations):
+                body = FakeInventoryBody([])
+                result = InventoryTransactions(body).cleanup_crafting_residue(
+                    residue_slots=sources, destination_slots=destinations,
+                )
+                self.assertEqual(result.reason, "invalid_residue_cleanup_request")
+                self.assertEqual(body.actions, [])
+                self.assertEqual(body.perceptions, [])
+
+    def test_cleanup_crafting_residue_refuses_when_no_destination_space(self):
+        body = FakeInventoryBody(
+            [
+                perception(
+                    [
+                        slot(0, "minecraft:stone", 64),
+                        slot(1, "minecraft:dirt", 64),
+                        slot(41, "minecraft:stick", 1),
+                    ]
+                )
+            ]
+        )
+        runtime = InventoryTransactions(body)
+
+        result = runtime.cleanup_crafting_residue(residue_slots=(41,), destination_slots=(0, 1))
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "crafting_residue_no_space")
+        self.assertEqual(body.actions, [])
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,0 +1,170 @@
+{
+  "name": "dig_down_governed_descent",
+  "description": "DIG_DOWN centers first, governs each exact floor break, and completes from stable final-Y truth.",
+  "steps": [
+    {
+      "send": {"builder": "hello", "args": {}},
+      "expect_message": {
+        "channel": "fakeplayer-body",
+        "protocol": "fakeplayer-body/1",
+        "type": "HELLO",
+        "request_id": "r-1"
+      }
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body",
+        "type": "HELLO_ACK",
+        "request_id": "r-1",
+        "protocol": "fakeplayer-body/1",
+        "minecraft_version": "26.1.2",
+        "max_request_bytes": 16384,
+        "max_requests_per_second": 40,
+        "request_types": ["DIG_DOWN", "HELLO", "MUTATION_VERDICT"]
+      },
+      "expect": [
+        {"kind": "response", "type": "HELLO_ACK", "request_type": "HELLO"}
+      ]
+    },
+    {
+      "send": {
+        "builder": "dig_down",
+        "args": {
+          "bot_name": "MineBot_1",
+          "action_id": "dig-down-0001",
+          "target_y": 62,
+          "max_steps": 4,
+          "max_clear_fall": 1,
+          "timeout_ticks": 1200
+        }
+      },
+      "expect_message": {
+        "channel": "fakeplayer-body",
+        "protocol": "fakeplayer-body/1",
+        "type": "DIG_DOWN",
+        "request_id": "r-2",
+        "bot_name": "MineBot_1",
+        "action_id": "dig-down-0001",
+        "target_y": 62,
+        "max_steps": 4,
+        "max_clear_fall": 1,
+        "timeout_ticks": 1200
+      }
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body",
+        "type": "DIG_DOWN_ACK",
+        "request_id": "r-2",
+        "action_id": "dig-down-0001",
+        "state": "accepted"
+      },
+      "expect": [
+        {
+          "kind": "response",
+          "type": "DIG_DOWN_ACK",
+          "request_type": "DIG_DOWN",
+          "payload_contains": {"state": "accepted"}
+        }
+      ]
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body",
+        "type": "MUTATION_PROPOSAL",
+        "proposal_id": "mp-dig-down-1",
+        "bot": "MineBot_1",
+        "action_id": "dig-down-0001",
+        "mutation": {
+          "kind": "break",
+          "x": 4,
+          "y": 63,
+          "z": -2,
+          "block_id": "minecraft:stone",
+          "context": "direct"
+        }
+      },
+      "expect": [
+        {
+          "kind": "proposal",
+          "proposal_id": "mp-dig-down-1",
+          "block_id": "minecraft:stone",
+          "mutation_kind": "break",
+          "context": "direct",
+          "x": 4,
+          "y": 63,
+          "z": -2
+        }
+      ]
+    },
+    {
+      "send": {
+        "builder": "mutation_verdict",
+        "args": {
+          "proposal_id": "mp-dig-down-1",
+          "allow": true,
+          "reason": "natural_terrain_allow"
+        }
+      },
+      "expect_message": {
+        "channel": "fakeplayer-body",
+        "protocol": "fakeplayer-body/1",
+        "type": "MUTATION_VERDICT",
+        "proposal_id": "mp-dig-down-1",
+        "allow": true,
+        "reason": "natural_terrain_allow"
+      }
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body",
+        "type": "EVENT",
+        "bot": "MineBot_1",
+        "seq": 1,
+        "tick": 920,
+        "event": "dig_down_mutation_verified",
+        "action_id": "dig-down-0001",
+        "data": {"x": 4, "y": 63, "z": -2, "block_id": "minecraft:stone"}
+      },
+      "expect": [
+        {"kind": "event", "name": "dig_down_mutation_verified", "seq": 1}
+      ]
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body",
+        "type": "EVENT",
+        "bot": "MineBot_1",
+        "seq": 2,
+        "tick": 950,
+        "event": "action_terminal",
+        "action_id": "dig-down-0001",
+        "data": {
+          "classification": "completed",
+          "reason": "dig_down_target_reached",
+          "target_y": 62,
+          "final_feet_y": 62,
+          "steps_completed": 2,
+          "blocks_descended": 2
+        }
+      },
+      "expect": [
+        {
+          "kind": "event",
+          "name": "action_terminal",
+          "seq": 2,
+          "data_contains": {
+            "classification": "completed",
+            "reason": "dig_down_target_reached",
+            "final_feet_y": 62
+          }
+        }
+      ]
+    }
+  ],
+  "final": {
+    "supports": ["DIG_DOWN"],
+    "pending_requests": 0,
+    "last_seq": {"MineBot_1": 2}
+  }
+}

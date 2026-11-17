@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "goal_id": "fakeplayer-generalization-ag-closure-20260722",
+  "status": "frozen",
+  "frozen_at": "2026-07-25",
+  "evaluator_schema_version": "autonomy-quality-v3",
+  "source_symbol": "minebot.app.autonomy_quality.DEFAULT_THRESHOLDS",
+  "thresholds": {
+    "minimum_output_points_per_1800s": 4.0,
+    "max_no_output_window_s": 900.0,
+    "max_repeated_failure_streak": 3,
+    "deadlock_window_s": 300.0,
+    "idle_window_s": 300.0,
+    "recovery_attempt_limit": 4,
+    "recovery_window_s": 900.0,
+    "position_epsilon": 1.0,
+    "max_body_state_sample_gap_s": 240.0
+  },
+  "change_policy": "Any added, removed, renamed, or changed threshold is a Q0 contract change and must update this fixture, the freeze record, and the active execution plan before a formal gate can be trusted."
+}

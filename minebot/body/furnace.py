@@ -1,0 +1,2074 @@
+"""Body transaction furnace workflows."""
+
+from __future__ import annotations
+
+from dataclasses import asdict, replace
+from dataclasses import dataclass
+import time
+from math import ceil
+from math import dist
+from typing import Callable
+
+from minebot.contract import action_with_timeout, action_wait_timeout_s
+from minebot.contract.execution import current_tool_observation, execution_checkpoint
+from minebot.body.block_work import BlockWork
+from minebot.body.inventory_read import preferred_inventory_page_size
+from minebot.body.inventory import _ScarpetValueParser
+from minebot.body.interaction_support import (
+    InteractionNavigator,
+    find_nearby_block_targets,
+    ensure_interaction_range,
+    merge_context,
+    normalize_block_type,
+    perception_failure as shared_perception_failure,
+)
+from minebot.contract import Body, InteractionContext, body_rejection_to_tool_result
+from minebot.contract import terminal_event_to_tool_result
+from minebot.contract import Action, BreakContext, InventorySlot, PerceptionResult, PlaceContext, Position, Result, ToolResult, perception_next_cursor
+from minebot.game.governance import GovernancePolicy
+
+
+DEFAULT_FURNACE_TYPES = ("furnace", "blast_furnace", "smoker")
+DEFAULT_SMELT_SECONDS_PER_ITEM = 10.0
+FUEL_BURN_SECONDS = {
+    "lava_bucket": 1000.0,
+    "coal_block": 800.0,
+    "dried_kelp_block": 200.0,
+    "blaze_rod": 120.0,
+    "coal": 80.0,
+    "charcoal": 80.0,
+    "oak_planks": 15.0,
+    "spruce_planks": 15.0,
+    "birch_planks": 15.0,
+    "jungle_planks": 15.0,
+    "acacia_planks": 15.0,
+    "dark_oak_planks": 15.0,
+    "mangrove_planks": 15.0,
+    "cherry_planks": 15.0,
+    "pale_oak_planks": 15.0,
+    "bamboo_planks": 15.0,
+    "oak_log": 15.0,
+    "spruce_log": 15.0,
+    "birch_log": 15.0,
+    "jungle_log": 15.0,
+    "acacia_log": 15.0,
+    "dark_oak_log": 15.0,
+    "mangrove_log": 15.0,
+    "cherry_log": 15.0,
+    "pale_oak_log": 15.0,
+    "bamboo_block": 15.0,
+    "stick": 5.0,
+    "bamboo": 2.5,
+}
+
+FURNACE_SLOTS = {"input": 0, "fuel": 1, "output": 2}
+CLEAR_ORDER = ("output", "input", "fuel")
+FUEL_SELECTION_ORDER = (
+    "coal",
+    "charcoal",
+    "coal_block",
+    "oak_planks",
+    "spruce_planks",
+    "birch_planks",
+    "jungle_planks",
+    "acacia_planks",
+    "dark_oak_planks",
+    "mangrove_planks",
+    "cherry_planks",
+    "pale_oak_planks",
+    "bamboo_planks",
+    "stick",
+    "bamboo",
+    "dried_kelp_block",
+    "blaze_rod",
+    "oak_log",
+    "spruce_log",
+    "birch_log",
+    "jungle_log",
+    "acacia_log",
+    "dark_oak_log",
+    "mangrove_log",
+    "cherry_log",
+    "pale_oak_log",
+    "bamboo_block",
+    "lava_bucket",
+)
+SMELT_OUTPUT_CANDIDATES = {
+    "raw_iron": ("iron_ingot",),
+    "iron_ore": ("iron_ingot",),
+    "deepslate_iron_ore": ("iron_ingot",),
+    "raw_gold": ("gold_ingot",),
+    "gold_ore": ("gold_ingot",),
+    "deepslate_gold_ore": ("gold_ingot",),
+    "nether_gold_ore": ("gold_ingot",),
+    "raw_copper": ("copper_ingot",),
+    "copper_ore": ("copper_ingot",),
+    "deepslate_copper_ore": ("copper_ingot",),
+    "oak_log": ("charcoal",),
+    "spruce_log": ("charcoal",),
+    "birch_log": ("charcoal",),
+    "jungle_log": ("charcoal",),
+    "acacia_log": ("charcoal",),
+    "dark_oak_log": ("charcoal",),
+    "mangrove_log": ("charcoal",),
+    "cherry_log": ("charcoal",),
+    "pale_oak_log": ("charcoal",),
+    "oak_wood": ("charcoal",),
+    "spruce_wood": ("charcoal",),
+    "birch_wood": ("charcoal",),
+    "jungle_wood": ("charcoal",),
+    "acacia_wood": ("charcoal",),
+    "dark_oak_wood": ("charcoal",),
+    "mangrove_wood": ("charcoal",),
+    "cherry_wood": ("charcoal",),
+    "pale_oak_wood": ("charcoal",),
+    "stripped_oak_log": ("charcoal",),
+    "stripped_spruce_log": ("charcoal",),
+    "stripped_birch_log": ("charcoal",),
+    "stripped_jungle_log": ("charcoal",),
+    "stripped_acacia_log": ("charcoal",),
+    "stripped_dark_oak_log": ("charcoal",),
+    "stripped_mangrove_log": ("charcoal",),
+    "stripped_cherry_log": ("charcoal",),
+    "stripped_pale_oak_log": ("charcoal",),
+    "stripped_oak_wood": ("charcoal",),
+    "stripped_spruce_wood": ("charcoal",),
+    "stripped_birch_wood": ("charcoal",),
+    "stripped_jungle_wood": ("charcoal",),
+    "stripped_acacia_wood": ("charcoal",),
+    "stripped_dark_oak_wood": ("charcoal",),
+    "stripped_mangrove_wood": ("charcoal",),
+    "stripped_cherry_wood": ("charcoal",),
+    "stripped_pale_oak_wood": ("charcoal",),
+    "cobblestone": ("stone",),
+    "sand": ("glass",),
+    "red_sand": ("glass",),
+    "beef": ("cooked_beef",),
+    "porkchop": ("cooked_porkchop",),
+    "chicken": ("cooked_chicken",),
+    "mutton": ("cooked_mutton",),
+    "rabbit": ("cooked_rabbit",),
+    "cod": ("cooked_cod",),
+    "salmon": ("cooked_salmon",),
+    "potato": ("baked_potato",),
+    "kelp": ("dried_kelp",),
+    "ancient_debris": ("netherite_scrap",),
+    "stone": ("smooth_stone",),
+    "cobbled_deepslate": ("deepslate",),
+    "clay_ball": ("brick",),
+    "clay": ("terracotta",),
+    "netherrack": ("nether_brick",),
+    "sandstone": ("smooth_sandstone",),
+    "red_sandstone": ("smooth_red_sandstone",),
+    "stone_bricks": ("cracked_stone_bricks",),
+    "quartz_block": ("smooth_quartz",),
+    "basalt": ("smooth_basalt",),
+    "cactus": ("green_dye",),
+    "wet_sponge": ("sponge",),
+    "chorus_fruit": ("popped_chorus_fruit",),
+}
+
+
+def _report_smelt_phase(phase: str) -> None:
+    """Publish the furnace transaction's current lifecycle phase as evidence."""
+    observation = current_tool_observation()
+    if observation is None:
+        return
+    _call_id, notify = observation
+    notify({"phase": phase})
+
+
+@dataclass(frozen=True)
+class FurnaceClearPlan:
+    pos: Position
+    moves: tuple[dict[str, object], ...]
+    occupied_furnace_slots: int
+
+
+@dataclass(frozen=True)
+class SmeltPlan:
+    pos: Position
+    input_item: str
+    input_count: int
+    input_slot: int
+    fuel_item: str
+    fuel_count: int
+    fuel_slot: int
+    fuel_auto: bool
+    fuel_seconds_available: float
+    fuel_seconds_required: float
+    output_item: str
+    output_count: int
+    output_slot: int
+
+
+def select_fuel(counts: dict[str, int], seconds_needed: float) -> tuple[str, int] | None:
+    if seconds_needed <= 0:
+        return None
+    normalized_counts = _normalize_counts(counts)
+    for fuel in FUEL_SELECTION_ORDER:
+        seconds_per_item = FUEL_BURN_SECONDS.get(fuel)
+        if seconds_per_item is None:
+            continue
+        required_count = max(1, ceil(seconds_needed / seconds_per_item))
+        if normalized_counts.get(fuel, 0) >= required_count:
+            return (fuel, required_count)
+    return None
+
+
+def resolve_smelt_output(
+    input_item: str,
+    recipe_lookup: Callable[[str], PerceptionResult | None] | None = None,
+) -> tuple[str, int] | None:
+    normalized_input = _plain_item(input_item)
+    candidates = SMELT_OUTPUT_CANDIDATES.get(normalized_input, ())
+    if not candidates:
+        return None
+    if recipe_lookup is None:
+        return (candidates[0], 1)
+    runtime_recipe_available = False
+    for output_item in candidates:
+        perception = recipe_lookup(output_item)
+        if not _smelt_recipe_payload_available(perception):
+            continue
+        runtime_recipe_available = True
+        resolved = _resolve_smelt_output_from_recipe(normalized_input, output_item, perception)
+        if resolved is not None:
+            return resolved
+    if not runtime_recipe_available:
+        return (candidates[0], 1)
+    return None
+
+
+class FurnaceTransactions:
+    """Furnace workflows above named-slot transfer primitives."""
+
+    def __init__(
+        self,
+        body: Body,
+        *,
+        navigator: InteractionNavigator | None = None,
+        governance: GovernancePolicy | None = None,
+        work: BlockWork | None = None,
+    ):
+        self.body = body
+        self.navigator = navigator
+        self.governance = governance
+        self.work = work
+
+    def clear_furnace(
+        self,
+        pos: Position,
+        *,
+        timeout_s: float = 2.0,
+        take: str = "all",
+        approach_timeout_s: float | None = None,
+    ) -> ToolResult:
+        """Take items out of the furnace at ``pos``: every slot, or with ``take="output"``
+        only what has finished, so what is still smelting goes on. With
+        ``approach_timeout_s`` the Body first walks to within reach of it."""
+        if approach_timeout_s is not None:
+            approach = ensure_interaction_range(
+                self.body,
+                self.navigator,
+                pos,
+                timeout_s=approach_timeout_s,
+                missing_reason="furnace_navigation_missing",
+                failure_prefix="furnace_navigation_failed",
+                no_stand_reason="furnace_no_stand_point",
+            )
+            if isinstance(approach, ToolResult):
+                return merge_context(approach, {"furnace_pos": list(pos)})
+        target_type = _read_target_type(self.body, pos)
+        if isinstance(target_type, ToolResult):
+            return target_type
+        if target_type not in DEFAULT_FURNACE_TYPES:
+            return ToolResult(
+                success=False,
+                reason="furnace_wrong_type",
+                can_retry=False,
+                metrics={"furnace_pos": list(pos), "furnace_type": target_type},
+            )
+        denied = _guard_furnace_target(self.governance, pos, target_type)
+        if denied is not None:
+            return denied
+
+        furnace = _read_furnace(self.body, pos)
+        failed = _perception_failure(furnace)
+        if failed is not None:
+            return failed
+
+        inventory = _read_inventory(self.body)
+        failed = _perception_failure(inventory)
+        if failed is not None:
+            return failed
+
+        before = _furnace_contents(_slots(furnace))
+        plan = _plan_clear(pos, _slots(furnace), _slots(inventory))
+        if take == "output":
+            if before["output"] is None and before["input"] is None:
+                # Said apart from "not yet": calling again changes nothing until something is put in.
+                return ToolResult(
+                    success=False,
+                    reason="furnace_empty",
+                    can_retry=False,
+                    next_suggestion="this furnace holds nothing to take; smelt_item puts things in",
+                    metrics={"furnace_pos": list(pos), "furnace_type": target_type, "take": take,
+                             "furnace_after": before},
+                )
+            if before["output"] is None:
+                return ToolResult(
+                    success=False,
+                    reason="nothing_finished_yet",
+                    can_retry=True,
+                    next_suggestion="nothing has come out of this furnace yet; what is in it is in furnace_after",
+                    metrics={"furnace_pos": list(pos), "furnace_type": target_type, "take": take,
+                             "furnace_after": before},
+                )
+            plan = replace(plan, moves=tuple(move for move in plan.moves if move["furnace_slot"] == "output"),
+                           occupied_furnace_slots=1)
+        if not plan.moves:
+            reason = "already_empty" if plan.occupied_furnace_slots == 0 else "bot_inventory_full"
+            return ToolResult(
+                success=plan.occupied_furnace_slots == 0,
+                reason=reason,
+                can_retry=plan.occupied_furnace_slots > 0,
+                next_suggestion="free bot inventory slots before clearing the furnace"
+                if plan.occupied_furnace_slots > 0
+                else None,
+                metrics={**_plan_metrics(plan), "furnace_after": before},
+            )
+
+        executed: list[dict[str, object]] = []
+        moved_total = 0
+        for move in plan.moves:
+            result = self.transfer_slot(
+                pos,
+                direction="furnace_to_bot",
+                furnace_slot=move["furnace_slot"],
+                bot_slot=int(move["bot_slot"]),
+                timeout_s=timeout_s,
+            )
+            moved = int((result.metrics or {}).get("count") or 0)
+            moved_total += moved
+            executed.append(
+                {
+                    "action_id": (result.metrics or {}).get("action_id"),
+                    "furnace_slot": move["furnace_slot"],
+                    "bot_slot": move["bot_slot"],
+                    "item": move["item"],
+                    "expected_count": move["count"],
+                    "moved_count": moved,
+                    "success": result.success,
+                    "reason": result.reason,
+                }
+            )
+            if not result.success:
+                metrics = _plan_metrics(plan)
+                metrics["executed"] = executed
+                metrics["moved_count"] = moved_total
+                return ToolResult(
+                    success=False,
+                    reason=f"furnace_clear_failed:{result.reason}",
+                    can_retry=result.can_retry,
+                    next_suggestion=result.next_suggestion,
+                    metrics=metrics,
+                )
+
+        metrics = {**_plan_metrics(plan), "executed": executed, "moved_count": moved_total, "take": take}
+        after = _read_furnace(self.body, pos)
+        if _perception_failure(after) is None:
+            metrics["furnace_after"] = _furnace_contents(_slots(after))
+        return ToolResult(success=True, reason="completed", can_retry=False, metrics=metrics)
+
+    def collect_finished_nearby(
+        self,
+        *,
+        search_radius: int = 8,
+        furnace_types: tuple[str, ...] = DEFAULT_FURNACE_TYPES,
+        timeout_s: float = 2.0,
+        approach_timeout_s: float = 15.0,
+    ) -> ToolResult:
+        """Take what has finished out of every furnace within ``search_radius``, nearest first."""
+        targets = find_nearby_block_targets(
+            self.body,
+            furnace_types,
+            search_radius,
+            not_found_reason="furnace_not_found",
+            limit=64,
+        )
+        if isinstance(targets, ToolResult):
+            return targets
+        furnaces: list[dict[str, object]] = []
+        moved_total = 0
+        for target in targets:
+            if _guard_furnace_target(self.governance, target.pos, target.block_type) is not None:
+                continue
+            result = self.clear_furnace(target.pos, timeout_s=timeout_s, take="output",
+                                        approach_timeout_s=approach_timeout_s)
+            metrics = result.metrics or {}
+            moved = int(metrics.get("moved_count") or 0)
+            moved_total += moved
+            entry: dict[str, object] = {"furnace_pos": list(target.pos), "reason": result.reason, "moved_count": moved}
+            if isinstance(metrics.get("furnace_after"), dict):
+                entry["furnace_after"] = metrics["furnace_after"]
+            if metrics.get("moves"):
+                entry["took"] = [{"item": move["item"], "count": move["count"]} for move in metrics["moves"]]
+            furnaces.append(entry)
+            if result.reason == "bot_inventory_full":
+                break
+        return ToolResult(
+            success=moved_total > 0,
+            reason="completed" if moved_total > 0 else "nothing_finished_yet",
+            can_retry=moved_total == 0,
+            metrics={"take": "output", "search_radius": search_radius, "moved_count": moved_total,
+                     "furnaces": furnaces},
+        )
+
+    def transfer_slot(
+        self,
+        pos: Position,
+        *,
+        direction: str,
+        furnace_slot: str = "output",
+        bot_slot: int = 0,
+        count: int | None = None,
+        max_stack: int = 64,
+        timeout_s: float = 2.0,
+    ) -> ToolResult:
+        if direction not in {"furnace_to_bot", "bot_to_furnace"}:
+            return ToolResult(
+                success=False,
+                reason="invalid_direction",
+                can_retry=False,
+                metrics={
+                    "furnace_pos": list(pos),
+                    "direction": direction,
+                    "furnace_slot": furnace_slot,
+                    "bot_slot": bot_slot,
+                    "count": count,
+                },
+            )
+        if furnace_slot not in FURNACE_SLOTS:
+            return ToolResult(
+                success=False,
+                reason="invalid_furnace_slot",
+                can_retry=False,
+                metrics={
+                    "furnace_pos": list(pos),
+                    "direction": direction,
+                    "furnace_slot": furnace_slot,
+                    "bot_slot": bot_slot,
+                    "count": count,
+                },
+            )
+        if bot_slot < 0 or bot_slot >= 36:
+            return ToolResult(
+                success=False,
+                reason="invalid_bot_slot",
+                can_retry=False,
+                metrics={
+                    "furnace_pos": list(pos),
+                    "direction": direction,
+                    "furnace_slot": furnace_slot,
+                    "bot_slot": bot_slot,
+                    "count": count,
+                },
+            )
+
+        target_type = _read_target_type(self.body, pos)
+        if isinstance(target_type, ToolResult):
+            return target_type
+        if target_type not in DEFAULT_FURNACE_TYPES:
+            return ToolResult(
+                success=False,
+                reason="furnace_wrong_type",
+                can_retry=False,
+                metrics={"furnace_pos": list(pos), "furnace_type": target_type},
+            )
+        denied = _guard_furnace_target(self.governance, pos, target_type)
+        if denied is not None:
+            return denied
+
+        furnace_before = _read_furnace(self.body, pos)
+        failed = _perception_failure(furnace_before)
+        if failed is not None:
+            return failed
+        inventory_before = _read_inventory(self.body)
+        failed = _perception_failure(inventory_before)
+        if failed is not None:
+            return failed
+
+        furnace_before_slots = _slots(furnace_before)
+        inventory_before_slots = _slots(inventory_before)
+        before_furnace_slot = _slot_by_index(furnace_before_slots, FURNACE_SLOTS[furnace_slot])
+        before_bot_slot = _slot_by_index(inventory_before_slots, bot_slot)
+
+        params: dict[str, object] = {
+            "pos": list(pos),
+            "direction": direction,
+            "furnace_slot": furnace_slot,
+            "bot_slot": bot_slot,
+            "max_stack": max_stack,
+            "item": (before_bot_slot.item if direction == "bot_to_furnace" and before_bot_slot is not None
+                     else before_furnace_slot.item if before_furnace_slot is not None else ""),
+        }
+        if count is not None:
+            params["count"] = count
+        action = Action.create("furnaceTransfer", params)
+        action = action_with_timeout(action, timeout_s)
+        accepted = self.body.execute(action)
+        rejected = _acceptance_failure(
+            accepted,
+            FurnaceClearPlan(pos=pos, moves=tuple(), occupied_furnace_slots=0),
+            [],
+        )
+        if rejected is not None:
+            return ToolResult(
+                success=rejected.success,
+                reason=rejected.reason,
+                can_retry=rejected.can_retry,
+                next_suggestion=rejected.next_suggestion,
+                metrics={
+                    **dict(rejected.metrics or {}),
+                    "furnace_pos": list(pos),
+                    "direction": direction,
+                    "furnace_slot": furnace_slot,
+                    "bot_slot": bot_slot,
+                    "count": count,
+                },
+            )
+
+        terminal = self.body.await_action_terminal(action.id, timeout_s=action_wait_timeout_s(action))
+        result = terminal_event_to_tool_result(terminal)
+        moved_count = int((result.metrics or {}).get("count") or 0)
+        metrics = {
+            "action_id": action.id,
+            "furnace_pos": list(pos),
+            "furnace_type": target_type,
+            "direction": direction,
+            "furnace_slot": furnace_slot,
+            "bot_slot": bot_slot,
+            "requested_count": count,
+            "count": moved_count,
+            "furnace_before": _slot_metrics(before_furnace_slot),
+            "bot_before": _slot_metrics(before_bot_slot),
+            "primitive": dict(result.metrics or {}),
+        }
+        if not result.success:
+            return ToolResult(
+                success=False,
+                reason=result.reason,
+                can_retry=result.can_retry,
+                next_suggestion=result.next_suggestion,
+                metrics=metrics,
+            )
+
+        furnace_after = _read_furnace(self.body, pos)
+        failed = _perception_failure(furnace_after)
+        if failed is not None:
+            return ToolResult(
+                success=False,
+                reason=failed.reason,
+                can_retry=failed.can_retry,
+                next_suggestion=failed.next_suggestion,
+                metrics={**metrics, "after_read": dict(failed.metrics or {})},
+            )
+        inventory_after = _read_inventory(self.body)
+        failed = _perception_failure(inventory_after)
+        if failed is not None:
+            return ToolResult(
+                success=False,
+                reason=failed.reason,
+                can_retry=failed.can_retry,
+                next_suggestion=failed.next_suggestion,
+                metrics={**metrics, "after_read": dict(failed.metrics or {})},
+            )
+
+        furnace_after_slots = _slots(furnace_after)
+        inventory_after_slots = _slots(inventory_after)
+        after_furnace_slot = _slot_by_index(furnace_after_slots, FURNACE_SLOTS[furnace_slot])
+        after_bot_slot = _slot_by_index(inventory_after_slots, bot_slot)
+        metrics["furnace_after"] = _slot_metrics(after_furnace_slot)
+        metrics["bot_after"] = _slot_metrics(after_bot_slot)
+        if not _verify_transfer(
+            direction=direction,
+            furnace_slot=furnace_slot,
+            moved_count=moved_count,
+            before_furnace_slot=before_furnace_slot,
+            after_furnace_slot=after_furnace_slot,
+            before_bot_slot=before_bot_slot,
+            after_bot_slot=after_bot_slot,
+        ):
+            return ToolResult(
+                success=False,
+                reason="furnace_transfer_unverified",
+                can_retry=True,
+                next_suggestion="re-read furnace and bot inventory slots and verify the transfer did not leave an inconsistent source/destination delta",
+                metrics=metrics,
+            )
+
+        return ToolResult(
+            success=True,
+            reason="completed",
+            can_retry=False,
+            metrics=metrics,
+        )
+
+    def clear_nearest_furnace(
+        self,
+        *,
+        search_radius: int = 8,
+        furnace_types: tuple[str, ...] = DEFAULT_FURNACE_TYPES,
+        timeout_s: float = 2.0,
+        approach_timeout_s: float = 15.0,
+    ) -> ToolResult:
+        targets = find_nearby_block_targets(
+            self.body,
+            furnace_types,
+            search_radius,
+            not_found_reason="furnace_not_found",
+            limit=64,
+        )
+        if isinstance(targets, ToolResult):
+            return targets
+
+        attempted: list[dict[str, object]] = []
+        last_failure: ToolResult | None = None
+        for target in targets:
+            denied = _guard_furnace_target(self.governance, target.pos, target.block_type)
+            if denied is not None:
+                return merge_context(
+                    denied,
+                    {
+                        "search_radius": search_radius,
+                        "furnace_types": list(furnace_types),
+                        "furnace_target": list(target.pos),
+                        "furnace_type": target.block_type,
+                        "attempted_targets": attempted,
+                    },
+                )
+            approach = ensure_interaction_range(
+                self.body,
+                self.navigator,
+                target.pos,
+                timeout_s=approach_timeout_s,
+                missing_reason="furnace_navigation_missing",
+                failure_prefix="furnace_navigation_failed",
+                no_stand_reason="furnace_no_stand_point",
+            )
+            if isinstance(approach, ToolResult):
+                attempted.append(
+                    {
+                        "furnace_target": list(target.pos),
+                        "furnace_type": target.block_type,
+                        "approach_result": approach.to_payload(),
+                    }
+                )
+                last_failure = approach
+                if approach.reason == "furnace_navigation_missing":
+                    return merge_context(
+                        approach,
+                        {
+                            "search_radius": search_radius,
+                            "furnace_types": list(furnace_types),
+                            "attempted_targets": attempted,
+                        },
+                    )
+                continue
+
+            result = self.clear_furnace(target.pos, timeout_s=timeout_s)
+            return merge_context(
+                result,
+                {
+                    "furnace_target": list(target.pos),
+                    "furnace_type": target.block_type,
+                    "search_radius": search_radius,
+                    "furnace_types": list(furnace_types),
+                    "approach": approach,
+                    "attempted_targets": attempted,
+                },
+            )
+
+        if last_failure is None:
+            last_failure = ToolResult(
+                success=False,
+                reason="furnace_not_found",
+                can_retry=True,
+                metrics={"search_radius": search_radius, "furnace_types": list(furnace_types)},
+            )
+        return merge_context(
+            last_failure,
+            {
+                "search_radius": search_radius,
+                "furnace_types": list(furnace_types),
+                "attempted_targets": attempted,
+            },
+        )
+
+    def smelt_once(
+        self,
+        pos: Position,
+        *,
+        input_item: str,
+        input_count: int,
+        fuel_item: str,
+        fuel_count: int | None = None,
+        output_item: str,
+        output_count: int,
+        output_slot: int | None = None,
+        poll_interval_s: float = 0.5,
+        smelt_timeout_s: float = 15.0,
+        transfer_timeout_s: float = 2.0,
+        leave: bool = False,
+    ) -> ToolResult:
+        if input_count <= 0 or (fuel_count is not None and fuel_count <= 0) or output_count <= 0:
+            return ToolResult(
+                success=False,
+                reason="invalid_smelt_request",
+                can_retry=False,
+                metrics={
+                    "furnace_pos": list(pos),
+                    "input_item": input_item,
+                    "input_count": input_count,
+                    "fuel_item": fuel_item,
+                    "fuel_count": fuel_count,
+                    "output_item": output_item,
+                    "output_count": output_count,
+                },
+            )
+
+        preflight = self._smelt_preflight(
+            pos,
+            input_item=input_item,
+            input_count=input_count,
+            fuel_item=fuel_item,
+            fuel_count=fuel_count,
+            output_item=output_item,
+            output_count=output_count,
+            output_slot=output_slot,
+        )
+        if isinstance(preflight, ToolResult):
+            return preflight
+        plan = preflight
+
+        executed: list[dict[str, object]] = []
+        _report_smelt_phase("loading_furnace")
+        input_move = self.transfer_slot(
+            pos,
+            direction="bot_to_furnace",
+            furnace_slot="input",
+            bot_slot=plan.input_slot,
+            count=plan.input_count,
+            timeout_s=transfer_timeout_s,
+        )
+        executed.append({"kind": "deposit_input", "result": input_move.to_payload()})
+        if not input_move.success:
+            return _smelt_failure("smelt_input_deposit_failed", input_move, plan, executed)
+
+        fuel_move = self.transfer_slot(
+            pos,
+            direction="bot_to_furnace",
+            furnace_slot="fuel",
+            bot_slot=plan.fuel_slot,
+            count=plan.fuel_count,
+            timeout_s=transfer_timeout_s,
+        )
+        executed.append({"kind": "deposit_fuel", "result": fuel_move.to_payload()})
+        if not fuel_move.success:
+            reclaim = self._reclaim_smelt_slots(pos, plan, timeout_s=transfer_timeout_s)
+            return _smelt_failure("smelt_fuel_deposit_failed", fuel_move, plan, executed, reclaim=reclaim)
+
+        if leave:
+            # A player loads the furnace and goes on (user 2026-11-10): what
+            # it holds is in the Body's world record until it is taken out.
+            seconds = round(plan.input_count * DEFAULT_SMELT_SECONDS_PER_ITEM)
+            contents = {"input": {"item": _plain_item(plan.input_item), "count": plan.input_count},
+                        "fuel": {"item": _plain_item(plan.fuel_item), "count": plan.fuel_count}, "output": None}
+            return ToolResult(
+                success=True,
+                reason="loaded",
+                can_retry=False,
+                next_suggestion=(
+                    f"The furnace at {list(pos)} turns one item every {round(DEFAULT_SMELT_SECONDS_PER_ITEM)} seconds "
+                    f"while its area is loaded, so all {plan.input_count} take about {seconds} seconds. Take the "
+                    f"finished {_plain_item(plan.output_item)} out with clear_furnace(pos={list(pos)}, take='output')."
+                ),
+                metrics={**_smelt_plan_metrics(plan), "executed": executed, "furnace_after": contents,
+                         "seconds_to_finish": seconds},
+            )
+
+        _report_smelt_phase("smelting")
+        deadline = time.monotonic() + smelt_timeout_s
+        polls: list[dict[str, object]] = []
+        output_ready = False
+        while time.monotonic() <= deadline:
+            # Waiting by the furnace stops when the call is cancelled. Without
+            # this a 16-item smelt held the one execution lane for 170 s: later
+            # calls queued behind it, each cancel waited out 30 s, and the Body
+            # stood still while a drowned killed it (project-review-20261110 §9.9).
+            execution_checkpoint()
+            furnace = _read_furnace(self.body, pos)
+            failed = _perception_failure(furnace)
+            if failed is not None:
+                reclaim = self._reclaim_smelt_slots(pos, plan, timeout_s=transfer_timeout_s)
+                return _smelt_failure("smelt_poll_failed", failed, plan, executed, polls=polls, reclaim=reclaim)
+            output = _slot_by_index(_slots(furnace), FURNACE_SLOTS["output"])
+            poll = {"output": _slot_metrics(output)}
+            polls.append(poll)
+            if output is not None and not output.empty and _same_item(output.item, output_item) and output.count >= output_count:
+                output_ready = True
+                _report_smelt_phase("collecting_output")
+                break
+            time.sleep(poll_interval_s)
+
+        if not output_ready:
+            partial_output = self._collect_partial_output(pos, plan, timeout_s=transfer_timeout_s)
+            reclaim = self._reclaim_smelt_slots(pos, plan, timeout_s=transfer_timeout_s)
+            return ToolResult(
+                success=False,
+                reason="smelt_partial_timeout" if partial_output else "smelt_timeout",
+                can_retry=True,
+                next_suggestion="retry smelting with more time or verify the furnace recipe/fuel",
+                metrics={
+                    **_smelt_plan_metrics(plan),
+                    "executed": executed,
+                    "polls": polls,
+                    "partial_output": partial_output,
+                    "reclaim": reclaim,
+                },
+            )
+
+        # The output slot was selected before the furnace lifecycle ran.  A
+        # placement transaction or a late item pickup can legally change that
+        # slot while the furnace is smelting, so re-read inventory truth before
+        # issuing the named-slot transfer and choose a compatible destination.
+        current_inventory = _read_inventory(self.body)
+        failed = _perception_failure(current_inventory)
+        if failed is not None:
+            return _smelt_failure(
+                "smelt_output_inventory_read_failed",
+                failed,
+                plan,
+                executed,
+                polls=polls,
+            )
+        current_slots = _slots(current_inventory)
+        destination = plan.output_slot
+        destination_slot = _slot_by_index(current_slots, destination)
+        if (
+            destination_slot is not None
+            and not destination_slot.empty
+            and (
+                not _same_item(destination_slot.item, plan.output_item)
+                or destination_slot.count + plan.output_count > 64
+            )
+        ):
+            replacement = _find_output_slot(
+                current_slots,
+                plan.output_item,
+                plan.output_count,
+                exclude={plan.input_slot, plan.fuel_slot},
+            )
+            if replacement is None:
+                no_space = ToolResult(
+                    success=False,
+                    reason="smelt_output_no_space",
+                    can_retry=True,
+                    next_suggestion="free an empty inventory slot or merge compatible output stacks",
+                    metrics={
+                        "furnace_pos": list(pos),
+                        "output_item": plan.output_item,
+                        "output_count": plan.output_count,
+                        "planned_output_slot": plan.output_slot,
+                    },
+                )
+                return _smelt_failure(
+                    "smelt_output_destination_failed",
+                    no_space,
+                    plan,
+                    executed,
+                    polls=polls,
+                )
+            destination = replacement
+            plan = replace(plan, output_slot=destination)
+
+        output_move = self.transfer_slot(
+            pos,
+            direction="furnace_to_bot",
+            furnace_slot="output",
+            bot_slot=destination,
+            count=plan.output_count,
+            timeout_s=transfer_timeout_s,
+        )
+        executed.append({"kind": "collect_output", "result": output_move.to_payload()})
+        if not output_move.success:
+            return _smelt_failure("smelt_output_collect_failed", output_move, plan, executed, polls=polls)
+
+        return ToolResult(
+            success=True,
+            reason="completed",
+            can_retry=False,
+            metrics={**_smelt_plan_metrics(plan), "executed": executed, "polls": polls},
+        )
+
+    def smelt_nearest_furnace(
+        self,
+        *,
+        input_item: str,
+        input_count: int,
+        fuel_item: str,
+        fuel_count: int | None = None,
+        output_item: str,
+        output_count: int,
+        output_slot: int | None = None,
+        search_radius: int = 8,
+        furnace_types: tuple[str, ...] = DEFAULT_FURNACE_TYPES,
+        poll_interval_s: float = 0.5,
+        smelt_timeout_s: float = 15.0,
+        transfer_timeout_s: float = 2.0,
+        approach_timeout_s: float = 15.0,
+        leave: bool = False,
+    ) -> ToolResult:
+        _report_smelt_phase("finding_furnace")
+        targets = find_nearby_block_targets(
+            self.body,
+            furnace_types,
+            search_radius,
+            not_found_reason="furnace_not_found",
+            limit=64,
+        )
+        if isinstance(targets, ToolResult):
+            return targets
+
+        attempted: list[dict[str, object]] = []
+        last_failure: ToolResult | None = None
+        for target in targets:
+            denied = _guard_furnace_target(self.governance, target.pos, target.block_type)
+            if denied is not None:
+                return merge_context(
+                    denied,
+                    {
+                        "search_radius": search_radius,
+                        "furnace_types": list(furnace_types),
+                        "furnace_target": list(target.pos),
+                        "furnace_type": target.block_type,
+                        "attempted_targets": attempted,
+                    },
+                )
+            _report_smelt_phase("approaching_furnace")
+            approach = ensure_interaction_range(
+                self.body,
+                self.navigator,
+                target.pos,
+                timeout_s=approach_timeout_s,
+                missing_reason="furnace_navigation_missing",
+                failure_prefix="furnace_navigation_failed",
+                no_stand_reason="furnace_no_stand_point",
+            )
+            if isinstance(approach, ToolResult):
+                attempted.append(
+                    {
+                        "furnace_target": list(target.pos),
+                        "furnace_type": target.block_type,
+                        "approach_result": approach.to_payload(),
+                    }
+                )
+                last_failure = approach
+                if approach.reason == "furnace_navigation_missing":
+                    return merge_context(
+                        approach,
+                        {
+                            "search_radius": search_radius,
+                            "furnace_types": list(furnace_types),
+                            "attempted_targets": attempted,
+                        },
+                    )
+                continue
+
+            result = self.smelt_once(
+                target.pos,
+                input_item=input_item,
+                input_count=input_count,
+                fuel_item=fuel_item,
+                fuel_count=fuel_count,
+                output_item=output_item,
+                output_count=output_count,
+                output_slot=output_slot,
+                poll_interval_s=poll_interval_s,
+                smelt_timeout_s=smelt_timeout_s,
+                transfer_timeout_s=transfer_timeout_s,
+                leave=leave,
+            )
+            if leave and result.reason == "smelt_furnace_not_empty":
+                # Busy with an earlier load: the next furnace, as a player would.
+                attempted.append({"furnace_target": list(target.pos), "furnace_type": target.block_type,
+                                  "busy": result.metrics})
+                last_failure = result
+                continue
+            return merge_context(
+                result,
+                {
+                    "furnace_target": list(target.pos),
+                    "furnace_type": target.block_type,
+                    "search_radius": search_radius,
+                    "furnace_types": list(furnace_types),
+                    "approach": approach,
+                    "attempted_targets": attempted,
+                },
+            )
+
+        if last_failure is None:
+            last_failure = ToolResult(
+                success=False,
+                reason="furnace_not_found",
+                can_retry=True,
+                metrics={"search_radius": search_radius, "furnace_types": list(furnace_types)},
+            )
+        return merge_context(
+            last_failure,
+            {
+                "search_radius": search_radius,
+                "furnace_types": list(furnace_types),
+                "attempted_targets": attempted,
+            },
+        )
+
+    def smelt_with_temporary_furnace(
+        self,
+        furnace_pos: Position,
+        *,
+        input_item: str,
+        input_count: int,
+        fuel_item: str,
+        fuel_count: int | None = None,
+        output_item: str,
+        output_count: int,
+        output_slot: int | None = None,
+        furnace_item: str = "minecraft:furnace",
+        place_face: str | None = "up",
+        place_context: PlaceContext | str = PlaceContext.DIRECT,
+        place_purpose: str = "temporary_furnace",
+        poll_interval_s: float = 0.5,
+        smelt_timeout_s: float = 15.0,
+        transfer_timeout_s: float = 2.0,
+        place_timeout_s: float = 10.0,
+        reclaim_timeout_s: float = 10.0,
+        reclaim_tool: str | None = None,
+        leave: bool = False,
+    ) -> ToolResult:
+        if self.work is None:
+            return ToolResult(
+                success=False,
+                reason="furnace_work_runtime_missing",
+                can_retry=True,
+                next_suggestion="attach BlockWork to place and reclaim a temporary furnace",
+                metrics={"furnace_pos": list(furnace_pos), "furnace_item": furnace_item},
+            )
+
+        select = _dispatch(self.body, "selectItem", {"item": furnace_item}, timeout_s=transfer_timeout_s)
+        if not select.success:
+            return ToolResult(
+                success=False,
+                reason=f"temporary_furnace_select_failed:{select.reason}",
+                can_retry=select.can_retry,
+                next_suggestion=select.next_suggestion,
+                metrics={"furnace_pos": list(furnace_pos), "furnace_item": furnace_item, "select": select.to_payload()},
+            )
+
+        place = self.work.place_block(
+            furnace_pos,
+            furnace_item,
+            face=place_face,
+            context=place_context,
+            purpose=place_purpose,
+            timeout_s=place_timeout_s,
+        )
+        if not place.success:
+            return ToolResult(
+                success=False,
+                reason=f"temporary_furnace_place_failed:{place.reason}",
+                can_retry=place.can_retry,
+                next_suggestion=place.next_suggestion,
+                metrics={
+                    "furnace_pos": list(furnace_pos),
+                    "furnace_item": furnace_item,
+                    "select": select.to_payload(),
+                    "place": place.to_payload(),
+                },
+            )
+
+        smelt = self.smelt_once(
+            furnace_pos,
+            input_item=input_item,
+            input_count=input_count,
+            fuel_item=fuel_item,
+            fuel_count=fuel_count,
+            output_item=output_item,
+            output_count=output_count,
+            output_slot=output_slot,
+            poll_interval_s=poll_interval_s,
+            smelt_timeout_s=smelt_timeout_s,
+            transfer_timeout_s=transfer_timeout_s,
+            leave=leave,
+        )
+        if leave and smelt.success:
+            # The furnace stays where it was put, loaded; it is not taken down.
+            smelt_metrics = dict(smelt.metrics or {})
+            return ToolResult(
+                success=True,
+                reason="loaded",
+                can_retry=False,
+                next_suggestion=smelt.next_suggestion,
+                metrics={**smelt_metrics, "furnace_pos": list(furnace_pos), "furnace_item": furnace_item,
+                         "furnace_left_placed": True, "select": select.to_payload(), "place": place.to_payload()},
+            )
+        reclaim_select = None
+        if reclaim_tool is not None:
+            reclaim_select = _dispatch(self.body, "selectItem", {"item": reclaim_tool}, timeout_s=transfer_timeout_s)
+            if not reclaim_select.success:
+                metrics = {
+                    "furnace_pos": list(furnace_pos),
+                    "furnace_item": furnace_item,
+                    "select": select.to_payload(),
+                    "place": place.to_payload(),
+                    "smelt": smelt.to_payload(),
+                    "reclaim_tool": reclaim_tool,
+                    "reclaim_select": reclaim_select.to_payload(),
+                }
+                return ToolResult(
+                    success=False,
+                    reason=f"temporary_furnace_reclaim_tool_failed:{reclaim_select.reason}",
+                    can_retry=reclaim_select.can_retry,
+                    next_suggestion=reclaim_select.next_suggestion,
+                    metrics=metrics,
+                )
+
+        reclaim, reclaim_attempts = self._reclaim_temporary_furnace(
+            furnace_pos,
+            timeout_s=reclaim_timeout_s,
+            max_attempts=2,
+        )
+        metrics = {
+            "furnace_pos": list(furnace_pos),
+            "furnace_item": furnace_item,
+            "select": select.to_payload(),
+            "place": place.to_payload(),
+            "smelt": smelt.to_payload(),
+            "reclaim": reclaim.to_payload(),
+            "reclaim_attempts": reclaim_attempts,
+        }
+        if reclaim_select is not None:
+            metrics["reclaim_tool"] = reclaim_tool
+            metrics["reclaim_select"] = reclaim_select.to_payload()
+        if not smelt.success:
+            return ToolResult(
+                success=False,
+                reason=f"temporary_furnace_smelt_failed:{smelt.reason}",
+                can_retry=smelt.can_retry or reclaim.can_retry,
+                next_suggestion=smelt.next_suggestion,
+                metrics=metrics,
+            )
+        return ToolResult(success=True, reason="completed", can_retry=False, metrics=metrics)
+
+    def _reclaim_temporary_furnace(
+        self,
+        pos: Position,
+        *,
+        timeout_s: float,
+        max_attempts: int,
+    ) -> tuple[ToolResult, list[dict[str, object]]]:
+        attempts: list[dict[str, object]] = []
+        last = ToolResult(False, "temporary_furnace_reclaim_not_attempted", True, metrics={"target": list(pos)})
+        for attempt in range(1, max(1, max_attempts) + 1):
+            assert self.work is not None
+            last = self.work.mine_block(
+                pos,
+                context=BreakContext.BOT_CLEANUP,
+                timeout_s=timeout_s,
+            )
+            attempts.append({"attempt": attempt, **last.to_payload()})
+            if last.success:
+                return last, attempts
+            if not _retry_temporary_furnace_reclaim(last):
+                return last, attempts
+        return last, attempts
+
+    def smelt_with_nearby_temporary_furnace(
+        self,
+        *,
+        input_item: str,
+        input_count: int,
+        fuel_item: str,
+        fuel_count: int | None = None,
+        output_item: str,
+        output_count: int,
+        output_slot: int | None = None,
+        furnace_item: str = "minecraft:furnace",
+        radius: int = 2,
+        place_context: PlaceContext | str = PlaceContext.DIRECT,
+        poll_interval_s: float = 0.5,
+        smelt_timeout_s: float = 15.0,
+        transfer_timeout_s: float = 2.0,
+        place_timeout_s: float = 10.0,
+        reclaim_timeout_s: float = 10.0,
+        reclaim_tool: str | None = None,
+        leave: bool = False,
+    ) -> ToolResult:
+        """Place a temporary furnace at a nearby supported clear site, then smelt.
+
+        This is a conservative furnace-site planning slice. It does not mine,
+        replace, or recover terrain; it only chooses a same-Y clear target with
+        solid support and delegates placement/smelt/reclaim to the proven
+        temporary-furnace transaction.
+        """
+
+        if radius < 1:
+            raise ValueError("radius must be >= 1")
+        if self.work is None:
+            return ToolResult(
+                success=False,
+                reason="furnace_work_runtime_missing",
+                can_retry=True,
+                next_suggestion="attach BlockWork to place and reclaim a temporary furnace",
+                metrics={"furnace_item": furnace_item, "radius": radius},
+            )
+
+        origin = _state_block_pos(self.body.get_state().pos)
+        scan = _scan_temporary_furnace_sites(self.body, origin, radius)
+        if isinstance(scan, ToolResult):
+            return scan
+        candidates = [candidate for candidate in scan if candidate["candidate"]]
+        if not candidates:
+            return ToolResult(
+                success=False,
+                reason="temporary_furnace_no_supported_site",
+                can_retry=True,
+                next_suggestion="move to a nearby clear supported area or pass an explicit temporary furnace position",
+                metrics={
+                    "origin": list(origin),
+                    "radius": radius,
+                    "furnace_item": furnace_item,
+                    "candidates": scan,
+                },
+            )
+
+        attempted: list[dict[str, object]] = []
+        last_result: ToolResult | None = None
+        for candidate in candidates:
+            chosen = tuple(candidate["target"])
+            result = self.smelt_with_temporary_furnace(
+                chosen,
+                input_item=input_item,
+                input_count=input_count,
+                fuel_item=fuel_item,
+                fuel_count=fuel_count,
+                output_item=output_item,
+                output_count=output_count,
+                output_slot=output_slot,
+                furnace_item=furnace_item,
+                place_context=place_context,
+                place_purpose="temporary_furnace_auto_site",
+                poll_interval_s=poll_interval_s,
+                smelt_timeout_s=smelt_timeout_s,
+                transfer_timeout_s=transfer_timeout_s,
+                place_timeout_s=place_timeout_s,
+                reclaim_timeout_s=reclaim_timeout_s,
+                reclaim_tool=reclaim_tool,
+                leave=leave,
+            )
+            attempted.append({"target": list(chosen), "result": result.to_payload()})
+            last_result = result
+            if result.success or not _retry_temporary_furnace_candidate(result):
+                return merge_context(
+                    result,
+                    {
+                        "temporary_furnace_site": list(chosen),
+                        "origin": list(origin),
+                        "radius": radius,
+                        "site_scan": scan,
+                        "attempted_sites": attempted,
+                    },
+                )
+
+        assert last_result is not None
+        return merge_context(
+            last_result,
+            {
+                "temporary_furnace_site": list(attempted[-1]["target"]),
+                "origin": list(origin),
+                "radius": radius,
+                "site_scan": scan,
+                "attempted_sites": attempted,
+            },
+        )
+
+    def _smelt_preflight(
+        self,
+        pos: Position,
+        *,
+        input_item: str,
+        input_count: int,
+        fuel_item: str,
+        fuel_count: int | None,
+        output_item: str,
+        output_count: int,
+        output_slot: int | None,
+    ) -> SmeltPlan | ToolResult:
+        if output_slot is not None and not 0 <= output_slot < 36:
+            return ToolResult(
+                success=False,
+                reason="invalid_bot_slot",
+                can_retry=False,
+                metrics={"furnace_pos": list(pos), "bot_slot": output_slot},
+            )
+        target_type = _read_target_type(self.body, pos)
+        if isinstance(target_type, ToolResult):
+            return target_type
+        if target_type not in DEFAULT_FURNACE_TYPES:
+            return ToolResult(
+                success=False,
+                reason="furnace_wrong_type",
+                can_retry=False,
+                metrics={"furnace_pos": list(pos), "furnace_type": target_type},
+            )
+        denied = _guard_furnace_target(self.governance, pos, target_type)
+        if denied is not None:
+            return denied
+
+        furnace = _read_furnace(self.body, pos)
+        failed = _perception_failure(furnace)
+        if failed is not None:
+            return failed
+        furnace_slots = _slots(furnace)
+        for slot_name in ("input", "fuel", "output"):
+            current = _slot_by_index(furnace_slots, FURNACE_SLOTS[slot_name])
+            if current is not None and not current.empty:
+                return ToolResult(
+                    success=False,
+                    reason="smelt_furnace_not_empty",
+                    can_retry=True,
+                    next_suggestion="clear the furnace before starting a new smelt lifecycle",
+                    metrics={"furnace_pos": list(pos), "occupied_slot": slot_name, "slot": _slot_metrics(current)},
+                )
+
+        inventory = _read_inventory(self.body)
+        failed = _perception_failure(inventory)
+        if failed is not None:
+            return failed
+        slots = _slots(inventory)
+        input_slot = _find_item_slot(slots, input_item, min_count=input_count)
+        fuel_budget = _plan_fuel_budget(
+            fuel_item=fuel_item,
+            fuel_count=fuel_count,
+            input_count=input_count,
+            output_count=output_count,
+        )
+        if isinstance(fuel_budget, ToolResult):
+            return merge_context(fuel_budget, {"furnace_pos": list(pos), "fuel_item": fuel_item})
+        planned_fuel_count, fuel_auto, fuel_seconds_available, fuel_seconds_required = fuel_budget
+        fuel_slot = _find_item_slot(
+            slots,
+            fuel_item,
+            min_count=planned_fuel_count,
+            exclude={input_slot} if input_slot is not None else set(),
+        )
+        if input_slot is None:
+            return ToolResult(
+                success=False,
+                reason="smelt_input_not_available",
+                can_retry=False,
+                metrics={"furnace_pos": list(pos), "input_item": input_item, "input_count": input_count},
+            )
+        if fuel_slot is None:
+            available = _available_item_count(slots, fuel_item, exclude={input_slot} if input_slot is not None else set())
+            return ToolResult(
+                success=False,
+                reason="smelt_fuel_not_available",
+                can_retry=False,
+                metrics={
+                    "furnace_pos": list(pos),
+                    "fuel_item": fuel_item,
+                    "fuel_count": planned_fuel_count,
+                    "requested_fuel_count": fuel_count,
+                    "available_count": available,
+                    "fuel_auto": fuel_auto,
+                    "fuel_seconds_available": fuel_seconds_available,
+                    "fuel_seconds_required": fuel_seconds_required,
+                },
+            )
+        if output_slot is None:
+            output_slot = _find_output_slot(slots, output_item, output_count, exclude={input_slot, fuel_slot})
+        else:
+            candidate = _slot_by_index(slots, output_slot)
+            if candidate is not None and not candidate.empty and not _same_item(candidate.item, output_item):
+                output_slot = None
+        if output_slot is None:
+            return ToolResult(
+                success=False,
+                reason="smelt_output_no_space",
+                can_retry=True,
+                next_suggestion="free an empty inventory slot or merge compatible output stacks",
+                metrics={"furnace_pos": list(pos), "output_item": output_item, "output_count": output_count},
+            )
+        return SmeltPlan(
+            pos=pos,
+            input_item=input_item,
+            input_count=input_count,
+            input_slot=input_slot,
+            fuel_item=fuel_item,
+            fuel_count=planned_fuel_count,
+            fuel_slot=fuel_slot,
+            fuel_auto=fuel_auto,
+            fuel_seconds_available=fuel_seconds_available,
+            fuel_seconds_required=fuel_seconds_required,
+            output_item=output_item,
+            output_count=output_count,
+            output_slot=output_slot,
+        )
+
+    def _reclaim_smelt_slots(self, pos: Position, plan: SmeltPlan, *, timeout_s: float) -> list[dict[str, object]]:
+        reclaim: list[dict[str, object]] = []
+        for furnace_slot in ("input", "fuel"):
+            furnace = _read_furnace(self.body, pos)
+            failed = _perception_failure(furnace)
+            if failed is not None:
+                reclaim.append({"furnace_slot": furnace_slot, "success": False, "reason": "furnace_read_failed"})
+                continue
+            source = _slot_by_index(_slots(furnace), FURNACE_SLOTS[furnace_slot])
+            if source is None or source.empty:
+                reclaim.append({"furnace_slot": furnace_slot, "success": True, "reason": "already_empty"})
+                continue
+            inventory = _read_inventory(self.body)
+            if _perception_failure(inventory) is not None:
+                reclaim.append({"furnace_slot": furnace_slot, "success": False, "reason": "inventory_read_failed"})
+                continue
+            destination = _first_empty_slot(_slots(inventory), exclude={plan.output_slot})
+            if destination is None:
+                reclaim.append({"furnace_slot": furnace_slot, "success": False, "reason": "no_empty_slot"})
+                continue
+            result = self.transfer_slot(
+                pos,
+                direction="furnace_to_bot",
+                furnace_slot=furnace_slot,
+                bot_slot=destination,
+                timeout_s=timeout_s,
+            )
+            reclaim.append({"furnace_slot": furnace_slot, "bot_slot": destination, "result": result.to_payload()})
+        return reclaim
+
+    def _collect_partial_output(self, pos: Position, plan: SmeltPlan, *, timeout_s: float) -> dict[str, object] | None:
+        furnace = _read_furnace(self.body, pos)
+        if _perception_failure(furnace) is not None:
+            return None
+        output = _slot_by_index(_slots(furnace), FURNACE_SLOTS["output"])
+        if output is None or output.empty or not _same_item(output.item, plan.output_item):
+            return None
+        inventory = _read_inventory(self.body)
+        if _perception_failure(inventory) is not None:
+            return {"success": False, "reason": "inventory_read_failed", "output": _slot_metrics(output)}
+        destination = plan.output_slot
+        candidate = _slot_by_index(_slots(inventory), destination)
+        if candidate is not None and not candidate.empty and not _same_item(candidate.item, plan.output_item):
+            replacement = _find_output_slot(_slots(inventory), plan.output_item, output.count, exclude={plan.input_slot, plan.fuel_slot})
+            if replacement is None:
+                return {"success": False, "reason": "no_output_space", "output": _slot_metrics(output)}
+            destination = replacement
+        result = self.transfer_slot(
+            pos,
+            direction="furnace_to_bot",
+            furnace_slot="output",
+            bot_slot=destination,
+            count=output.count,
+            timeout_s=timeout_s,
+        )
+        return {"bot_slot": destination, "output": _slot_metrics(output), "result": result.to_payload()}
+
+
+def _furnace_contents(slots: list[InventorySlot]) -> dict[str, object]:
+    """What each furnace slot holds, by name; None for an empty slot."""
+    contents: dict[str, object] = {}
+    for name in ("input", "fuel", "output"):
+        slot = _slot_by_index(slots, FURNACE_SLOTS[name])
+        contents[name] = (None if slot is None or slot.empty
+                          else {"item": _plain_item(str(slot.item)), "count": int(slot.count)})
+    return contents
+
+
+def _read_furnace(body: Body, pos: Position) -> PerceptionResult:
+    return body.perceive("container", {"pos": list(pos), "start": 0, "limit": 3, "total_slots": 3})
+
+
+def _retry_temporary_furnace_reclaim(result: ToolResult) -> bool:
+    if not result.can_retry:
+        return False
+    return result.reason in {"timeout", "stuck", "deviated", "body_rejected"} or result.reason.startswith("mine_approach_failed:")
+
+
+def _retry_temporary_furnace_candidate(result: ToolResult) -> bool:
+    return result.reason in {
+        "temporary_furnace_place_failed:place_denied:body_collision",
+        "temporary_furnace_place_failed:timeout",
+    }
+
+
+def _dispatch(body: Body, action_name: str, params: dict[str, object], *, timeout_s: float) -> ToolResult:
+    action = Action.create(action_name, params)
+    action = action_with_timeout(action, timeout_s)
+    accepted = body.execute(action)
+    if not (accepted.ok and accepted.accepted):
+        return body_rejection_to_tool_result(
+            accepted,
+            {"action": action_name, "action_id": action.id},
+        )
+    terminal = body.await_action_terminal(action.id, timeout_s=action_wait_timeout_s(action))
+    result = terminal_event_to_tool_result(terminal)
+    return ToolResult(
+        success=result.success,
+        reason=result.reason,
+        can_retry=result.can_retry,
+        next_suggestion=result.next_suggestion,
+        metrics={"action": action_name, "action_id": action.id, **dict(result.metrics or {})},
+    )
+
+
+def _read_inventory(body: Body, page_size: int | None = None) -> PerceptionResult:
+    if page_size is None:
+        page_size = preferred_inventory_page_size(body)
+    start: int | None = 0
+    slots: list[dict[str, object]] = []
+    last: PerceptionResult | None = None
+    while start is not None:
+        last = body.perceive("inventory", {"start": start, "limit": page_size})
+        if not last.ok:
+            return last
+        slots.extend(dict(item) for item in last.data.get("slots") or [])
+        start = perception_next_cursor(last)
+        if start is not None:
+            start = int(start)
+    if last is None:
+        return PerceptionResult(
+            bot=body.bot_name,
+            scope="inventory",
+            type="perception",
+            ok=False,
+            complete=True,
+            error="no pages read",
+        )
+    data = dict(last.data)
+    data["slots"] = slots
+    return PerceptionResult(
+        bot=last.bot,
+        scope=last.scope,
+        type="perception",
+        ok=last.ok,
+        complete=last.complete,
+        data=data,
+        uncertainty=last.uncertainty,
+        next=last.next,
+        error=last.error,
+    )
+
+
+def _state_block_pos(pos: tuple[float, float, float]) -> Position:
+    return (int(pos[0] // 1), int(pos[1] // 1), int(pos[2] // 1))
+
+
+def _scan_temporary_furnace_sites(
+    body: Body,
+    origin: Position,
+    radius: int,
+) -> list[dict[str, object]] | ToolResult:
+    scanned: list[dict[str, object]] = []
+    feet = _state_block_pos(body.get_state().pos)
+    head = (feet[0], feet[1] + 1, feet[2])
+    for target in _temporary_furnace_site_targets(origin, radius):
+        target_block = body.perceive("blockAt", {"x": target[0], "y": target[1], "z": target[2]})
+        failed = _perception_failure(target_block)
+        if failed is not None:
+            return failed
+        support = (target[0], target[1] - 1, target[2])
+        support_block = body.perceive("blockAt", {"x": support[0], "y": support[1], "z": support[2]})
+        failed = _perception_failure(support_block)
+        if failed is not None:
+            return failed
+
+        target_state = str(target_block.data.get("state") or "UNKNOWN")
+        support_state = str(support_block.data.get("state") or "UNKNOWN")
+        target_clear = target_state == "CLEAR"
+        support_solid = support_state == "SOLID"
+        collision_part = None
+        if target == feet:
+            collision_part = "feet"
+        elif target == head:
+            collision_part = "head"
+        scanned.append(
+            {
+                "target": list(target),
+                "support": list(support),
+                "target_block": normalize_block_type(str(target_block.data.get("type") or "unknown")),
+                "target_state": target_state,
+                "support_block": normalize_block_type(str(support_block.data.get("type") or "unknown")),
+                "support_state": support_state,
+                "body_collision": collision_part is not None,
+                "collision_part": collision_part,
+                "candidate": target_clear and support_solid and collision_part is None,
+            }
+        )
+    return scanned
+
+
+def _temporary_furnace_site_targets(origin: Position, radius: int) -> tuple[Position, ...]:
+    candidates: list[tuple[int, float, Position]] = []
+    for dz in range(-radius, radius + 1):
+        for dx in range(-radius, radius + 1):
+            if dx == 0 and dz == 0:
+                continue
+            target = (origin[0] + dx, origin[1], origin[2] + dz)
+            manhattan = abs(dx) + abs(dz)
+            distance = dist(
+                (float(origin[0]), float(origin[1]), float(origin[2])),
+                (float(target[0]), float(target[1]), float(target[2])),
+            )
+            candidates.append((manhattan, distance, target))
+    candidates.sort(key=lambda item: (item[0], item[1], item[2][2], item[2][0]))
+    return tuple(target for _manhattan, _distance, target in candidates)
+
+
+def _slots(perception: PerceptionResult) -> list[InventorySlot]:
+    return [InventorySlot.from_payload(slot) for slot in perception.data.get("slots") or []]
+
+
+def _read_target_type(body: Body, pos: Position) -> str | ToolResult:
+    block = body.perceive("blockAt", {"x": pos[0], "y": pos[1], "z": pos[2]})
+    failed = _perception_failure(block)
+    if failed is not None:
+        return failed
+    return normalize_block_type(str(block.data.get("type") or "unknown"))
+
+
+def _plan_clear(pos: Position, furnace_slots: list[InventorySlot], inventory_slots: list[InventorySlot]) -> FurnaceClearPlan:
+    by_slot = {slot.slot: slot for slot in furnace_slots}
+    empty_bot_slots = [slot.slot for slot in inventory_slots if 0 <= slot.slot < 36 and slot.empty]
+    occupied = [
+        (name, by_slot.get(index))
+        for name, index in ((slot_name, FURNACE_SLOTS[slot_name]) for slot_name in CLEAR_ORDER)
+        if by_slot.get(index) is not None and not by_slot[index].empty
+    ]
+    moves: list[dict[str, object]] = []
+    for furnace_slot_name, furnace_slot in occupied:
+        if not empty_bot_slots:
+            break
+        moves.append(
+            {
+                "furnace_slot": furnace_slot_name,
+                "furnace_slot_index": furnace_slot.slot,
+                "bot_slot": empty_bot_slots.pop(0),
+                "item": furnace_slot.item,
+                "count": furnace_slot.count,
+            }
+        )
+    return FurnaceClearPlan(pos=pos, moves=tuple(moves), occupied_furnace_slots=len(occupied))
+
+
+def _perception_failure(perception: PerceptionResult) -> ToolResult | None:
+    failed = shared_perception_failure(perception)
+    if failed is None:
+        return None
+    if failed.next_suggestion == "refresh world and inventory facts before attempting the interaction":
+        return ToolResult(
+            success=False,
+            reason=failed.reason,
+            can_retry=failed.can_retry,
+            next_suggestion="refresh furnace and inventory facts before moving furnace contents",
+            metrics=failed.metrics,
+        )
+    return failed
+
+
+def _acceptance_failure(
+    result: Result,
+    plan: FurnaceClearPlan,
+    executed: list[dict[str, object]],
+) -> ToolResult | None:
+    if result.ok and result.accepted:
+        return None
+    metrics = _plan_metrics(plan)
+    metrics["executed"] = executed
+    metrics["accepted"] = {
+        "ok": result.ok,
+        "accepted": result.accepted,
+        "error": result.error,
+        "data": result.data,
+    }
+    return body_rejection_to_tool_result(result, metrics)
+
+
+def _plan_metrics(plan: FurnaceClearPlan) -> dict[str, object]:
+    return {
+        "furnace_pos": list(plan.pos),
+        "occupied_furnace_slots": plan.occupied_furnace_slots,
+        "moves": list(plan.moves),
+    }
+
+
+def _slot_by_index(slots: list[InventorySlot], index: int) -> InventorySlot | None:
+    for slot in slots:
+        if slot.slot == index:
+            return slot
+    return None
+
+
+def _slot_metrics(slot: InventorySlot | None) -> dict[str, object] | None:
+    if slot is None:
+        return None
+    return {"slot": slot.slot, "item": slot.item, "count": slot.count, "empty": slot.empty}
+
+
+def _same_item(actual: str | None, wanted: str) -> bool:
+    if actual is None:
+        return False
+    return actual == wanted or actual == f"minecraft:{wanted}" or f"minecraft:{actual}" == wanted
+
+
+def _find_item_slot(slots: list[InventorySlot], item: str, *, min_count: int, exclude: set[int] | None = None) -> int | None:
+    excluded = exclude or set()
+    for slot in slots:
+        if not 0 <= slot.slot < 36 or slot.slot in excluded or slot.empty:
+            continue
+        if _same_item(slot.item, item) and slot.count >= min_count:
+            return slot.slot
+    return None
+
+
+def _available_item_count(slots: list[InventorySlot], item: str, *, exclude: set[int] | None = None) -> int:
+    excluded = exclude or set()
+    return sum(
+        slot.count
+        for slot in slots
+        if 0 <= slot.slot < 36 and slot.slot not in excluded and not slot.empty and _same_item(slot.item, item)
+    )
+
+
+def _fuel_seconds_per_item(item: str) -> float | None:
+    normalized = _plain_item(item)
+    return FUEL_BURN_SECONDS.get(normalized)
+
+
+def _normalize_counts(counts: dict[str, int]) -> dict[str, int]:
+    normalized: dict[str, int] = {}
+    for raw_item, raw_count in counts.items():
+        try:
+            count = int(raw_count or 0)
+        except (TypeError, ValueError):
+            continue
+        if count <= 0:
+            continue
+        item = _plain_item(str(raw_item))
+        normalized[item] = normalized.get(item, 0) + count
+    return normalized
+
+
+def _plain_item(item: object) -> str:
+    return str(item).removeprefix("minecraft:").strip().lower()
+
+
+def _resolve_smelt_output_from_recipe(
+    normalized_input: str,
+    expected_output: str,
+    perception: PerceptionResult,
+) -> tuple[str, int] | None:
+    structured = perception.data.get("variants")
+    if isinstance(structured, list):
+        for variant in structured:
+            if not isinstance(variant, dict):
+                continue
+            output_item = _plain_item(variant.get("output_item"))
+            if output_item != _plain_item(expected_output):
+                continue
+            try:
+                output_count = int(variant.get("output_count") or 0)
+            except (TypeError, ValueError):
+                continue
+            if output_count <= 0 or not _smelt_variant_accepts_input(
+                normalized_input,
+                variant.get("ingredient_groups"),
+            ):
+                continue
+            return (output_item, output_count)
+        return None
+    recipe_raw = str(perception.data.get("recipe_raw") or "")
+    if not recipe_raw:
+        return None
+    try:
+        parsed = _ScarpetValueParser(recipe_raw).parse()
+    except ValueError:
+        return None
+    if (
+        isinstance(parsed, list)
+        and len(parsed) == 1
+        and isinstance(parsed[0], list)
+        and parsed[0]
+        and all(isinstance(entry, list) and len(entry) >= 3 for entry in parsed[0])
+    ):
+        parsed = parsed[0]
+    variants = parsed if _is_recipe_variant_list(parsed) else [parsed]
+    for variant in variants:
+        resolved = _resolve_smelt_output_from_variant(normalized_input, expected_output, variant)
+        if resolved is not None:
+            return resolved
+    return None
+
+
+def _smelt_recipe_payload_available(perception: PerceptionResult | None) -> bool:
+    if perception is None or not perception.ok:
+        return False
+    structured = perception.data.get("variants")
+    if isinstance(structured, list):
+        return any(isinstance(variant, dict) for variant in structured)
+    recipe_raw = str(perception.data.get("recipe_raw") or "")
+    if not recipe_raw:
+        return False
+    try:
+        _ScarpetValueParser(recipe_raw).parse()
+    except ValueError:
+        return False
+    return True
+
+
+def _is_recipe_variant_list(value: object) -> bool:
+    return (
+        isinstance(value, list)
+        and bool(value)
+        and all(isinstance(entry, list) and len(entry) >= 3 for entry in value)
+        and not _looks_like_recipe_variant(value)
+    )
+
+
+def _looks_like_recipe_variant(value: object) -> bool:
+    if not (isinstance(value, list) and len(value) >= 3 and isinstance(value[0], list) and isinstance(value[1], list)):
+        return False
+    outputs = value[0]
+    if not outputs:
+        return False
+    first_output = outputs[0]
+    return isinstance(first_output, list) and bool(first_output) and not isinstance(first_output[0], list)
+
+
+def _resolve_smelt_output_from_variant(
+    normalized_input: str,
+    expected_output: str,
+    variant: object,
+) -> tuple[str, int] | None:
+    if not isinstance(variant, list) or len(variant) < 3:
+        return None
+    outputs_raw, groups_raw = variant[0], variant[1]
+    if not isinstance(outputs_raw, list) or not outputs_raw:
+        return None
+    output = outputs_raw[0]
+    if not isinstance(output, list) or len(output) < 2:
+        return None
+    output_item = _plain_item(output[0])
+    if output_item != _plain_item(expected_output):
+        return None
+    try:
+        output_count = int(output[1])
+    except (TypeError, ValueError):
+        return None
+    if output_count <= 0:
+        return None
+    if not _smelt_variant_accepts_input(normalized_input, groups_raw):
+        return None
+    return (output_item, output_count)
+
+
+def _smelt_variant_accepts_input(normalized_input: str, groups_raw: object) -> bool:
+    if not isinstance(groups_raw, list):
+        return False
+    for group in groups_raw:
+        if group is None:
+            continue
+        if isinstance(group, list):
+            if any(_plain_item(entry) == normalized_input for entry in group if entry is not None):
+                return True
+        elif _plain_item(group) == normalized_input:
+            return True
+    return False
+
+
+def _plan_fuel_budget(
+    *,
+    fuel_item: str,
+    fuel_count: int | None,
+    input_count: int,
+    output_count: int,
+) -> tuple[int, bool, float, float] | ToolResult:
+    smelt_count = max(input_count, output_count)
+    required_seconds = smelt_count * DEFAULT_SMELT_SECONDS_PER_ITEM
+    seconds_per_fuel = _fuel_seconds_per_item(fuel_item)
+    if fuel_count is None:
+        if seconds_per_fuel is None:
+            return ToolResult(
+                success=False,
+                reason="smelt_unknown_fuel_value",
+                can_retry=False,
+                next_suggestion="pass an explicit fuel_count for unknown furnace fuel items",
+                metrics={
+                    "fuel_item": fuel_item,
+                    "input_count": input_count,
+                    "output_count": output_count,
+                    "fuel_seconds_required": required_seconds,
+                },
+            )
+        planned_count = max(1, int((required_seconds + seconds_per_fuel - 0.000001) // seconds_per_fuel))
+        return (planned_count, True, planned_count * seconds_per_fuel, required_seconds)
+    available_seconds = fuel_count * seconds_per_fuel if seconds_per_fuel is not None else 0.0
+    return (fuel_count, False, available_seconds, required_seconds)
+
+
+def _find_output_slot(slots: list[InventorySlot], item: str, count: int, *, exclude: set[int]) -> int | None:
+    empty: int | None = None
+    for slot_index in range(0, 36):
+        if slot_index in exclude:
+            continue
+        slot = _slot_by_index(slots, slot_index)
+        if slot is None or slot.empty:
+            if empty is None:
+                empty = slot_index
+            continue
+        if _same_item(slot.item, item) and slot.count + count <= 64:
+            return slot_index
+    return empty
+
+
+def _first_empty_slot(slots: list[InventorySlot], *, exclude: set[int] | None = None) -> int | None:
+    excluded = exclude or set()
+    for slot_index in range(0, 36):
+        if slot_index in excluded:
+            continue
+        slot = _slot_by_index(slots, slot_index)
+        if slot is None or slot.empty:
+            return slot_index
+    return None
+
+
+def _smelt_plan_metrics(plan: SmeltPlan) -> dict[str, object]:
+    return {
+        "furnace_pos": list(plan.pos),
+        "input": {"item": plan.input_item, "count": plan.input_count, "bot_slot": plan.input_slot},
+        "fuel": {
+            "item": plan.fuel_item,
+            "count": plan.fuel_count,
+            "bot_slot": plan.fuel_slot,
+            "auto": plan.fuel_auto,
+            "seconds_available": plan.fuel_seconds_available,
+            "seconds_required": plan.fuel_seconds_required,
+        },
+        "output": {"item": plan.output_item, "count": plan.output_count, "bot_slot": plan.output_slot},
+    }
+
+
+def _smelt_failure(
+    prefix: str,
+    result: ToolResult,
+    plan: SmeltPlan,
+    executed: list[dict[str, object]],
+    *,
+    polls: list[dict[str, object]] | None = None,
+    reclaim: list[dict[str, object]] | None = None,
+) -> ToolResult:
+    metrics = {**_smelt_plan_metrics(plan), "executed": executed}
+    if polls is not None:
+        metrics["polls"] = polls
+    if reclaim is not None:
+        metrics["reclaim"] = reclaim
+    return ToolResult(
+        success=False,
+        reason=f"{prefix}:{result.reason}",
+        can_retry=result.can_retry,
+        next_suggestion=result.next_suggestion,
+        metrics=metrics,
+    )
+
+
+def _verify_transfer(
+    *,
+    direction: str,
+    furnace_slot: str,
+    moved_count: int,
+    before_furnace_slot: InventorySlot | None,
+    after_furnace_slot: InventorySlot | None,
+    before_bot_slot: InventorySlot | None,
+    after_bot_slot: InventorySlot | None,
+) -> bool:
+    if moved_count <= 0:
+        return False
+
+    before_furnace_count = 0 if before_furnace_slot is None or before_furnace_slot.empty else before_furnace_slot.count
+    after_furnace_count = 0 if after_furnace_slot is None or after_furnace_slot.empty else after_furnace_slot.count
+    before_bot_count = 0 if before_bot_slot is None or before_bot_slot.empty else before_bot_slot.count
+    after_bot_count = 0 if after_bot_slot is None or after_bot_slot.empty else after_bot_slot.count
+
+    if direction == "furnace_to_bot":
+        if before_furnace_slot is None or before_furnace_slot.empty:
+            return False
+        item = before_furnace_slot.item
+        if after_furnace_count != before_furnace_count - moved_count:
+            return False
+        if after_furnace_count > 0 and (after_furnace_slot is None or after_furnace_slot.empty or after_furnace_slot.item != item):
+            return False
+        if after_bot_count != before_bot_count + moved_count:
+            return False
+        if after_bot_slot is None or after_bot_slot.empty or after_bot_slot.item != item:
+            return False
+        if before_bot_count > 0 and (before_bot_slot is None or before_bot_slot.empty or before_bot_slot.item != item):
+            return False
+        return True
+
+    if before_bot_slot is None or before_bot_slot.empty:
+        return False
+    item = before_bot_slot.item
+    if after_bot_count != before_bot_count - moved_count:
+        return False
+    if after_bot_count > 0 and (after_bot_slot is None or after_bot_slot.empty or after_bot_slot.item != item):
+        return False
+    if before_furnace_count > 0 and (before_furnace_slot is None or before_furnace_slot.empty or before_furnace_slot.item != item):
+        return False
+    if furnace_slot == "fuel" and after_furnace_count <= before_furnace_count + moved_count:
+        if after_furnace_count > 0 and (after_furnace_slot is None or after_furnace_slot.empty or after_furnace_slot.item != item):
+            return False
+        return True
+    if after_furnace_count != before_furnace_count + moved_count:
+        return False
+    if after_furnace_slot is None or after_furnace_slot.empty or after_furnace_slot.item != item:
+        return False
+    return True
+
+
+def _guard_furnace_target(
+    governance: GovernancePolicy | None,
+    pos: Position,
+    block_type: str,
+) -> ToolResult | None:
+    if governance is None:
+        return None
+    decision = governance.can_interact(pos, block_type, InteractionContext.ACTIVATE)
+    if decision.allowed:
+        return None
+    return ToolResult(
+        success=False,
+        reason="furnace_denied",
+        can_retry=False,
+        next_suggestion="choose a furnace inside an allowed natural work region instead of touching protected or unknown-provenance workstation blocks",
+        metrics={
+            "furnace_pos": list(pos),
+            "furnace_type": block_type,
+            "legality": _decision_payload(decision),
+        },
+    )
+
+
+def _decision_payload(decision) -> dict[str, object]:
+    payload = asdict(decision)
+    payload["allowed"] = bool(decision.allowed)
+    return payload

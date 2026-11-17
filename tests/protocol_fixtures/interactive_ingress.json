@@ -1,0 +1,141 @@
+{
+  "name": "interactive_ingress",
+  "description": "Java owns persistent world identity, replayable public chat ingress, and bot chat egress without RCON.",
+  "steps": [
+    {
+      "send": {"builder": "hello", "args": {}},
+      "expect_message": {
+        "channel": "fakeplayer-body",
+        "protocol": "fakeplayer-body/1",
+        "type": "HELLO",
+        "request_id": "r-1"
+      }
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body",
+        "type": "HELLO_ACK",
+        "request_id": "r-1",
+        "protocol": "fakeplayer-body/1",
+        "minecraft_version": "26.1.2",
+        "max_request_bytes": 16384,
+        "max_requests_per_second": 40,
+        "request_types": ["CHAT_EVENTS", "EVENT_HEAD", "HELLO", "SAY", "WORLD_IDENTITY"]
+      },
+      "expect": [{"kind": "response", "type": "HELLO_ACK", "request_type": "HELLO"}]
+    },
+    {
+      "send": {"builder": "world_identity", "args": {}},
+      "expect_message": {
+        "channel": "fakeplayer-body",
+        "protocol": "fakeplayer-body/1",
+        "type": "WORLD_IDENTITY",
+        "request_id": "r-2"
+      }
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body",
+        "type": "WORLD_IDENTITY_RESULT",
+        "request_id": "r-2",
+        "world_id": "world-7a8b9c"
+      },
+      "expect": [{"kind": "response", "type": "WORLD_IDENTITY_RESULT", "request_type": "WORLD_IDENTITY"}]
+    },
+    {
+      "send": {
+        "builder": "event_head",
+        "args": {"bot_name": "MineBot_1", "proposed_epoch": "client-epoch"}
+      },
+      "expect_message": {
+        "channel": "fakeplayer-body",
+        "protocol": "fakeplayer-body/1",
+        "type": "EVENT_HEAD",
+        "request_id": "r-3",
+        "bot_name": "MineBot_1",
+        "proposed_epoch": "client-epoch"
+      }
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body",
+        "type": "EVENT_HEAD_RESULT",
+        "request_id": "r-3",
+        "bot": "MineBot_1",
+        "epoch": "server-epoch",
+        "event_seq": 0,
+        "chat_seq": 4,
+        "owner": null,
+        "pending_action_count": 0,
+        "tick": 900
+      },
+      "expect": [{"kind": "response", "type": "EVENT_HEAD_RESULT", "request_type": "EVENT_HEAD"}]
+    },
+    {
+      "send": {
+        "builder": "chat_events",
+        "args": {"bot_name": "MineBot_1", "after_seq": 4}
+      },
+      "expect_message": {
+        "channel": "fakeplayer-body",
+        "protocol": "fakeplayer-body/1",
+        "type": "CHAT_EVENTS",
+        "request_id": "r-4",
+        "bot_name": "MineBot_1",
+        "after_seq": 4
+      }
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body",
+        "type": "CHAT_EVENTS_RESULT",
+        "request_id": "r-4",
+        "bot": "MineBot_1",
+        "epoch": "server-epoch",
+        "event_gap": null,
+        "events": [
+          {
+            "channel": "fakeplayer-body",
+            "type": "EVENT",
+            "bot": "MineBot_1",
+            "seq": 5,
+            "tick": 910,
+            "event": "agentChat",
+            "data": {"sender": "Guide", "message": "/goal collect one log"}
+          }
+        ],
+        "replay_complete": true,
+        "last_seq": 5
+      },
+      "expect": [{"kind": "response", "type": "CHAT_EVENTS_RESULT", "request_type": "CHAT_EVENTS"}]
+    },
+    {
+      "send": {
+        "builder": "say",
+        "args": {"bot_name": "MineBot_1", "text": "working on it"}
+      },
+      "expect_message": {
+        "channel": "fakeplayer-body",
+        "protocol": "fakeplayer-body/1",
+        "type": "SAY",
+        "request_id": "r-5",
+        "bot_name": "MineBot_1",
+        "text": "working on it"
+      }
+    },
+    {
+      "recv": {
+        "channel": "fakeplayer-body",
+        "type": "SAY_RESULT",
+        "request_id": "r-5",
+        "bot": "MineBot_1",
+        "said": true
+      },
+      "expect": [{"kind": "response", "type": "SAY_RESULT", "request_type": "SAY"}]
+    }
+  ],
+  "final": {
+    "supports": ["CHAT_EVENTS", "EVENT_HEAD", "SAY", "WORLD_IDENTITY"],
+    "pending_requests": 0
+  }
+}

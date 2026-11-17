@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "id": "minebot-bridge",
+  "version": "${version}",
+  "name": "MineBot Bridge",
+  "description": "Least-privilege server bridge for MineBot observer features.",
+  "authors": ["MineBot"],
+  "environment": "server",
+  "entrypoints": {
+    "server": [
+      "dev.minebot.bridge.MineBotBridgeMod"
+    ]
+  },
+  "mixins": [
+    "minebot-bridge.mixins.json"
+  ],
+  "depends": {
+    "fabricloader": ">=0.19.3",
+    "minecraft": "26.1.2",
+    "fabric-api": "*"
+  }
+}

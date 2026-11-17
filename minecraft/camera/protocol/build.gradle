@@ -1,0 +1,27 @@
+plugins {
+    id "net.fabricmc.fabric-loom"
+}
+
+base {
+    archivesName = "minebot-camera-protocol"
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(25)
+    }
+    withSourcesJar()
+}
+
+dependencies {
+    minecraft "com.mojang:minecraft:26.1.2"
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = "UTF-8"
+    options.release = 25
+}
+
+tasks.withType(Test).configureEach {
+    useJUnitPlatform()
+}

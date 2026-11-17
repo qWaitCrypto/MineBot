@@ -1,0 +1,11 @@
+{
+  "required": true,
+  "package": "dev.minebot.bridge.mixin",
+  "compatibilityLevel": "JAVA_25",
+  "mixins": [
+    "ObserverPacketPolicyMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}

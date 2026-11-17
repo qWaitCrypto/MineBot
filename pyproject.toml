@@ -1,0 +1,59 @@
+[project]
+name = "minebot"
+version = "0.1.0"
+description = "MineBot body + agent layer"
+requires-python = ">=3.13"
+dependencies = [
+    # Explicit legacy SDK path and shared session/model binding types.
+    "openai-agents==0.17.6",
+    # Base Responses WebSocket transport uses native wire events. Keep the
+    # compatible SDK pair for MINEBOT_AGENT_KERNEL=sdk.
+    "openai==2.36.0",
+    "authlib>=1.6,<1.8",
+    "PyJWT[crypto]>=2.10,<3",
+    "websockets==16.0",
+    "filelock>=3.16,<4",
+    "PyYAML>=6.0.2,<7",
+    "jsonschema>=4.23,<5",
+    "nbtlib>=2.0.4,<3",
+    "tiktoken>=0.12,<1",
+    # The `minebot` launcher and panel (minebot.shell, minebot.panel).
+    "textual>=8.2,<9",
+    "rich>=14,<16",
+    "httpx>=0.28,<1",
+]
+
+[project.scripts]
+minebot-camera = "minebot.camera.cli.main:main"
+minebot-local = "minebot.app.local_launcher:main"
+minebot-auth = "minebot.app.chatgpt_auth:main"
+minebot-panel = "minebot.panel.app:main"
+minebot = "minebot.shell.app:main"
+
+[tool.setuptools.package-data]
+"minebot.skills" = ["catalog/*/SKILL.md"]
+
+[tool.setuptools.packages.find]
+include = ["minebot*"]
+
+[project.optional-dependencies]
+test = ["pytest>=8,<10"]
+# kind="litellm" providers (Anthropic, Gemini, …) need this beta extra.
+litellm = ["openai-agents[litellm]==0.17.6"]
+camera = ["websockets==16.0"]
+# Kept so `pip install minebot[panel]` still works; the panel is now a default dependency.
+panel = []
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+# Reuse the current behavioral regressions; Minecraft task experiments are
+# opt-in. Name any other file explicitly when changing that subsystem.
+testpaths = [
+    "tests/unit/test_real_client_body.py",
+    "tests/unit/test_real_client_ipc.py",
+    "tests/unit/test_session_message_preemption.py",
+    "tests/unit/test_responses_kernel.py",
+    "tests/unit/test_direct_call_supervision.py",
+    "tests/test_contributor_truth_gate.py",
+]
+python_files = ["test_*.py"]

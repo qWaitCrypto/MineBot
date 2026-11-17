@@ -1,0 +1,2028 @@
+import unittest
+
+from minebot.brain.composition import (
+    CompositionBudget,
+    CompositionContext,
+    collect_resource,
+    collect_resource_observation_projector,
+    ensure_item,
+    ensure_tool_for,
+    register_collect_resource_tool,
+    register_ensure_tool_for_tool,
+    register_inventory_tools,
+    resource_plan_for,
+)
+from minebot.brain.acquisition import RecipeVariant
+from minebot.brain.acquisition import resolve_acquisition
+from minebot.brain.modes import ModeRuntime
+from minebot.brain.progress import ProgressAuthority
+from minebot.brain.registry import RegisteredTool, ToolRegistry, ToolSidecar, WeldContext, execute_tool
+from minebot.brain.lifecycle import LifecycleState
+from minebot.contract import BodyState, PerceptionResult, ProgressAbort, Result, ToolResult
+from minebot.contract.tool_trace import canonical_args_hash, tool_tactic_signature
+from minebot.contract.results import RECIPE_SOURCE_UNLOCKED_BOOK
+
+# The old failure-storm threshold; the counter is a fact now, never a stop.
+FAILURES = 5
+
+
+def state(inventory_hash="inv"):
+    return BodyState(
+        bot="Bot",
+        pos=(0.5, 59.0, 0.5),
+        yaw=None,
+        pitch=None,
+        health=20.0,
+        food=20,
+        oxygen=300,
+        inventory_raw="[]",
+        inventory_hash=inventory_hash,
+        effects=None,
+        time=1000,
+        weather=None,
+        dimension="overworld",
+        complete=True,
+    )
+
+
+def slot(index, item=None, count=0):
+    return {"slot": index, "empty": item is None or count <= 0, "item": item, "count": count}
+
+
+class FakeBody:
+    bot_name = "Bot"
+
+    def __init__(self):
+        self.inventory_counts = {"dirt": 0}
+        self.state_reads = 0
+        self.inventory_reads = 0
+        self.interrupts = []
+
+    @property
+    def inventory_count(self):
+        return self.inventory_counts.get("dirt", 0)
+
+    @inventory_count.setter
+    def inventory_count(self, value):
+        self.inventory_counts["dirt"] = value
+
+    def get_state(self):
+        self.state_reads += 1
+        return state(f"inv-{self.inventory_counts}-{self.state_reads}")
+
+    def perceive(self, scope, params):
+        if scope != "inventory":
+            raise AssertionError(f"unexpected scope {scope}")
+        self.inventory_reads += 1
+        slots = [
+            slot(index, f"minecraft:{item}", count)
+            for index, (item, count) in enumerate(sorted(self.inventory_counts.items()))
+            if count
+        ]
+        return PerceptionResult("Bot", "inventory", "perception", True, True, {"slots": slots})
+
+    def interrupt(self, reason=None):
+        self.interrupts.append(reason)
+        return Result(None, "Bot", "result", True, True, True, {"action": "interrupt"}, None)
+
+
+class PagedInventoryBody(FakeBody):
+    def perceive(self, scope, params):
+        if scope != "inventory":
+            raise AssertionError(f"unexpected scope {scope}")
+        self.inventory_reads += 1
+        start = int(params.get("start") or 0)
+        limit = int(params.get("limit") or 12)
+        all_slots = [slot(i) for i in range(46)]
+        all_slots[13] = slot(13, "minecraft:dirt", 2)
+        all_slots[37] = slot(37, "minecraft:dirt", 5)
+        end = min(len(all_slots), start + limit)
+        data = {"slots": all_slots[start:end]}
+        if end < len(all_slots):
+            data["nextStart"] = end
+        return PerceptionResult("Bot", "inventory", "perception", True, True, data)
+
+    def poll_events(self):
+        return []
+
+
+def search_tool(targets):
+    calls = []
+
+    def callable_(params):
+        calls.append(dict(params))
+        if not targets:
+            return ToolResult(False, "search_block_not_found", True, metrics={"block_types": params.get("block_types")})
+        target = targets[0]
+        block_type = params.get("block_types", ["dirt"])[0]
+        return ToolResult(True, "block_in_range", False, metrics={"target": {"pos": target, "type": block_type}})
+
+    return RegisteredTool(
+        "search_for_block",
+        "search",
+        {"type": "object"},
+        callable_,
+        ToolSidecar("search_for_block", mutating=False, permission="read_world"),
+    ), calls
+
+
+def candidate_search_tool(targets, *, distances=None):
+    calls = []
+
+    def callable_(params):
+        calls.append(dict(params))
+        candidates = [
+            {
+                "pos": list(target),
+                "type": params.get("block_types", ["dirt"])[0],
+                "distance": (distances[index] if distances is not None else index),
+            }
+            for index, target in enumerate(targets)
+        ]
+        if not candidates:
+            return ToolResult(False, "search_block_not_found", True, metrics={"candidates": []})
+        return ToolResult(True, "block_in_range", False, metrics={"target": candidates[0], "candidates": candidates})
+
+    return RegisteredTool(
+        "search_for_block",
+        "search",
+        {"type": "object"},
+        callable_,
+        ToolSidecar("search_for_block", mutating=False, permission="read_world"),
+    ), calls
+
+
+def skip_failing_search_tool(targets, *, reason="search_block_navigation_failed:search_block_no_stand_point"):
+    """Search that fails on its own nearest pick (a candidate-skip reason) but
+    still returns the full, real candidate list — mirrors the live behavior where
+    the nearest block was underground with no stand point."""
+    calls = []
+
+    def callable_(params):
+        calls.append(dict(params))
+        candidates = [
+            {"pos": list(target), "type": params.get("block_types", ["dirt"])[0], "distance": index}
+            for index, target in enumerate(targets)
+        ]
+        if not candidates:
+            return ToolResult(False, "search_block_not_found", True, metrics={"candidates": []})
+        # success=False (its internal approach to candidates[0] failed) but the
+        # candidate list is intact and trustworthy.
+        return ToolResult(False, reason, True, metrics={"target": candidates[0], "candidates": candidates})
+
+    return RegisteredTool(
+        "search_for_block",
+        "search",
+        {"type": "object"},
+        callable_,
+        ToolSidecar("search_for_block", mutating=False, permission="read_world"),
+    ), calls
+
+
+def mine_tool(body, *, fail_reason=None):
+    calls = []
+
+    def callable_(params):
+        calls.append(dict(params))
+        if fail_reason is not None:
+            return ToolResult(False, fail_reason, True, metrics={"target": params.get("pos")})
+        expected = params.get("expected_drops") or ["dirt"]
+        item = str(expected[0]).removeprefix("minecraft:")
+        body.inventory_counts[item] = body.inventory_counts.get(item, 0) + 1
+        return ToolResult(True, "collected", False, metrics={"target": params.get("pos"), "collected_total": 1})
+
+    return RegisteredTool(
+        "mine_block_collect",
+        "mine",
+        {"type": "object"},
+        callable_,
+        ToolSidecar("mine_block_collect", mutating=True, permission="break", body_scope=("mine",)),
+    ), calls
+
+
+def mine_tool_fail_once(body):
+    calls = []
+
+    def callable_(params):
+        calls.append(dict(params))
+        if len(calls) == 1:
+            return ToolResult(False, "mine_failed:no_inventory_delta", True, metrics={"target": params.get("pos")})
+        expected = params.get("expected_drops") or ["dirt"]
+        item = str(expected[0]).removeprefix("minecraft:")
+        body.inventory_counts[item] = body.inventory_counts.get(item, 0) + 1
+        return ToolResult(True, "collected", False, metrics={"target": params.get("pos"), "collected_total": 1})
+
+    return RegisteredTool(
+        "mine_block_collect",
+        "mine",
+        {"type": "object"},
+        callable_,
+        ToolSidecar("mine_block_collect", mutating=True, permission="break", body_scope=("mine",)),
+    ), calls
+
+
+def mine_tool_with_outcomes(body, outcomes):
+    calls = []
+    planned = list(outcomes)
+
+    def callable_(params):
+        calls.append(dict(params))
+        outcome = planned.pop(0) if planned else "fail"
+        target = params.get("pos")
+        if outcome == "success":
+            expected = params.get("expected_drops") or ["dirt"]
+            item = str(expected[0]).removeprefix("minecraft:")
+            body.inventory_counts[item] = body.inventory_counts.get(item, 0) + 1
+            return ToolResult(True, "collected", False, metrics={"target": target, "collected_total": 1})
+        return ToolResult(False, "collect_no_inventory_delta", True, metrics={"target": target, "collected_total": 0})
+
+    return RegisteredTool(
+        "mine_block_collect",
+        "mine",
+        {"type": "object"},
+        callable_,
+        ToolSidecar("mine_block_collect", mutating=True, permission="break", body_scope=("mine",)),
+    ), calls
+
+
+def mine_tool_with_reason_sequence(body, outcomes):
+    calls = []
+    planned = list(outcomes)
+
+    def callable_(params):
+        calls.append(dict(params))
+        outcome = planned.pop(0) if planned else "collect_no_inventory_delta"
+        target = params.get("pos")
+        if outcome == "success":
+            expected = params.get("expected_drops") or ["dirt"]
+            item = str(expected[0]).removeprefix("minecraft:")
+            body.inventory_counts[item] = body.inventory_counts.get(item, 0) + 1
+            return ToolResult(True, "collected", False, metrics={"target": target, "collected_total": 1})
+        return ToolResult(False, str(outcome), True, metrics={"target": target, "collected_total": 0})
+
+    return RegisteredTool(
+        "mine_block_collect",
+        "mine",
+        {"type": "object"},
+        callable_,
+        ToolSidecar("mine_block_collect", mutating=True, permission="break", body_scope=("mine",)),
+    ), calls
+
+
+def mine_tool_no_path_sequence(body):
+    calls = []
+
+    def callable_(params):
+        calls.append(dict(params))
+        target = params.get("pos")
+        return ToolResult(
+            False,
+            "mine_approach_failed:dig_through:no_path",
+            True,
+            metrics={
+                "target": target,
+                "dig_through_result": {
+                    "success": False,
+                    "reason": "no_path",
+                    "canRetry": False,
+                    "metrics": {"goal": target},
+                },
+            },
+        )
+
+    return RegisteredTool(
+        "mine_block_collect",
+        "mine",
+        {"type": "object"},
+        callable_,
+        ToolSidecar("mine_block_collect", mutating=True, permission="break", body_scope=("mine",)),
+    ), calls
+
+
+def mine_tool_body_rejected(body):
+    calls = []
+
+    def callable_(params):
+        calls.append(dict(params))
+        return ToolResult(False, "body_rejected", True, metrics={"target": params.get("pos"), "error": "owner_busy"})
+
+    return RegisteredTool(
+        "mine_block_collect",
+        "mine",
+        {"type": "object"},
+        callable_,
+        ToolSidecar("mine_block_collect", mutating=True, permission="break", body_scope=("mine",)),
+    ), calls
+
+
+def mine_tool_approach_body_rejected_then_success(body):
+    calls = []
+
+    def callable_(params):
+        calls.append(dict(params))
+        target = params.get("pos")
+        if len(calls) == 1:
+            stand_block = [target[0], target[1], target[2] + 1]
+            move_target = [stand_block[0] + 0.5, float(stand_block[1]), stand_block[2] + 0.5]
+            approach = {"target": target, "stand_block": stand_block, "move_target": move_target}
+            rejection = {
+                "success": False,
+                "reason": "body_rejected",
+                "canRetry": True,
+                "metrics": {
+                    "action": "moveTo",
+                    "target": stand_block,
+                    "ok": True,
+                    "accepted": False,
+                    "error": None,
+                    "data": {"action": "moveTo"},
+                    "mine_approach": approach,
+                },
+            }
+            return ToolResult(
+                False,
+                "body_rejected",
+                True,
+                metrics={
+                    "target": stand_block,
+                    "action": "moveTo",
+                    "ok": True,
+                    "accepted": False,
+                    "error": None,
+                    "data": {"action": "moveTo"},
+                    "mine_approach": approach,
+                    "stand_candidate_failures": [
+                        {"stand_block": stand_block, "reason": "body_rejected", "result": rejection}
+                    ],
+                },
+            )
+        expected = params.get("expected_drops") or ["dirt"]
+        item = str(expected[0]).removeprefix("minecraft:")
+        body.inventory_counts[item] = body.inventory_counts.get(item, 0) + 1
+        return ToolResult(True, "collected", False, metrics={"target": target, "collected_total": 1})
+
+    return RegisteredTool(
+        "mine_block_collect",
+        "mine",
+        {"type": "object"},
+        callable_,
+        ToolSidecar("mine_block_collect", mutating=True, permission="break", body_scope=("mine",)),
+    ), calls
+
+
+def mine_tool_clearance_denied(body):
+    calls = []
+
+    def callable_(params):
+        calls.append(dict(params))
+        return ToolResult(
+            False,
+            "mine_approach_failed:dig_through:break_denied:not_natural_breakable",
+            True,
+            metrics={
+                "target": params.get("pos"),
+                "stand_block": [10, 64, 11],
+                "clearance": {
+                    "success": False,
+                    "reason": "break_denied:not_natural_breakable",
+                    "canRetry": False,
+                    "metrics": {
+                        "target": [10, 65, 11],
+                        "block_type": "spruce_leaves",
+                        "legality": {"allowed": False, "reason": "not_natural_breakable"},
+                        "collect_approach_clearance": {
+                            "stand_block": [10, 64, 11],
+                            "target": params.get("pos"),
+                            "cleared": [],
+                        },
+                    },
+                },
+            },
+        )
+
+    return RegisteredTool(
+        "mine_block_collect",
+        "mine",
+        {"type": "object"},
+        callable_,
+        ToolSidecar("mine_block_collect", mutating=True, permission="break", body_scope=("mine",)),
+    ), calls
+
+
+def move_tool(*, success=True, reason="arrived"):
+    calls = []
+
+    def callable_(params):
+        calls.append(dict(params))
+        return ToolResult(
+            success,
+            reason,
+            not success,
+            metrics={"goal": params.get("pos"), "navigation_goal": {"kind": "near", "pos": params.get("pos"), "radius": params.get("radius")}},
+        )
+
+    return RegisteredTool(
+        "move_to",
+        "move",
+        {"type": "object"},
+        callable_,
+        ToolSidecar("move_to", mutating=True, permission="move"),
+    ), calls
+
+
+def move_tool_with_metrics(*, success=True, reason="arrived", metrics=None):
+    calls = []
+
+    def callable_(params):
+        calls.append(dict(params))
+        payload = {"goal": params.get("pos"), "navigation_goal": {"kind": "near", "pos": params.get("pos"), "radius": params.get("radius")}}
+        payload.update(dict(metrics or {}))
+        return ToolResult(success, reason, not success, metrics=payload)
+
+    return RegisteredTool(
+        "move_to",
+        "move",
+        {"type": "object"},
+        callable_,
+        ToolSidecar("move_to", mutating=True, permission="move"),
+    ), calls
+
+
+def mine_tool_that_progress_yields(body):
+    calls = []
+
+    def callable_(params):
+        calls.append(dict(params))
+        raise ProgressAbort(
+            "simulated mine yield",
+            facts=ProgressAuthority(stagnant_steps=1, stalled_steps=8, failure_steps=5).facts("collect logs"),
+        )
+
+    return RegisteredTool(
+        "mine_block_collect",
+        "mine",
+        {"type": "object"},
+        callable_,
+        ToolSidecar("mine_block_collect", mutating=True, permission="break", body_scope=("mine",)),
+    ), calls
+
+
+def mine_tool_candidate_navigation_yields_then_success(body):
+    calls = []
+
+    def callable_(params):
+        calls.append(dict(params))
+        target = params.get("pos")
+        if len(calls) == 1:
+            raise ProgressAbort(
+                "simulated candidate navigation yield",
+                facts=ProgressAuthority(
+                    stagnant_steps=0,
+                    stalled_steps=8,
+                    failure_steps=1,
+                    last_action=("navigate.segment", [0, 59, 0], {"kind": "block", "pos": target}, "no_path", target),
+                ).facts("collect logs"),
+            )
+        expected = params.get("expected_drops") or ["dirt"]
+        item = str(expected[0]).removeprefix("minecraft:")
+        body.inventory_counts[item] = body.inventory_counts.get(item, 0) + 1
+        return ToolResult(True, "collected", False, metrics={"target": target, "collected_total": 1})
+
+    return RegisteredTool(
+        "mine_block_collect",
+        "mine",
+        {"type": "object"},
+        callable_,
+        ToolSidecar("mine_block_collect", mutating=True, permission="break", body_scope=("mine",)),
+    ), calls
+
+
+def mine_tool_body_action_timeout_then_success(body):
+    calls = []
+
+    def callable_(params):
+        calls.append(dict(params))
+        target = params.get("pos")
+        if len(calls) == 1:
+            exc = TimeoutError("timed out waiting for terminal event for action a1")
+            exc.diagnostics = {
+                "action_id": "a1",
+                "terminal_events": ["mineDone"],
+                "poll_count": 88,
+                "wait_ms": 12043.456,
+                "observed_events": 0,
+            }
+            raise exc
+        expected = params.get("expected_drops") or ["dirt"]
+        item = str(expected[0]).removeprefix("minecraft:")
+        body.inventory_counts[item] = body.inventory_counts.get(item, 0) + 1
+        return ToolResult(True, "collected", False, metrics={"target": target, "collected_total": 1})
+
+    return RegisteredTool(
+        "mine_block_collect",
+        "mine",
+        {"type": "object"},
+        callable_,
+        ToolSidecar("mine_block_collect", mutating=True, permission="break", body_scope=("mine",)),
+    ), calls
+
+
+def composition_context(body, registry, *, max_candidates=4):
+    trace_events = []
+    return CompositionContext(
+        registry=registry,
+        weld_context=WeldContext(body=body, authority=ProgressAuthority(), goal_text="collect dirt"),
+        runtime_profile=ModeRuntime().profile_for(LifecycleState.ACTIVE),
+        budget=CompositionBudget(max_candidates=max_candidates, max_mutating_calls=max_candidates, max_wall_s=10),
+        recipe_lookup=acquisition_recipe_lookup,
+        trace=lambda event, payload: trace_events.append({"event": event, **payload}),
+    ), trace_events
+
+
+def resource_domain_tool(body, *outcomes):
+    calls = []
+    planned = list(outcomes)
+
+    def callable_(params):
+        calls.append(dict(params))
+        outcome = dict(planned.pop(0)) if planned else {
+            "success": True,
+            "reason": "resource_domain_collected",
+            "can_retry": False,
+            "delta": int(params.get("remaining_count") or 0),
+        }
+        delta = int(outcome.pop("delta", 0) or 0)
+        expected = [str(item).removeprefix("minecraft:") for item in params.get("expected_drops") or []]
+        if delta > 0 and expected:
+            body.inventory_counts[expected[0]] = body.inventory_counts.get(expected[0], 0) + delta
+        metrics = {
+            "collected_total": delta,
+            "attempts": outcome.pop("attempts", []),
+            "candidate_blacklist": outcome.pop("candidate_blacklist", []),
+            "complete": bool(outcome.get("success")),
+        }
+        metrics.update(dict(outcome.pop("metrics", {})))
+        return ToolResult(
+            bool(outcome.pop("success")),
+            str(outcome.pop("reason")),
+            bool(outcome.pop("can_retry", False)),
+            next_suggestion=outcome.pop("next_suggestion", None),
+            metrics=metrics,
+        )
+
+    return RegisteredTool(
+        "collect_block_domain",
+        "collect a physical block domain",
+        {"type": "object"},
+        callable_,
+        ToolSidecar(
+            "collect_block_domain",
+            mutating=True,
+            source="body.resource_collection",
+            permission="collect_natural_resource",
+            body_scope=("search", "navigation", "mine", "pickup", "inventory"),
+        ),
+    ), calls
+
+
+def acquisition_recipe_lookup(item):
+    plank_options = ("oak_planks", "spruce_planks", "birch_planks")
+    recipes = {
+        "oak_planks": [RecipeVariant("oak_planks", 4, (("oak_log",),))],
+        "spruce_planks": [RecipeVariant("spruce_planks", 4, (("spruce_log",),))],
+        "birch_planks": [RecipeVariant("birch_planks", 4, (("birch_log",),))],
+        "stick": [RecipeVariant("stick", 4, (plank_options, plank_options))],
+        "crafting_table": [RecipeVariant("crafting_table", 1, (plank_options,) * 4)],
+        "wooden_pickaxe": [
+            RecipeVariant("wooden_pickaxe", 1, (plank_options,) * 3 + (("stick",), ("stick",)), requires_table=True)
+        ],
+        "stone_pickaxe": [
+            RecipeVariant("stone_pickaxe", 1, (("cobblestone",), ("cobblestone",), ("cobblestone",), ("stick",), ("stick",)), requires_table=True)
+        ],
+        "iron_pickaxe": [
+            RecipeVariant("iron_pickaxe", 1, (("iron_ingot",), ("iron_ingot",), ("iron_ingot",), ("stick",), ("stick",)), requires_table=True)
+        ],
+        "furnace": [RecipeVariant("furnace", 1, tuple(("cobblestone",) for _ in range(8)), requires_table=True)],
+    }
+    return recipes.get(item)
+
+
+def register_fake_acquisition_leaf_tools(registry, body, *, fail_tool=None):
+    calls = []
+
+    def record(name, params):
+        calls.append((name, dict(params)))
+        if fail_tool == name:
+            return ToolResult(False, f"{name}_failed", True, metrics={"params": dict(params)})
+        if name == "collect_resource":
+            item = str(params["item"]).removeprefix("minecraft:")
+            count = int(params.get("count") or 1)
+            stored_item = "oak_log" if item == "logs" else item
+            body.inventory_counts[stored_item] = max(body.inventory_counts.get(stored_item, 0), count)
+        elif name == "craft_item":
+            item = str(params["item"]).removeprefix("minecraft:")
+            count = int(params.get("count") or 1)
+            body.inventory_counts[item] = body.inventory_counts.get(item, 0) + count
+        elif name == "smelt_item":
+            input_item = str(params["input_item"]).removeprefix("minecraft:")
+            count = int(params.get("count") or 1)
+            output = {"raw_iron": "iron_ingot", "raw_gold": "gold_ingot", "raw_copper": "copper_ingot"}.get(input_item, input_item)
+            body.inventory_counts[output] = body.inventory_counts.get(output, 0) + count
+        elif name == "equip_item":
+            pass
+        return ToolResult(True, "completed", False, metrics={"params": dict(params)})
+
+    for name, sidecar in (
+        ("collect_resource", ToolSidecar("collect_resource", mutating=False, source="agent.composition", permission="compose_collect")),
+        ("craft_item", ToolSidecar("craft_item", mutating=True, source="body.inventory", permission="craft")),
+        ("smelt_item", ToolSidecar("smelt_item", mutating=True, source="body.furnace", permission="smelt")),
+        ("equip_item", ToolSidecar("equip_item", mutating=True, source="body.inventory", permission="equip")),
+    ):
+        registry.register(RegisteredTool(name, name, {"type": "object"}, lambda params, tool_name=name: record(tool_name, params), sidecar))
+    return calls
+
+
+class AgentCompositionTests(unittest.TestCase):
+    def test_inventory_minimum_does_not_hide_unfinished_cluster_pickup(self):
+        body = FakeBody()
+        registry = ToolRegistry()
+        register_inventory_tools(registry, body)
+        domain, _calls = resource_domain_tool(body, {
+            "success": False, "reason": "cluster_pickup_not_observed", "delta": 11,
+            "metrics": {"collection_strategy": "native_resource_collection"}})
+        registry.register(domain)
+        context, _events = composition_context(body, registry)
+        result = collect_resource({"item": "oak_log", "count": 9}, context)
+        self.assertFalse(result.success)
+        self.assertEqual(result.metrics["after_count"], 11)
+        self.assertEqual(result.metrics["last_failure"]["reason"], "cluster_pickup_not_observed")
+
+    def test_read_inventory_tool_pages_to_avoid_truncated_payloads(self):
+        body = PagedInventoryBody()
+        registry = ToolRegistry()
+        register_inventory_tools(registry, body)
+        ctx, _trace_events = composition_context(body, registry)
+
+        result = execute_tool(registry.get("read_inventory"), {}, ctx.weld_context)
+
+        self.assertTrue(result["success"], result)
+        self.assertEqual(result["metrics"]["counts"]["dirt"], 7)
+        self.assertGreater(body.inventory_reads, 1)
+
+
+
+
+    def test_register_ensure_tool_for_is_leaf_led_composition_tool(self):
+        body = FakeBody()
+        registry = ToolRegistry()
+        register_inventory_tools(registry, body)
+        register_fake_acquisition_leaf_tools(registry, body)
+        ctx, _trace_events = composition_context(body, registry)
+        register_ensure_tool_for_tool(registry, ctx, acquisition_recipe_lookup)
+
+        tool = registry.get("ensure_tool_for")
+
+        self.assertFalse(tool.sidecar.mutating)
+        self.assertTrue(tool.sidecar.can_mutate_body)
+        self.assertEqual(tool.sidecar.source, "agent.composition")
+        self.assertEqual(tool.sidecar.permission, "compose_ensure")
+        self.assertEqual(tool.sidecar.terminal_truth, ("inventory", "ToolResult"))
+
+    def test_ensure_tool_for_empty_inventory_reports_missing_materials_without_gathering(self):
+        """An unavailable recipe is evidence for the Agent, not a gather command."""
+        body = FakeBody()
+        body.inventory_counts = {}
+        registry = ToolRegistry()
+        register_inventory_tools(registry, body)
+        calls = register_fake_acquisition_leaf_tools(registry, body)
+        ctx, _trace_events = composition_context(body, registry, max_candidates=64)
+
+        result = ensure_tool_for({"resource": "stone_pickaxe"}, ctx, lambda _item: None)
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "missing_materials")
+        self.assertFalse(result.can_retry)
+        self.assertEqual(result.metrics["inventory_counts"], {})
+        self.assertEqual(
+            result.metrics["missing_materials"],
+            [{"item": "stone_pickaxe", "required": 1, "available": 0, "recipe_known": False}],
+        )
+        self.assertEqual(calls, [])
+
+    def test_ensure_tool_for_says_when_the_recipe_book_hides_the_recipe(self):
+        # Villa run 2026-10-15: logs only, stone_pickaxe's recipe not yet in
+        # the book; the result read as if the pickaxe itself were the material.
+        body = FakeBody()
+        body.inventory_counts = {"oak_log": 12}
+        registry = ToolRegistry()
+        register_inventory_tools(registry, body)
+        calls = register_fake_acquisition_leaf_tools(registry, body)
+        ctx, _trace_events = composition_context(body, registry, max_candidates=64)
+
+        def lookup(_item):
+            return None
+        lookup.recipe_source = RECIPE_SOURCE_UNLOCKED_BOOK
+
+        result = ensure_tool_for({"resource": "stone_pickaxe"}, ctx, lookup)
+
+        self.assertEqual(result.reason, "missing_materials")
+        self.assertIn("recipe book does not show a recipe for stone_pickaxe", result.next_suggestion)
+        self.assertEqual(calls, [])
+
+    def test_ensure_item_executes_resolver_plan_through_leaf_tools(self):
+        body = FakeBody()
+        body.inventory_counts = {}
+        registry = ToolRegistry()
+        register_inventory_tools(registry, body)
+        calls = register_fake_acquisition_leaf_tools(registry, body)
+        ctx, _trace_events = composition_context(body, registry, max_candidates=64)
+
+        result = ensure_item({"item": "iron_pickaxe", "count": 1}, ctx, acquisition_recipe_lookup)
+
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual(result.reason, "ensured")
+        self.assertEqual(result.metrics["current_count"], 1)
+        self.assertEqual(calls[0], ("collect_resource", {"item": "logs", "count": 1, "constraints": {"auto_prerequisites": False}}))
+        self.assertIn(("smelt_item", {"input_item": "raw_iron", "count": 3}), calls)
+        self.assertEqual(calls[-1], ("craft_item", {"item": "iron_pickaxe", "count": 1, "search_radius": 64, "cleanup_existing_bot_table": True}))
+        self.assertFalse(registry.get("collect_resource").sidecar.mutating)
+        self.assertNotEqual(ctx.weld_context.authority.last_action[0], "ensure_tool_for")
+
+    def test_ensure_item_reclaims_workstation_before_moving_between_table_recipes(self):
+        body = FakeBody()
+        body.inventory_counts = {}
+        registry = ToolRegistry()
+        register_inventory_tools(registry, body)
+        calls = []
+
+        def record(name, params):
+            calls.append((name, dict(params)))
+            if name == "collect_resource":
+                item = str(params["item"]).removeprefix("minecraft:")
+                count = int(params.get("count") or 1)
+                stored_item = "spruce_log" if item == "logs" else item
+                body.inventory_counts[stored_item] = max(body.inventory_counts.get(stored_item, 0), count)
+            elif name == "craft_item":
+                item = str(params["item"]).removeprefix("minecraft:")
+                count = int(params.get("count") or 1)
+                if item == "crafting_table":
+                    body.inventory_counts[item] = body.inventory_counts.get(item, 0) + count
+                else:
+                    if params.get("keep_temporary_table"):
+                        body.inventory_counts["crafting_table"] = 0
+                    elif params.get("cleanup_existing_bot_table"):
+                        body.inventory_counts["crafting_table"] = body.inventory_counts.get("crafting_table", 0) + 1
+                    body.inventory_counts[item] = body.inventory_counts.get(item, 0) + count
+            elif name == "smelt_item":
+                body.inventory_counts["iron_ingot"] = body.inventory_counts.get("iron_ingot", 0) + int(params.get("count") or 1)
+            return ToolResult(True, "completed", False, metrics={"params": dict(params)})
+
+        for name, sidecar in (
+            ("collect_resource", ToolSidecar("collect_resource", mutating=False, source="agent.composition", permission="compose_collect")),
+            ("craft_item", ToolSidecar("craft_item", mutating=True, source="body.inventory", permission="craft")),
+            ("smelt_item", ToolSidecar("smelt_item", mutating=True, source="body.furnace", permission="smelt")),
+            ("equip_item", ToolSidecar("equip_item", mutating=True, source="body.inventory", permission="equip")),
+        ):
+            registry.register(RegisteredTool(name, name, {"type": "object"}, lambda params, tool_name=name: record(tool_name, params), sidecar))
+        ctx, _trace_events = composition_context(body, registry, max_candidates=64)
+
+        result = ensure_item({"item": "iron_pickaxe", "count": 1}, ctx, acquisition_recipe_lookup)
+
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual(calls[0], ("collect_resource", {"item": "logs", "count": 1, "constraints": {"auto_prerequisites": False}}))
+        self.assertEqual(result.metrics["plan"][0]["item"], "logs")
+        self.assertEqual(result.metrics["completed_steps"][0]["step"]["item"], "logs")
+        craft_calls = [params for tool, params in calls if tool == "craft_item"]
+        self.assertIn("spruce_planks", [str(params.get("item")) for params in craft_calls])
+        self.assertNotIn("oak_planks", [str(params.get("item")) for params in craft_calls])
+        table_recipe_calls = [params for params in craft_calls if params["item"] in {"wooden_pickaxe", "stone_pickaxe", "furnace", "iron_pickaxe"}]
+        self.assertEqual(
+            table_recipe_calls,
+            [
+                {"item": "wooden_pickaxe", "count": 1, "search_radius": 64, "cleanup_existing_bot_table": True},
+                {"item": "stone_pickaxe", "count": 1, "search_radius": 64, "cleanup_existing_bot_table": True},
+                {"item": "furnace", "count": 1, "search_radius": 64, "cleanup_existing_bot_table": True},
+                {"item": "iron_pickaxe", "count": 1, "search_radius": 64, "cleanup_existing_bot_table": True},
+            ],
+        )
+        self.assertEqual([params for params in craft_calls if params["item"] == "crafting_table"], [{"item": "crafting_table", "count": 1}])
+
+    def test_ensure_tool_for_resource_targets_required_pickaxe(self):
+        body = FakeBody()
+        body.inventory_counts = {}
+        registry = ToolRegistry()
+        register_inventory_tools(registry, body)
+        calls = register_fake_acquisition_leaf_tools(registry, body)
+        ctx, _trace_events = composition_context(body, registry, max_candidates=64)
+
+        result = ensure_tool_for({"resource": "diamond"}, ctx, acquisition_recipe_lookup)
+
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual(result.metrics["item"], "iron_pickaxe")
+        self.assertEqual(calls[-1], ("equip_item", {"item": "iron_pickaxe", "target": "mainhand"}))
+        self.assertEqual(result.metrics["completed_steps"][-1]["step"]["kind"], "equip")
+
+    def test_ensure_tool_for_equips_an_owned_pickaxe_without_recrafting(self):
+        body = FakeBody()
+        body.inventory_counts = {"stone_pickaxe": 1}
+        registry = ToolRegistry()
+        register_inventory_tools(registry, body)
+        calls = register_fake_acquisition_leaf_tools(registry, body)
+        ctx, _trace_events = composition_context(body, registry, max_candidates=64)
+
+        result = ensure_tool_for({"resource": "stone_pickaxe"}, ctx, acquisition_recipe_lookup)
+
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual(calls, [("equip_item", {"item": "stone_pickaxe", "target": "mainhand"})])
+        self.assertEqual([step["step"]["kind"] for step in result.metrics["completed_steps"]], ["equip"])
+
+    def test_ensure_item_failure_reports_failed_step_and_plan(self):
+        body = FakeBody()
+        body.inventory_counts = {}
+        registry = ToolRegistry()
+        register_inventory_tools(registry, body)
+        register_fake_acquisition_leaf_tools(registry, body, fail_tool="smelt_item")
+        ctx, _trace_events = composition_context(body, registry, max_candidates=64)
+
+        result = ensure_item({"item": "iron_pickaxe", "count": 1}, ctx, acquisition_recipe_lookup)
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "ensure_step_failed:smelt_item_failed")
+        self.assertEqual(result.metrics["resume_hint"], "reinvoke_ensure")
+        self.assertGreater(len(result.metrics["plan"]), 1)
+        self.assertEqual(result.metrics["failed_step"]["step"]["kind"], "smelt")
+
+    def test_ensure_item_retries_smelt_once_after_bounded_surface_recovery(self):
+        body = FakeBody()
+        body.inventory_counts = {
+            "crafting_table": 1,
+            "furnace": 1,
+            "oak_planks": 2,
+            "raw_iron": 3,
+            "stick": 2,
+        }
+        registry = ToolRegistry()
+        register_inventory_tools(registry, body)
+        calls = []
+        smelt_attempts = 0
+
+        def record(name, params):
+            nonlocal smelt_attempts
+            calls.append((name, dict(params)))
+            if name == "smelt_item":
+                smelt_attempts += 1
+                if smelt_attempts == 1:
+                    return ToolResult(False, "temporary_furnace_no_supported_site", True)
+                body.inventory_counts["iron_ingot"] = 3
+            elif name == "craft_item":
+                body.inventory_counts[str(params["item"])] = int(params.get("count") or 1)
+            return ToolResult(True, "completed", False)
+
+        for name, sidecar in (
+            ("smelt_item", ToolSidecar("smelt_item", mutating=True, source="body.furnace", permission="smelt")),
+            ("go_to_surface", ToolSidecar("go_to_surface", mutating=True, source="java_body", permission="move")),
+            ("craft_item", ToolSidecar("craft_item", mutating=True, source="body.inventory", permission="craft")),
+            ("equip_item", ToolSidecar("equip_item", mutating=True, source="body.inventory", permission="equip")),
+        ):
+            registry.register(
+                RegisteredTool(
+                    name,
+                    name,
+                    {"type": "object"},
+                    lambda params, tool_name=name: record(tool_name, params),
+                    sidecar,
+                )
+            )
+        ctx, _trace_events = composition_context(body, registry, max_candidates=64)
+
+        result = ensure_item({"item": "iron_pickaxe", "count": 1}, ctx, acquisition_recipe_lookup)
+
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual(smelt_attempts, 2)
+        self.assertEqual(
+            [name for name, _params in calls[:3]],
+            ["smelt_item", "go_to_surface", "smelt_item"],
+        )
+        recovery = result.metrics["completed_steps"][0]["result"]["metrics"]["workspace_recovery"]
+        self.assertTrue(recovery["success"])
+
+    def test_ensure_tool_failure_preserves_safe_forward_position(self):
+        body = FakeBody()
+        body.inventory_counts = {}
+        position = [10.5, 79.0, 4.5]
+        calls = []
+        registry = ToolRegistry()
+        register_inventory_tools(registry, body)
+
+        def read_state(_params):
+            return ToolResult(
+                True,
+                "state_read",
+                False,
+                metrics={"pos": list(position), "dimension": "overworld"},
+            )
+
+        def collect(_params):
+            position[:] = [-2.5, 62.0, 9.5]
+            return ToolResult(False, "candidate_domain_unreachable:no_path", True)
+
+        def move(params):
+            calls.append(dict(params))
+            position[:] = [10.5, 79.0, 4.5]
+            return ToolResult(True, "arrived", False, metrics={"final_pos": list(position)})
+
+        registry.register(RegisteredTool(
+            "read_state",
+            "state",
+            {"type": "object"},
+            read_state,
+            ToolSidecar("read_state", mutating=False, source="body.perception", permission="read_state"),
+        ))
+        registry.register(RegisteredTool(
+            "collect_resource",
+            "collect",
+            {"type": "object"},
+            collect,
+            ToolSidecar("collect_resource", mutating=False, source="agent.composition", permission="compose_collect", body_mutating=True),
+        ))
+        registry.register(RegisteredTool(
+            "move_to",
+            "move",
+            {"type": "object"},
+            move,
+            ToolSidecar("move_to", mutating=True, source="java_body", permission="move"),
+        ))
+        ctx, _trace_events = composition_context(body, registry, max_candidates=64)
+
+        result = ensure_tool_for({"resource": "stone_pickaxe"}, ctx, acquisition_recipe_lookup)
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "ensure_step_failed:candidate_domain_unreachable:no_path")
+        self.assertEqual(calls, [])
+        self.assertEqual(position, [-2.5, 62.0, 9.5])
+        self.assertNotIn("retreat", result.metrics)
+
+    def test_composition_tool_result_trace_summarizes_leaf_result_metrics(self):
+        body = FakeBody()
+        body.inventory_counts = {
+            "cobblestone": 8,
+            "crafting_table": 1,
+            "oak_planks": 2,
+            "raw_iron": 3,
+            "stick": 2,
+            "stone_pickaxe": 1,
+            "wooden_pickaxe": 1,
+        }
+        registry = ToolRegistry()
+        register_inventory_tools(registry, body)
+        calls = []
+
+        def record(name, params):
+            calls.append((name, dict(params)))
+            if name == "smelt_item":
+                body.inventory_counts["iron_ingot"] = 3
+                return ToolResult(
+                    True,
+                    "completed",
+                    False,
+                    metrics={
+                        "input_item": "raw_iron",
+                        "count": 3,
+                        "temporary_furnace_site": [2, 70, 0],
+                        "nearest_furnace_result": ToolResult(
+                            False,
+                            "furnace_no_stand_point",
+                            True,
+                            metrics={"furnace_pos": [1, 70, 0]},
+                        ).to_payload(),
+                    },
+                )
+            if name == "craft_item":
+                body.inventory_counts[str(params["item"])] = int(params.get("count") or 1)
+            return ToolResult(True, "completed", False, metrics={"params": dict(params)})
+
+        for name, sidecar in (
+            ("collect_resource", ToolSidecar("collect_resource", mutating=False, source="agent.composition", permission="compose_collect")),
+            ("craft_item", ToolSidecar("craft_item", mutating=True, source="body.inventory", permission="craft")),
+            ("smelt_item", ToolSidecar("smelt_item", mutating=True, source="body.furnace", permission="smelt")),
+            ("equip_item", ToolSidecar("equip_item", mutating=True, source="body.inventory", permission="equip")),
+        ):
+            registry.register(RegisteredTool(name, name, {"type": "object"}, lambda params, tool_name=name: record(tool_name, params), sidecar))
+        ctx, trace_events = composition_context(body, registry, max_candidates=64)
+
+        result = ensure_item({"item": "iron_pickaxe", "count": 1}, ctx, acquisition_recipe_lookup)
+
+        self.assertTrue(result.success, result.to_payload())
+        smelt_results = [
+            event
+            for event in trace_events
+            if event["event"] == "composition_tool_result" and event["tool"] == "smelt_item"
+        ]
+        self.assertEqual(len(smelt_results), 1)
+        self.assertTrue(smelt_results[0]["success"])
+        self.assertEqual(smelt_results[0]["reason"], "completed")
+        metrics = smelt_results[0]["summary"]["metrics"]
+        self.assertEqual(metrics["input_item"], "raw_iron")
+        self.assertEqual(metrics["count"], 3)
+        self.assertEqual(metrics["temporary_furnace_site"], [2, 70, 0])
+        self.assertEqual(metrics["nearest_furnace_result"]["reason"], "furnace_no_stand_point")
+        self.assertEqual(metrics["nearest_furnace_result"]["metrics"]["furnace_pos"], [1, 70, 0])
+
+    def test_ensure_item_requires_inventory_delta_before_completing_collect_step(self):
+        body = FakeBody()
+        body.inventory_counts = {}
+        registry = ToolRegistry()
+        register_inventory_tools(registry, body)
+        calls = []
+
+        def record(name, params):
+            calls.append((name, dict(params)))
+            if name == "collect_resource":
+                body.inventory_counts["oak_log"] = 0
+                return ToolResult(
+                    True,
+                    "partial_candidate_targets_exhausted",
+                    True,
+                    metrics={
+                        "item": "oak_log",
+                        "target_count": 1,
+                        "after_count": 0,
+                        "remaining_count": 1,
+                        "resume_hint": "reselect_candidates",
+                    },
+                )
+            return ToolResult(True, "completed", False, metrics={"params": dict(params)})
+
+        for name, sidecar in (
+            ("collect_resource", ToolSidecar("collect_resource", mutating=False, source="agent.composition", permission="compose_collect")),
+            ("craft_item", ToolSidecar("craft_item", mutating=True, source="body.inventory", permission="craft")),
+            ("smelt_item", ToolSidecar("smelt_item", mutating=True, source="body.furnace", permission="smelt")),
+            ("equip_item", ToolSidecar("equip_item", mutating=True, source="body.inventory", permission="equip")),
+        ):
+            registry.register(RegisteredTool(name, name, {"type": "object"}, lambda params, tool_name=name: record(tool_name, params), sidecar))
+        ctx, _trace_events = composition_context(body, registry, max_candidates=64)
+
+        result = ensure_item({"item": "iron_pickaxe", "count": 1}, ctx, acquisition_recipe_lookup)
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "ensure_step_incomplete")
+        self.assertTrue(result.can_retry)
+        self.assertEqual(result.metrics["resume_hint"], "reinvoke_ensure")
+        self.assertEqual(result.metrics["failed_step"]["step"]["kind"], "collect")
+        self.assertEqual(result.metrics["failed_step"]["current_count"], 0)
+        self.assertEqual(result.metrics["failed_step"]["remaining_count"], 1)
+        self.assertEqual(calls, [("collect_resource", {"item": "logs", "count": 1, "constraints": {"auto_prerequisites": False}})])
+
+    def test_ensure_item_requires_step_delta_not_total_count_after_resume(self):
+        body = FakeBody()
+        body.inventory_counts = {
+            "cobblestone": 5,
+            "crafting_table": 1,
+            "oak_planks": 5,
+            "raw_iron": 3,
+            "stick": 4,
+            "stone_pickaxe": 1,
+            "wooden_pickaxe": 1,
+        }
+        registry = ToolRegistry()
+        register_inventory_tools(registry, body)
+        calls = []
+
+        def record(name, params):
+            calls.append((name, dict(params)))
+            if name == "collect_resource":
+                body.inventory_counts["cobblestone"] += 2
+                return ToolResult(
+                    True,
+                    "collected",
+                    False,
+                    metrics={"item": "cobblestone", "target_count": 3, "collected_delta": 2},
+                )
+            if name == "smelt_item":
+                body.inventory_counts["iron_ingot"] = int(body.inventory_counts.get("iron_ingot", 0)) + int(
+                    params.get("count") or 1
+                )
+            if name == "craft_item":
+                body.inventory_counts[str(params["item"])] = max(
+                    int(body.inventory_counts.get(str(params["item"]), 0)),
+                    int(params.get("count") or 1),
+                )
+            return ToolResult(True, "completed", False, metrics={"params": dict(params)})
+
+        for name, sidecar in (
+            ("collect_resource", ToolSidecar("collect_resource", mutating=False, source="agent.composition", permission="compose_collect")),
+            ("craft_item", ToolSidecar("craft_item", mutating=True, source="body.inventory", permission="craft")),
+            ("smelt_item", ToolSidecar("smelt_item", mutating=True, source="body.furnace", permission="smelt")),
+            ("equip_item", ToolSidecar("equip_item", mutating=True, source="body.inventory", permission="equip")),
+        ):
+            registry.register(RegisteredTool(name, name, {"type": "object"}, lambda params, tool_name=name: record(tool_name, params), sidecar))
+        ctx, _trace_events = composition_context(body, registry, max_candidates=64)
+
+        result = ensure_item({"item": "iron_pickaxe", "count": 1}, ctx, acquisition_recipe_lookup)
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "ensure_step_incomplete")
+        self.assertEqual(result.metrics["failed_step"]["step"]["item"], "cobblestone")
+        self.assertEqual(result.metrics["failed_step"]["before_count"], 5)
+        self.assertEqual(result.metrics["failed_step"]["current_count"], 7)
+        self.assertEqual(result.metrics["failed_step"]["required_count"], 8)
+        self.assertEqual(result.metrics["failed_step"]["remaining_count"], 1)
+        self.assertEqual(calls, [("collect_resource", {"item": "cobblestone", "count": 8, "constraints": {"auto_prerequisites": False}})])
+
+    def test_mutating_leaf_owner_busy_is_honest_retryable_failure(self):
+        body = FakeBody()
+        registry = ToolRegistry()
+        miner, _mine_calls = mine_tool(body)
+        registry.register(miner)
+        ctx, _trace_events = composition_context(body, registry)
+        self.assertTrue(ctx.weld_context.writer.try_acquire("other_mutation"))
+
+        result = execute_tool(
+            registry.get("mine_block_collect"),
+            {"pos": [1, 59, 0], "expected_drops": ["dirt"]},
+            ctx.weld_context,
+        )
+
+        self.assertFalse(result["success"])
+        self.assertEqual(result["reason"], "owner_busy")
+        self.assertTrue(result["canRetry"])
+        self.assertEqual(result["metrics"]["holder"], "other_mutation")
+        ctx.weld_context.writer.release("other_mutation")
+
+    def test_weld_observes_authoritative_state_immediately_after_mutating_leaf(self):
+        body = FakeBody()
+        observed = []
+        weld = WeldContext(
+            body=body,
+            authority=ProgressAuthority(),
+            goal_text="collect 1 dirt",
+            body_state_observer=lambda current, source: observed.append((current, source)),
+        )
+        miner, _calls = mine_tool(body)
+
+        result = execute_tool(
+            miner,
+            {"pos": [1, 59, 0], "expected_drops": ["dirt"]},
+            weld,
+        )
+
+        self.assertTrue(result["success"])
+        self.assertEqual(len(observed), 1)
+        self.assertEqual(observed[0][1], "mutation:mine_block_collect")
+        self.assertIn("'dirt': 1", observed[0][0].inventory_hash)
+
+
+
+
+
+
+    def test_weld_treats_candidate_skip_as_neutral_not_failure(self):
+        # A mutating tool returning a candidate-skip reason must NOT accrue the
+        # failure-storm counter, even repeated past the limit.
+        body = FakeBody()
+        authority = ProgressAuthority()
+        weld = WeldContext(body=body, authority=authority, goal_text="collect 1 dirt")
+        miner, _ = mine_tool(body, fail_reason="break_denied:protected_region")
+
+        for _ in range(FAILURES + 2):
+            payload = execute_tool(miner, {"pos": [1, 59, 0]}, weld)
+            self.assertFalse(payload["success"])
+
+        self.assertEqual(authority.failure_steps, 0)
+
+    def test_weld_treats_governance_confirmation_as_neutral_not_failure(self):
+        body = FakeBody()
+        authority = ProgressAuthority()
+        weld = WeldContext(body=body, authority=authority, goal_text="collect 1 dirt")
+        miner, _ = mine_tool(body, fail_reason="governance_confirmation_required")
+
+        for _ in range(FAILURES + 2):
+            payload = execute_tool(miner, {"pos": [1, 59, 0]}, weld)
+            self.assertFalse(payload["success"])
+
+        self.assertEqual(authority.failure_steps, 0)
+
+    def test_weld_treats_partial_inventory_progress_as_neutral_not_failure(self):
+        body = FakeBody()
+        authority = ProgressAuthority()
+        weld = WeldContext(body=body, authority=authority, goal_text="collect 7 raw iron")
+        tool = RegisteredTool(
+            "collect_block_domain",
+            "collect",
+            {"type": "object"},
+            lambda _params: ToolResult(
+                False,
+                "partial",
+                True,
+                metrics={"collected_delta": 2, "remaining_count": 5},
+            ),
+            ToolSidecar("collect_block_domain", mutating=True, permission="collect"),
+        )
+
+        for _ in range(FAILURES + 2):
+            payload = execute_tool(tool, {}, weld)
+            self.assertFalse(payload["success"])
+
+        self.assertEqual(authority.failure_steps, 0)
+
+    def test_weld_does_not_treat_reads_as_physical_stagnation(self):
+        body = FakeBody()
+        body.get_state = lambda: state("stable")
+        authority = ProgressAuthority()
+        weld = WeldContext(body=body, authority=authority, goal_text="collect 64 logs")
+
+        def callable_(_params):
+            return ToolResult(True, "inventory_counted", False, metrics={"counts": {}})
+
+        tool = RegisteredTool(
+            "read_inventory",
+            "read",
+            {"type": "object"},
+            callable_,
+            ToolSidecar("read_inventory", mutating=False, source="body.perception", permission="read_state"),
+        )
+
+        for _ in range(10):
+            self.assertEqual(execute_tool(tool, {}, weld)["reason"], "inventory_counted")
+
+        self.assertEqual((authority.stagnant_steps, authority.stalled_steps, authority.failure_steps), (0, 0, 0))
+
+
+    def test_weld_does_not_count_outer_agent_composition_observation(self):
+        # collect_resource is mutating=False by design because its leaf Body
+        # calls own progress accounting. The outer composition wrapper must not
+        # become a second progress engine.
+        body = FakeBody()
+        body.get_state = lambda: state("stable")
+        authority = ProgressAuthority()
+        weld = WeldContext(body=body, authority=authority, goal_text="collect 64 logs")
+
+        def callable_(_params):
+            return ToolResult(False, "candidate_targets_exhausted", True)
+
+        tool = RegisteredTool(
+            "collect_resource",
+            "collect",
+            {"type": "object"},
+            callable_,
+            ToolSidecar("collect_resource", mutating=False, source="agent.composition", permission="compose_collect"),
+        )
+
+        for _ in range(10):
+            execute_tool(tool, {"item": "logs", "count": 64}, weld)
+
+        self.assertEqual(authority.stagnant_steps, 0)
+        self.assertEqual(authority.stalled_steps, 0)
+        self.assertEqual(authority.failure_steps, 0)
+
+    def test_weld_counts_genuine_failures_without_hiding_their_receipts(self):
+        body = FakeBody()
+        authority = ProgressAuthority()
+        weld = WeldContext(body=body, authority=authority, goal_text="g")
+        miner, _ = mine_tool(body, fail_reason="mine_failed:real_error")
+
+        for _ in range(FAILURES - 1):
+            execute_tool(miner, {"pos": [1, 59, 0]}, weld)
+        self.assertEqual(authority.failure_steps, FAILURES - 1)
+
+        result = execute_tool(miner, {"pos": [1, 59, 0]}, weld)
+        self.assertEqual(result["reason"], "mine_failed:real_error")
+        self.assertEqual(authority.failure_steps, FAILURES)
+
+    def test_weld_returns_legacy_inner_yield_receipt_unchanged(self):
+        body = FakeBody()
+        authority = ProgressAuthority()
+        authority.note_step(
+            ("navigate.segment", (0, 59, 0), (64, 64, 64), "stuck"),
+            success=False,
+            fingerprint=authority.fingerprint(body.get_state()),
+        )
+        weld = WeldContext(body=body, authority=authority, goal_text="collect 64 logs")
+
+        def callable_(_params):
+            return ToolResult(False, "progress_yielded", True, metrics={"error": "inner yield"})
+
+        tool = RegisteredTool(
+            "move_to",
+            "move",
+            {"type": "object"},
+            callable_,
+            ToolSidecar("move_to", mutating=True, permission="move"),
+        )
+
+        self.assertEqual(execute_tool(tool, {"pos": [64, 64, 64]}, weld), callable_({}).to_payload())
+
+
+    def test_resource_plan_maps_stone_cobblestone_and_raw_gold_aliases(self):
+        stone = resource_plan_for("stone")
+        self.assertEqual(stone.inventory_item, "cobblestone")
+        self.assertEqual(stone.inventory_items, ("cobblestone",))
+        self.assertEqual(stone.expected_drops, ("cobblestone",))
+        self.assertEqual(stone.block_types, ("stone", "cobblestone"))
+
+        cobblestone = resource_plan_for("cobblestone")
+        self.assertEqual(cobblestone.inventory_item, "cobblestone")
+        self.assertEqual(cobblestone.block_types, ("stone", "cobblestone"))
+
+        raw_gold = resource_plan_for("raw_gold")
+        self.assertEqual(raw_gold.inventory_item, "raw_gold")
+        self.assertEqual(raw_gold.expected_drops, ("raw_gold",))
+        self.assertEqual(raw_gold.block_types, ("gold_ore", "deepslate_gold_ore"))
+
+    def test_wheat_seeds_are_collected_from_grass_which_may_be_broken(self):
+        # life-stage b2: "wheat_seeds" went to the Body as a block name, and
+        # grass tufts were not breakable, so no seeds could ever be had.
+        from minebot.game.governance import COLLECT_TARGETS, NATURAL_BREAKABLE
+
+        for name in ("wheat_seeds", "seeds"):
+            plan = resource_plan_for(name)
+            self.assertEqual(plan.inventory_item, "wheat_seeds")
+            self.assertEqual(plan.block_types, ("short_grass", "tall_grass"))
+            self.assertEqual(plan.expected_drops, ("wheat_seeds",))
+        self.assertTrue({"short_grass", "tall_grass"} <= NATURAL_BREAKABLE & COLLECT_TARGETS)
+
+    def test_resource_plan_keeps_exact_flower_items_as_collectable_domains(self):
+        for flower in ("dandelion", "poppy", "blue_orchid"):
+            with self.subTest(flower=flower):
+                plan = resource_plan_for(flower)
+                self.assertEqual(plan.inventory_item, flower)
+                self.assertEqual(plan.inventory_items, (flower,))
+                self.assertEqual(plan.block_types, (flower,))
+                self.assertEqual(plan.expected_drops, (flower,))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    def test_collect_resource_delegates_one_physical_domain_through_weld(self):
+        body = FakeBody()
+        registry = ToolRegistry()
+        register_inventory_tools(registry, body)
+        domain, calls = resource_domain_tool(body)
+        registry.register(domain)
+        ctx, trace_events = composition_context(body, registry)
+        register_collect_resource_tool(registry, ctx)
+
+        result = execute_tool(
+            registry.get("collect_resource"),
+            {"item": "minecraft:dirt", "count": 2, "constraints": {"max_candidates": 3}},
+            ctx.weld_context,
+        )
+
+        self.assertTrue(result["success"], result)
+        self.assertEqual(result["reason"], "collected")
+        self.assertEqual(result["metrics"]["after_count"], 2)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["block_types"], ["dirt", "grass_block", "coarse_dirt", "rooted_dirt"])
+        self.assertEqual(calls[0]["expected_drops"], ["dirt"])
+        self.assertEqual(calls[0]["remaining_count"], 2)
+        self.assertFalse(registry.get("collect_resource").sidecar.mutating)
+        self.assertTrue(registry.get("collect_resource").sidecar.can_mutate_body)
+        self.assertIsNone(ctx.weld_context.writer.holder)
+        invoke = next(
+            event
+            for event in trace_events
+            if event["event"] == "tool_invoke" and event["tool"] == "collect_block_domain"
+        )
+        self.assertEqual(invoke["args_hash"], canonical_args_hash(calls[0]))
+        self.assertEqual(invoke["tactic_signature"], tool_tactic_signature("collect_block_domain", calls[0]))
+
+    def test_collect_resource_preserves_governance_confirmation_from_body_domain(self):
+        body = FakeBody()
+        registry = ToolRegistry()
+        register_inventory_tools(registry, body)
+        confirmation = {
+            "challenge_id": "gc-collect-1",
+            "context": "collect",
+            "block_types": ["dirt"],
+            "region": {"min": [-8, 55, -8], "max": [8, 63, 8]},
+            "max_unique_blocks": 12,
+        }
+        domain, _calls = resource_domain_tool(
+            body,
+            {
+                "success": False,
+                "reason": "governance_confirmation_required",
+                "can_retry": True,
+                "metrics": {"governance_confirmation": confirmation},
+            },
+        )
+        registry.register(domain)
+        ctx, _trace_events = composition_context(body, registry)
+
+        result = collect_resource({"item": "dirt", "count": 1}, ctx)
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "governance_confirmation_required")
+        self.assertEqual(result.metrics["governance_confirmation"], confirmation)
+
+    def test_ensure_tool_preserves_governance_confirmation_from_nested_collect(self):
+        body = FakeBody()
+        body.inventory_counts = {}
+        registry = ToolRegistry()
+        register_inventory_tools(registry, body)
+        confirmation = {
+            "challenge_id": "gc-ensure-1",
+            "context": "collect",
+            "block_types": ["oak_log"],
+            "region": {"min": [-8, 55, -8], "max": [8, 63, 8]},
+            "max_unique_blocks": 12,
+        }
+        registry.register(RegisteredTool(
+            "collect_resource",
+            "collect",
+            {"type": "object"},
+            lambda _params: ToolResult(
+                False,
+                "governance_confirmation_required",
+                True,
+                metrics={"governance_confirmation": confirmation},
+            ),
+            ToolSidecar(
+                "collect_resource",
+                mutating=False,
+                source="agent.composition",
+                permission="compose_collect",
+                body_mutating=True,
+            ),
+        ))
+        ctx, _trace_events = composition_context(body, registry, max_candidates=64)
+
+        result = ensure_tool_for({"resource": "stone_pickaxe"}, ctx, acquisition_recipe_lookup)
+
+        self.assertFalse(result.success)
+        self.assertEqual(
+            result.reason,
+            "ensure_step_failed:governance_confirmation_required",
+        )
+        self.assertEqual(result.metrics["governance_confirmation"], confirmation)
+
+    def test_collection_and_tool_acquisition_expose_result_projectors(self):
+        body = FakeBody()
+        registry = ToolRegistry()
+        register_inventory_tools(registry, body)
+        ctx, _trace_events = composition_context(body, registry)
+        register_collect_resource_tool(registry, ctx)
+
+        tool = registry.get("collect_resource")
+
+        self.assertIsNotNone(tool.projector)
+
+        register_ensure_tool_for_tool(registry, ctx, acquisition_recipe_lookup)
+        ensure = registry.get("ensure_tool_for")
+        self.assertIsNotNone(ensure.projector)
+        ensure_summary = ensure.projector(
+            "ensure_step_failed:new_physics_failure",
+            {
+                "item": "iron_pickaxe",
+                "target_count": 1,
+                "remaining_count": 1,
+                "resume_hint": "replan",
+                "plan": [{"kind": "collect"}, {"kind": "craft"}],
+                "completed_steps": [{"kind": "collect"}],
+                "failed_step": {"phase": "collect", "reason": "new_physics_failure"},
+            },
+        )
+        self.assertEqual(ensure_summary["plan_step_count"], 2)
+        self.assertEqual(ensure_summary["completed_step_count"], 1)
+        self.assertEqual(ensure_summary["failed_step"]["reason"], "new_physics_failure")
+        self.assertNotIn("Body owns discovery", tool.description)
+        self.assertIn("item='logs'", tool.description)
+        self.assertIn("exact species", tool.description)
+        self.assertIn("logs", tool.input_schema["properties"]["item"]["description"])
+        self.assertIn("inventory total", tool.input_schema["properties"]["count"]["description"])
+        self.assertEqual(set(tool.input_schema["properties"]), {"item", "count", "avoid", "retry_unreachable"})
+        self.assertNotIn("constraints", tool.input_schema["properties"])
+        self.assertEqual(tool.framework_view()["description"], tool.description)
+
+    def test_resource_plan_log_family_matches_exploration_yardstick_family(self):
+        logs = resource_plan_for("logs")
+
+        self.assertIn("mangrove_log", logs.block_types)
+        self.assertIn("cherry_log", logs.block_types)
+        self.assertIn("pale_oak_log", logs.block_types)
+        self.assertIn("crimson_stem", logs.block_types)
+        self.assertIn("warped_stem", logs.block_types)
+        self.assertEqual(logs.block_types, logs.expected_drops)
+
+    def test_collect_resource_passes_bounded_domain_budgets(self):
+        body = FakeBody()
+        registry = ToolRegistry()
+        register_inventory_tools(registry, body)
+        domain, calls = resource_domain_tool(body)
+        registry.register(domain)
+        ctx, _trace_events = composition_context(body, registry, max_candidates=96)
+
+        result = collect_resource({"item": "logs", "count": 11}, ctx)
+
+        self.assertTrue(result.success, result)
+        self.assertEqual(calls[0]["find_limit"], 12)
+        self.assertEqual(calls[0]["max_pages"], 8)
+        self.assertEqual(calls[0]["candidate_budget"], 96)
+        self.assertEqual(calls[0]["mutation_budget"], 96)
+        self.assertEqual(calls[0]["search_radius"], 48)
+
+    def test_collect_resource_returns_not_found_as_honest_retryable_failure(self):
+        body = FakeBody()
+        registry = ToolRegistry()
+        register_inventory_tools(registry, body)
+        domain, _calls = resource_domain_tool(
+            body,
+            {"success": False, "reason": "resource_candidates_not_found", "can_retry": True},
+        )
+        registry.register(domain)
+        ctx, _trace_events = composition_context(body, registry)
+
+        result = collect_resource({"item": "dirt", "count": 1}, ctx)
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "target_not_found")
+        self.assertTrue(result.can_retry)
+        self.assertEqual(result.metrics["after_count"], 0)
+        self.assertEqual(result.metrics["resume_hint"], "reselect_candidates")
+
+    def test_collect_resource_returns_output_window_with_partial_inventory_evidence(self):
+        body = FakeBody()
+        registry = ToolRegistry()
+        register_inventory_tools(registry, body)
+        domain, _calls = resource_domain_tool(
+            body,
+            {
+                "success": False,
+                "reason": "resource_output_window_exhausted",
+                "can_retry": True,
+                "delta": 1,
+                "metrics": {
+                    "remaining_delta": 1,
+                    "budget": {"max_no_output_s": 300.0},
+                },
+            },
+        )
+        registry.register(domain)
+        ctx, _trace_events = composition_context(body, registry)
+
+        result = collect_resource({"item": "dirt", "count": 2}, ctx)
+        summary = collect_resource_observation_projector(result.reason, result.metrics or {})
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "resource_output_window_exhausted")
+        self.assertTrue(result.can_retry)
+        self.assertEqual(result.metrics["after_count"], 1)
+        self.assertEqual(result.metrics["remaining_count"], 1)
+        self.assertEqual(result.metrics["resume_hint"], "reconsider_or_resume_collect")
+        self.assertEqual(summary["remaining_count"], 1)
+        self.assertEqual(summary["resource_budget"]["max_no_output_s"], 300.0)
+
+    def test_collect_resource_surfaces_unknown_terminal_once_without_deterministic_retry(self):
+        body = FakeBody()
+        registry = ToolRegistry()
+        register_inventory_tools(registry, body)
+        domain, calls = resource_domain_tool(
+            body,
+            {
+                "success": False,
+                "reason": "new_physics_failure",
+                "can_retry": True,
+                "metrics": {"last_failure": {"reason": "new_physics_failure"}},
+            },
+        )
+        registry.register(domain)
+        ctx, _trace_events = composition_context(body, registry)
+
+        result = collect_resource({"item": "dirt", "count": 1}, ctx)
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "new_physics_failure")
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(result.metrics["resume_hint"], "body_terminal")
+        self.assertEqual(
+            result.metrics["last_failure"]["result"]["metrics"]["last_failure"]["reason"],
+            "new_physics_failure",
+        )
+
+    def test_collect_resource_preserves_nested_body_suggestion(self):
+        body = FakeBody()
+        registry = ToolRegistry()
+        register_inventory_tools(registry, body)
+        domain, _calls = resource_domain_tool(
+            body,
+            {
+                "success": False,
+                "reason": "resource_candidates_not_found",
+                "can_retry": True,
+                "metrics": {
+                    "last_failure": {
+                        "success": False,
+                        "reason": "resource_candidates_not_found",
+                        "canRetry": True,
+                        "nextSuggestion": "move closer or expand the search radius before retrying",
+                    }
+                },
+            },
+        )
+        registry.register(domain)
+        ctx, _trace_events = composition_context(body, registry)
+
+        result = collect_resource({"item": "logs", "count": 1}, ctx)
+
+        self.assertFalse(result.success)
+        self.assertEqual(
+            result.next_suggestion,
+            "move closer or expand the search radius before retrying",
+        )
+
+    def test_collect_resource_keeps_body_candidate_exhaustion_truth(self):
+        body = FakeBody()
+        registry = ToolRegistry()
+        register_inventory_tools(registry, body)
+        domain, _calls = resource_domain_tool(
+            body,
+            {
+                "success": False,
+                "reason": "resource_candidate_domain_exhausted",
+                "can_retry": True,
+                "candidate_blacklist": [[1, 59, 0]],
+            },
+        )
+        registry.register(domain)
+        ctx, _trace_events = composition_context(body, registry)
+
+        result = collect_resource({"item": "dirt", "count": 1}, ctx)
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "candidate_targets_exhausted")
+        self.assertEqual(result.metrics["skipped"], [
+            {"pos": [1, 59, 0], "reason": "body_candidate_blacklist", "skip": True}
+        ])
+        self.assertEqual(
+            result.metrics["last_failure"]["result"]["metrics"]["candidate_blacklist"],
+            [[1, 59, 0]],
+        )
+
+    def test_collect_resource_surfaces_missing_required_tool(self):
+        body = FakeBody()
+        registry = ToolRegistry()
+        register_inventory_tools(registry, body)
+        domain, calls = resource_domain_tool(
+            body,
+            {
+                "success": False,
+                "reason": "missing_required_tool",
+                "can_retry": False,
+                "metrics": {"required_tier": "iron", "best_owned": {"item": "stone_pickaxe", "tier": "stone"}},
+            },
+        )
+        registry.register(domain)
+        ctx, trace_events = composition_context(body, registry, max_candidates=2)
+
+        result = collect_resource(
+            {"item": "diamond", "count": 1, "constraints": {"auto_prerequisites": False}},
+            ctx,
+        )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.reason, "missing_required_tool")
+        self.assertFalse(result.can_retry)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(result.metrics["last_failure"]["result"]["metrics"]["required_tier"], "iron")
+        self.assertEqual(
+            [event for event in trace_events if event["event"] == "composition_summary"][-1]["reason"],
+            "missing_required_tool",
+        )
+
+    def test_collect_resource_auto_prerequisites_finish_before_body_domain(self):
+        body = FakeBody()
+        body.inventory_counts = {}
+        registry = ToolRegistry()
+        register_inventory_tools(registry, body)
+        register_fake_acquisition_leaf_tools(registry, body)
+        domain, calls = resource_domain_tool(body)
+        registry.register(domain)
+        ctx, _trace_events = composition_context(body, registry, max_candidates=64)
+
+        result = collect_resource({"item": "diamond", "count": 1}, ctx)
+
+        self.assertTrue(result.success, result.to_payload())
+        self.assertEqual(body.inventory_counts["iron_pickaxe"], 1)
+        self.assertEqual(calls[0]["block_types"], ["diamond_ore", "deepslate_diamond_ore"])
+        self.assertEqual(calls[0]["expected_drops"], ["diamond"])
+
+    def test_collect_resource_maps_resource_objective_before_body_domain(self):
+        body = FakeBody()
+        registry = ToolRegistry()
+        register_inventory_tools(registry, body)
+        domain, calls = resource_domain_tool(body)
+        registry.register(domain)
+        ctx, _trace_events = composition_context(body, registry)
+
+        result = collect_resource(
+            {"item": "iron", "count": 1, "constraints": {"max_candidates": 1, "auto_prerequisites": False}},
+            ctx,
+        )
+
+        self.assertTrue(result.success, result)
+        self.assertEqual(calls[0]["block_types"], ["iron_ore", "deepslate_iron_ore"])
+        self.assertEqual(calls[0]["expected_drops"], ["raw_iron"])
+        self.assertEqual(result.metrics["requested_item"], "iron")
+        self.assertEqual(result.metrics["item"], "raw_iron")
+
+    def test_resource_plan_maps_surface_and_mined_aliases(self):
+        dirt = resource_plan_for("dirt")
+        self.assertEqual(dirt.inventory_items, ("dirt",))
+        self.assertEqual(dirt.expected_drops, ("dirt",))
+        self.assertIn("grass_block", dirt.block_types)
+
+        stone = resource_plan_for("stone")
+        self.assertEqual(stone.inventory_item, "cobblestone")
+        self.assertEqual(stone.block_types, ("stone", "cobblestone"))
+
+        raw_gold = resource_plan_for("raw_gold")
+        self.assertEqual(raw_gold.block_types, ("gold_ore", "deepslate_gold_ore"))
+
+    def test_collect_resource_caps_radius_and_uses_bounded_pages(self):
+        body = FakeBody()
+        registry = ToolRegistry()
+        register_inventory_tools(registry, body)
+        domain, calls = resource_domain_tool(body)
+        registry.register(domain)
+        ctx, _trace_events = composition_context(body, registry, max_candidates=24)
+
+        result = collect_resource({"item": "logs", "count": 1, "constraints": {"radius": 96}}, ctx)
+
+        self.assertTrue(result.success, result)
+        self.assertEqual(calls[0]["search_radius"], 64)
+        self.assertEqual(calls[0]["find_limit"], 12)
+        self.assertEqual(calls[0]["max_pages"], 2)
+
+    def test_collect_resource_gives_explicit_log_the_tree_search_budget(self):
+        body = FakeBody()
+        registry = ToolRegistry()
+        register_inventory_tools(registry, body)
+        domain, calls = resource_domain_tool(body)
+        registry.register(domain)
+        ctx, _trace_events = composition_context(body, registry, max_candidates=24)
+
+        result = collect_resource({"item": "oak_log", "count": 1, "constraints": {"radius": 96}}, ctx)
+
+        self.assertTrue(result.success, result)
+        self.assertEqual(calls[0]["search_radius"], 64)
+        self.assertEqual(calls[0]["find_limit"], 12)
+        self.assertEqual(calls[0]["max_pages"], 2)
+
+    def test_collect_resource_counts_equivalent_log_inventory_items(self):
+        body = FakeBody()
+        body.inventory_counts = {"spruce_log": 32, "birch_log": 31, "cherry_log": 1}
+        registry = ToolRegistry()
+        register_inventory_tools(registry, body)
+        ctx, _trace_events = composition_context(body, registry)
+
+        result = collect_resource({"item": "logs", "count": 64}, ctx)
+
+        self.assertTrue(result.success, result)
+        self.assertEqual(result.reason, "already_satisfied")
+        self.assertEqual(result.metrics["after_count"], 64)
+
+    def test_acquisition_collects_generic_logs_without_oak_narrowing(self):
+        plan = resolve_acquisition("logs", 4, {}, acquisition_recipe_lookup)
+
+        self.assertIsInstance(plan, list)
+        self.assertEqual(plan[0].kind, "collect")
+        self.assertEqual(plan[0].item, "logs")
+        self.assertIn("spruce_log", plan[0].detail["expected_drops"])
+        self.assertIn("cherry_log", plan[0].detail["expected_drops"])
+
+    def test_acquisition_existing_non_oak_logs_satisfy_generic_route(self):
+        plan = resolve_acquisition("logs", 4, {"spruce_log": 4}, acquisition_recipe_lookup)
+
+        self.assertEqual(plan, [])
+
+    def test_acquisition_keeps_exact_oak_log_exact(self):
+        plan = resolve_acquisition("oak_log", 4, {}, acquisition_recipe_lookup)
+
+        self.assertIsInstance(plan, list)
+        self.assertEqual(plan[0].kind, "collect")
+        self.assertEqual(plan[0].item, "oak_log")
+        self.assertEqual(plan[0].detail["expected_drops"], ["oak_log"])
+
+    def test_collect_resource_reports_authoritative_partial_progress_as_failure(self):
+        body = FakeBody()
+        registry = ToolRegistry()
+        register_inventory_tools(registry, body)
+        domain, _calls = resource_domain_tool(
+            body,
+            {
+                "success": False,
+                "reason": "resource_domain_budget_exhausted",
+                "can_retry": True,
+                "delta": 1,
+            },
+        )
+        registry.register(domain)
+        ctx, _trace_events = composition_context(body, registry, max_candidates=3)
+
+        result = collect_resource({"item": "dirt", "count": 2}, ctx)
+
+        self.assertFalse(result.success, result)
+        self.assertEqual(result.reason, "partial_budget_exhausted")
+        self.assertEqual(result.metrics["after_count"], 1)
+        self.assertEqual(result.metrics["collected_delta"], 1)
+        self.assertEqual(result.metrics["remaining_count"], 1)
+        self.assertFalse(result.metrics["complete"])
+
+    def test_collect_resource_keeps_budget_failure_without_inventory_progress(self):
+        body = FakeBody()
+        registry = ToolRegistry()
+        register_inventory_tools(registry, body)
+        domain, _calls = resource_domain_tool(
+            body,
+            {"success": False, "reason": "resource_domain_budget_exhausted", "can_retry": True},
+        )
+        registry.register(domain)
+        ctx, _trace_events = composition_context(body, registry, max_candidates=3)
+
+        result = collect_resource({"item": "dirt", "count": 2}, ctx)
+
+        self.assertFalse(result.success, result)
+        self.assertEqual(result.reason, "partial_budget_exhausted")
+        self.assertEqual(result.metrics["collected_delta"], 0)
+
+    def test_collect_resource_preserves_explicit_resource_navigation_terminal(self):
+        body = FakeBody()
+        registry = ToolRegistry()
+        register_inventory_tools(registry, body)
+        domain, _calls = resource_domain_tool(
+            body,
+            {"success": False, "reason": "resource_navigation_no_path", "can_retry": True},
+        )
+        registry.register(domain)
+        ctx, _trace_events = composition_context(body, registry, max_candidates=3)
+
+        result = collect_resource({"item": "dirt", "count": 2}, ctx)
+
+        self.assertFalse(result.success, result)
+        self.assertEqual(result.reason, "resource_navigation_no_path")
+        self.assertTrue(result.can_retry)
+
+    def test_collect_resource_preserves_recovered_no_path_body_terminal(self):
+        body = FakeBody()
+        registry = ToolRegistry()
+        register_inventory_tools(registry, body)
+        domain, _calls = resource_domain_tool(
+            body,
+            {
+                "success": False,
+                "reason": "resource_navigation_no_path",
+                "can_retry": True,
+                "metrics": {
+                    "navigation_failure_reasons": [
+                        "recovery_exhausted:no_path",
+                        "recovery_exhausted:no_path",
+                    ],
+                    "navigation_fallback_attempts": 2,
+                },
+            },
+        )
+        registry.register(domain)
+        ctx, _trace_events = composition_context(body, registry, max_candidates=3)
+
+        result = collect_resource({"item": "dirt", "count": 2}, ctx)
+
+        self.assertFalse(result.success, result)
+        self.assertEqual(result.reason, "resource_navigation_no_path")
+        self.assertEqual(
+            result.metrics["last_failure"]["result"]["metrics"]["navigation_failure_reasons"],
+            ["recovery_exhausted:no_path", "recovery_exhausted:no_path"],
+        )
+
+    def test_collect_resource_preserves_route_progress_navigation_terminal(self):
+        body = FakeBody()
+        registry = ToolRegistry()
+        register_inventory_tools(registry, body)
+        domain, _calls = resource_domain_tool(
+            body,
+            {
+                "success": False,
+                "reason": "resource_navigation_segment_budget_exhausted",
+                "can_retry": True,
+                "metrics": {
+                    "navigation_failure_reasons": ["segment_budget_exhausted"],
+                    "candidate_blacklist": [],
+                },
+            },
+        )
+        registry.register(domain)
+        ctx, _trace_events = composition_context(body, registry, max_candidates=3)
+
+        result = collect_resource({"item": "dirt", "count": 2}, ctx)
+
+        self.assertFalse(result.success, result)
+        self.assertEqual(result.reason, "resource_navigation_segment_budget_exhausted")
+        self.assertTrue(result.can_retry)
+        self.assertEqual(result.metrics["last_failure"]["reason"], "resource_navigation_segment_budget_exhausted")
+
+    def test_collect_resource_preserves_explicit_staged_total_and_species(self):
+        body = FakeBody()
+        body.inventory_counts = {"oak_log": 18}
+        registry = ToolRegistry()
+        register_inventory_tools(registry, body)
+        domain, calls = resource_domain_tool(
+            body,
+            {"success": False, "reason": "resource_candidate_domain_exhausted", "can_retry": True},
+        )
+        registry.register(domain)
+        ctx, _trace_events = composition_context(body, registry, max_candidates=1)
+        ctx.weld_context.goal_text = "collect 64 logs"
+
+        result = collect_resource({"item": "oak_log", "count": 46}, ctx)
+
+        self.assertFalse(result.success, result)
+        self.assertEqual(result.metrics["target_count"], 46)
+        self.assertEqual(result.metrics["remaining_count"], 28)
+        self.assertEqual(calls[0]["remaining_count"], 28)
+        self.assertEqual(result.metrics["requested_item"], "oak_log")
+        self.assertEqual(calls[0]["block_types"], ["oak_log"])
+        self.assertNotIn("goal_target_count", result.metrics)
+
+    def test_collect_resource_does_not_narrow_explicit_family_from_goal(self):
+        body = FakeBody()
+        registry = ToolRegistry()
+        register_inventory_tools(registry, body)
+        domain, calls = resource_domain_tool(
+            body,
+            {"success": False, "reason": "resource_candidate_domain_exhausted", "can_retry": True},
+        )
+        registry.register(domain)
+        ctx, _trace_events = composition_context(body, registry, max_candidates=1)
+        ctx.weld_context.goal_text = "collect 64 oak_log"
+
+        result = collect_resource({"item": "logs", "count": 64}, ctx)
+
+        self.assertFalse(result.success, result)
+        self.assertEqual(result.metrics["requested_item"], "logs")
+        self.assertEqual(calls[0]["block_types"], list(resource_plan_for("logs").block_types))
+
+    def test_collect_resource_satisfied_stage_is_independent_of_goal_wording(self):
+        for goal in ("collect 64 logs", "gather oak_log 64", "collect 64 unknown_resource",
+                     "\u6536\u96c6 64 \u4e2a\u539f\u6728", "prepare for the End", ""):
+            with self.subTest(goal=goal):
+                body = FakeBody()
+                body.inventory_counts = {"oak_log": 4}
+                registry = ToolRegistry()
+                register_inventory_tools(registry, body)
+                domain, calls = resource_domain_tool(body, {
+                    "success": False, "reason": "resource_candidate_domain_exhausted",
+                    "can_retry": False,
+                })
+                registry.register(domain)
+                ctx, _trace_events = composition_context(body, registry, max_candidates=1)
+                ctx.weld_context.goal_text = goal
+
+                result = collect_resource({"item": "oak_log", "count": 4}, ctx)
+
+                self.assertTrue(result.success, result)
+                self.assertEqual(result.metrics["target_count"], 4)
+                self.assertEqual(result.metrics["remaining_count"], 0)
+                self.assertEqual(result.metrics["collected_delta"], 0)
+                self.assertEqual(calls, [])
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+class ReadStateClockTests(unittest.TestCase):
+    def test_read_state_says_the_time_of_day(self):
+        from dataclasses import replace
+        from minebot.app.phase1_runtime import _read_state
+
+        class Night:
+            def get_state(self):
+                return replace(state(), time=24000 * 2 + 18000)
+
+        metrics = _read_state(Night()).metrics
+        self.assertEqual((metrics["time_of_day"], metrics["daylight"]), (18000, "It is night."))

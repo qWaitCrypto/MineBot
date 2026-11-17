@@ -1,0 +1,516 @@
+import asyncio
+import unittest
+
+from agents.run_config import CallModelData, ModelInputData
+
+from minebot.app.conversation import (
+    CONVERSATION_WINDOW_TURNS,
+    MODEL_INPUT_MAX_CHARS,
+    MODEL_INPUT_MAX_ITEMS,
+    WindowedConversationSession,
+    bounded_model_input,
+    bounded_model_input_items,
+    bounded_session_input,
+    model_input_chars,
+)
+from minebot.app.runner import AgentRuntime
+from minebot.app.session import AgentSession, SessionCommand
+from minebot.app.wiring import AgentRuntimeParts
+from minebot.brain.context import AgentContext
+from minebot.brain.lifecycle import LifecycleController
+from minebot.brain.modes import ModeRuntime
+from minebot.brain.progress import ProgressAuthority
+from minebot.brain.registry import ToolRegistry
+
+from tests.unit.test_agent_runner_spine import FakeBody
+
+
+class AgentContextTests(unittest.TestCase):
+    def test_goal_is_visible_on_every_turn_independent_of_cadence(self):
+        ctx = AgentContext(system_prompt="sys", goal_text="collect 64 logs", goal_reinject_every=99)
+
+        for _ in range(4):
+            ctx.begin_turn()
+            self.assertIn("GOAL: collect 64 logs", ctx.turn_preamble())
+
+    def test_session_window_keeps_recent_user_and_assistant_messages(self):
+        ctx = AgentContext(
+            system_prompt="sys",
+            goal_text="collect",
+            language="Chinese",
+            max_session_messages=3,
+        )
+
+        ctx.observe_user_message("  collect 64 logs  ")
+        ctx.observe_assistant_message("I will start.")
+        ctx.observe_user_message("pause please")
+        ctx.observe_user_message("continue")
+        ctx.begin_turn()
+        preamble = ctx.turn_preamble()
+
+        self.assertIn("SESSION: turn=1 language=Chinese", preamble)
+        self.assertIn("SESSION_MESSAGES:", preamble)
+        self.assertNotIn("collect 64 logs", [message for _, message in ctx.session_messages()])
+        self.assertEqual(
+            ctx.session_messages(),
+            [
+                ("assistant", "I will start."),
+                ("user", "pause please"),
+                ("user", "continue"),
+            ],
+        )
+
+    def test_set_goal_resets_turn_and_keeps_new_goal_visible(self):
+        ctx = AgentContext(system_prompt="sys", goal_text="old")
+        ctx.begin_turn()
+        ctx.begin_turn()
+        ctx.set_goal("new goal")
+
+        self.assertIn("GOAL: new goal", ctx.turn_preamble())
+        self.assertNotIn("GOAL: old", ctx.turn_preamble())
+
+    def test_pending_turn_input_is_acknowledged_by_snapshot(self):
+        ctx = AgentContext(system_prompt="sys", goal_text="")
+        ctx.observe_user_message("hello")
+        ctx.observe_system_message("previous goal completed")
+
+        turn_input, count = ctx.pending_turn_input(fallback="fallback")
+        ctx.observe_user_message("newer message")
+        ctx.acknowledge_turn_input(count)
+
+        self.assertIn("USER_MESSAGE: hello", turn_input)
+        self.assertIn("HARNESS_FACT: previous goal completed", turn_input)
+        self.assertEqual(
+            ctx.pending_turn_input(fallback="fallback"),
+            ("newer message", 1),
+        )
+
+    def test_pending_turn_input_never_uses_history_window_as_a_drop_limit(self):
+        ctx = AgentContext(system_prompt="sys", goal_text="", max_session_messages=2)
+        for index in range(5):
+            ctx.observe_user_message(f"message-{index}")
+
+        turn_input, count = ctx.pending_turn_input(fallback="fallback")
+
+        self.assertEqual(count, 5)
+        self.assertIn("USER_MESSAGE: message-0", turn_input)
+        self.assertIn("USER_MESSAGE: message-4", turn_input)
+        self.assertEqual(
+            ctx.session_messages(),
+            [("user", "message-3"), ("user", "message-4")],
+        )
+
+    def test_minecraft_sender_is_preserved_as_structured_sdk_input(self):
+        ctx = AgentContext(system_prompt="sys", goal_text="")
+
+        ctx.observe_user_message("  follow me  ", sender=" Steve\n ")
+        turn_input, count = ctx.pending_turn_input(fallback="fallback")
+
+        self.assertEqual(count, 1)
+        self.assertTrue(turn_input.startswith("MINECRAFT_CHAT: "))
+        self.assertIn('"sender": "Steve"', turn_input)
+        self.assertIn('"message": "follow me"', turn_input)
+        self.assertEqual(ctx.session_messages(), [("user", "Steve: follow me")])
+
+    def test_persisted_task_artifact_is_injected_separately_from_conversation(self):
+        ctx = AgentContext(system_prompt="sys", goal_text="prepare for the End")
+        ctx.observe_task(
+            {
+                "active": True,
+                "task": {"task_id": "task-1", "revision": 3, "status": "running"},
+                "plan": {"revision": 2, "steps": [{"title": "get iron", "status": "in_progress"}]},
+            }
+        )
+
+        ctx.begin_turn()
+        preamble = ctx.turn_preamble()
+
+        self.assertIn("TASK_ARTIFACT:", preamble)
+        self.assertIn('"task_id": "task-1"', preamble)
+        self.assertIn("TASK_RUNTIME_CONTRACT:", preamble)
+        self.assertIn("checkpoint_task", preamble)
+        self.assertNotIn("TASK_ARTIFACT", ctx.pending_turn_input(fallback="new input")[0])
+
+    def test_compacted_conversation_summary_is_injected_without_replacing_task_facts(self):
+        ctx = AgentContext(system_prompt="sys", goal_text="prepare for the End")
+        ctx.observe_task(
+            {
+                "active": True,
+                "task": {"task_id": "task-1", "revision": 3, "status": "running"},
+            }
+        )
+        ctx.observe_conversation_summary(
+            {
+                "archive_revision": 9,
+                "total_closed_turns": 18,
+                "live_turns": 12,
+                "compacted_turns": 6,
+                "covered_turn_handles": ["conversation:scope:turn:1"],
+                "complete": True,
+            }
+        )
+
+        ctx.begin_turn()
+        preamble = ctx.turn_preamble()
+
+        self.assertIn("TASK_ARTIFACT:", preamble)
+        self.assertIn("CONVERSATION_SUMMARY:", preamble)
+        self.assertIn('"archive_revision": 9', preamble)
+        self.assertIn('"task_id": "task-1"', preamble)
+        budget = ctx.budget_facts()
+        self.assertTrue(budget["task_artifact_present"])
+        self.assertTrue(budget["conversation_summary_complete"])
+        self.assertEqual(budget["conversation_archive_revision"], 9)
+        self.assertEqual(budget["conversation_compacted_turns"], 6)
+
+    def test_skill_preamble_is_the_catalog_only_never_a_body(self):
+        ctx = AgentContext(system_prompt="sys", goal_text="prepare tools")
+        ctx.observe_skills(
+            catalog_revision="sha256:catalog",
+            descriptors=[
+                {
+                    "name": "resource-progression",
+                    "description": "Acquire prerequisites when a goal needs materials.",
+                    "origin": "builtin",
+                    "version": "sha256:resource",
+                }
+            ],
+            available_rendered=(
+                "AVAILABLE_SKILLS catalog_revision=sha256:catalog complete=true\n"
+                "- resource-progression origin=builtin head_version=sha256:resource loadable=true: "
+                "Acquire prerequisites when a goal needs materials."
+            ),
+            active=[
+                {
+                    "name": "resource-progression",
+                    "version": "sha256:resource",
+                    "instructions": "# Resource Progression\n\n## Method\nUse live truth.",
+                }
+            ],
+        )
+
+        preamble = ctx.skill_preamble()
+        budget = ctx.budget_facts()
+
+        self.assertIn("AVAILABLE_SKILLS", preamble)
+        # v2: a body in effect is a mounted conversation message, never here.
+        self.assertNotIn("ACTIVE_SKILLS", preamble)
+        self.assertNotIn("BEGIN_SKILL", preamble)
+        self.assertNotIn("# Resource Progression", preamble)
+        self.assertEqual(budget["skill_catalog_revision"], "sha256:catalog")
+        self.assertEqual(budget["skill_descriptor_count"], 1)
+        self.assertEqual(budget["active_skill_count"], 1)
+
+    def test_sdk_session_window_drops_only_complete_old_turns(self):
+        history = []
+        for turn in range(CONVERSATION_WINDOW_TURNS + 2):
+            history.extend(
+                [
+                    {"role": "user", "content": f"turn-{turn}"},
+                    {"type": "function_call", "call_id": f"call-{turn}"},
+                    {"type": "function_call_output", "call_id": f"call-{turn}"},
+                    {"role": "assistant", "content": f"done-{turn}"},
+                ]
+            )
+
+        bounded = bounded_session_input(history, [])
+
+        self.assertEqual(bounded[0]["content"], "turn-2")
+        self.assertEqual(len([item for item in bounded if item.get("role") == "user"]), CONVERSATION_WINDOW_TURNS)
+        self.assertEqual(
+            {item["call_id"] for item in bounded if item.get("type") == "function_call"},
+            {item["call_id"] for item in bounded if item.get("type") == "function_call_output"},
+        )
+
+    def test_windowed_sdk_session_storage_is_bounded_by_complete_turn(self):
+        session = WindowedConversationSession(max_turns=2)
+
+        async def scenario():
+            for turn in range(3):
+                await session.add_items(
+                    [
+                        {"role": "user", "content": f"turn-{turn}"},
+                        {"type": "function_call", "call_id": f"call-{turn}"},
+                        {"type": "function_call_output", "call_id": f"call-{turn}"},
+                        {"role": "assistant", "content": f"done-{turn}"},
+                    ]
+                )
+            return await session.get_items()
+
+        items = asyncio.run(scenario())
+
+        self.assertEqual(items[0]["content"], "turn-1")
+        self.assertEqual(items[-1]["content"], "done-2")
+        self.assertEqual(len(items), 8)
+
+    def test_windowed_sdk_session_item_limit_never_splits_latest_tool_turn(self):
+        session = WindowedConversationSession(max_turns=2)
+
+        async def scenario():
+            await session.add_items(
+                [
+                    {"role": "user", "content": "question"},
+                    {"type": "function_call", "call_id": "call-1"},
+                    {"type": "function_call_output", "call_id": "call-1"},
+                    {"role": "assistant", "content": "answer"},
+                ]
+            )
+            return await session.get_items(limit=2)
+
+        items = asyncio.run(scenario())
+
+        self.assertEqual(len(items), 4)
+        self.assertEqual(items[0]["role"], "user")
+        self.assertEqual(items[-1]["role"], "assistant")
+
+    def test_active_sdk_run_window_keeps_goal_and_complete_recent_tool_pairs(self):
+        items = [{"role": "user", "content": "collect resources and keep going"}]
+        for turn in range(60):
+            items.extend(
+                [
+                    {"type": "message", "role": "assistant", "content": f"step-{turn}"},
+                    {
+                        "type": "function_call",
+                        "call_id": f"call-{turn}",
+                        "name": "read_state",
+                        "arguments": "{}",
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": f"call-{turn}",
+                        "output": "x" * 900,
+                    },
+                ]
+            )
+
+        bounded = bounded_model_input_items(items)
+
+        self.assertLessEqual(len(bounded), MODEL_INPUT_MAX_ITEMS)
+        self.assertLessEqual(model_input_chars(bounded), MODEL_INPUT_MAX_CHARS)
+        self.assertEqual(bounded[0]["role"], "user")
+        self.assertEqual(bounded[0]["content"], "collect resources and keep going")
+        calls = {item["call_id"] for item in bounded if item.get("type") == "function_call"}
+        outputs = {
+            item["call_id"] for item in bounded if item.get("type") == "function_call_output"
+        }
+        self.assertEqual(calls, outputs)
+        self.assertIn("call-59", calls)
+
+    def test_model_input_filter_marks_compaction_without_changing_current_goal(self):
+        items = [{"role": "user", "content": "reach the surface"}]
+        for turn in range(50):
+            items.extend(
+                [
+                    {
+                        "type": "function_call",
+                        "call_id": f"call-{turn}",
+                        "name": "read_state",
+                        "arguments": "{}",
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": f"call-{turn}",
+                        "output": "observed" * 200,
+                    },
+                ]
+            )
+        data = CallModelData(
+            model_data=ModelInputData(input=items, instructions="CURRENT_TASK: reach the surface"),
+            agent=None,
+            context=None,
+        )
+
+        filtered = bounded_model_input(data, live_context="GOAL: reach the surface")
+
+        self.assertEqual(filtered.input[0]["content"], "reach the surface")
+        # Instructions are the cached head of the request: never touched.
+        self.assertEqual(filtered.instructions, "CURRENT_TASK: reach the surface")
+        context = filtered.input[-1]
+        self.assertEqual(context["role"], "user")
+        self.assertTrue(context["content"].startswith("CURRENT_CONTEXT:\n"))
+        self.assertIn("GOAL: reach the surface", context["content"])
+        self.assertIn("MODEL_INPUT_WINDOW complete=true", context["content"])
+
+    def test_model_input_filter_leaves_unbounded_input_without_live_context_alone(self):
+        data = CallModelData(
+            model_data=ModelInputData(input=[{"role": "user", "content": "hi"}], instructions="sys"),
+            agent=None,
+            context=None,
+        )
+
+        self.assertIs(bounded_model_input(data), data.model_data)
+
+    def test_model_input_filter_appends_one_volatile_item_after_history(self):
+        history = [{"role": "user", "content": "hi"}]
+        data = CallModelData(
+            model_data=ModelInputData(input=history, instructions="sys"), agent=None, context=None
+        )
+
+        first = bounded_model_input(data, live_context="STATE: pos=(1, 2, 3)")
+        second = bounded_model_input(data, live_context="STATE: pos=(9, 9, 9)")
+
+        self.assertEqual(history, [{"role": "user", "content": "hi"}])  # caller's list untouched
+        self.assertEqual(first.input[:-1], second.input[:-1])  # the cacheable prefix is identical
+        self.assertNotEqual(first.input[-1], second.input[-1])
+
+
+def build_parts(goal: str, calls: list[str]) -> AgentRuntimeParts:
+    body = FakeBody()
+
+    async def fake_runner(agent, input_text, *, context=None, **kwargs):
+        calls.append(f"{context.instruction_preamble}\nINPUT: {input_text}")
+        return {"ok": True}
+
+    context = AgentContext(system_prompt="sys", goal_text=goal, language="Chinese")
+    lifecycle = LifecycleController()
+    modes = ModeRuntime()
+    authority = ProgressAuthority()
+    registry = ToolRegistry()
+    runtime = AgentRuntime(
+        body=body,
+        registry=registry,
+        agent_context=context,
+        lifecycle=lifecycle,
+        mode_runtime=modes,
+        authority=authority,
+        runner_run=fake_runner,
+    )
+    return AgentRuntimeParts(
+        runtime=runtime,
+        registry=registry,
+        context=context,
+        lifecycle=lifecycle,
+        modes=modes,
+        authority=authority,
+    )
+
+
+def build_speaking_parts(goal: str, calls: list[str]) -> AgentRuntimeParts:
+    body = FakeBody()
+
+    class SpeechRunResult:
+        final_output = "I will continue collecting logs."
+
+        def to_input_list(self):
+            return []
+
+    async def fake_runner(agent, input_text, *, context=None, **kwargs):
+        calls.append(f"{context.instruction_preamble}\nINPUT: {input_text}")
+        return SpeechRunResult()
+
+    context = AgentContext(system_prompt="sys", goal_text=goal, language="Chinese")
+    lifecycle = LifecycleController()
+    modes = ModeRuntime()
+    authority = ProgressAuthority()
+    registry = ToolRegistry()
+    runtime = AgentRuntime(
+        body=body,
+        registry=registry,
+        agent_context=context,
+        lifecycle=lifecycle,
+        mode_runtime=modes,
+        authority=authority,
+        runner_run=fake_runner,
+    )
+    return AgentRuntimeParts(
+        runtime=runtime,
+        registry=registry,
+        context=context,
+        lifecycle=lifecycle,
+        modes=modes,
+        authority=authority,
+    )
+
+
+class AgentContextRuntimeTests(unittest.TestCase):
+    def test_runtime_reuses_one_sdk_session_and_separates_input_from_instructions(self):
+        body = FakeBody()
+        calls = []
+
+        async def fake_runner(agent, input_text, *, context=None, session=None, **kwargs):
+            calls.append((input_text, context.instruction_preamble, session))
+            return {"ok": True}
+
+        context = AgentContext(system_prompt="sys", goal_text="collect 64 logs")
+        context.observe_user_message("start collecting")
+        context.observe_task({"active": True, "task": {"task_id": "task-1", "revision": 2}})
+        context.observe_conversation_summary(
+            {
+                "archive_revision": 4,
+                "total_closed_turns": 15,
+                "compacted_turns": 3,
+                "complete": True,
+            }
+        )
+        runtime = AgentRuntime(
+            body=body,
+            registry=ToolRegistry(),
+            agent_context=context,
+            lifecycle=LifecycleController(),
+            mode_runtime=ModeRuntime(),
+            authority=ProgressAuthority(),
+            runner_run=fake_runner,
+        )
+
+        asyncio.run(runtime.run_turn())
+        context.observe_user_message("use oak if possible")
+        asyncio.run(runtime.run_turn())
+
+        self.assertEqual(calls[0][0], "start collecting")
+        self.assertEqual(calls[1][0], "use oak if possible")
+        self.assertIn("GOAL: collect 64 logs", calls[0][1])
+        self.assertNotIn("SESSION_MESSAGES:", calls[0][1])
+        self.assertIs(calls[0][2], calls[1][2])
+        self.assertIs(calls[0][2], runtime.conversation_session)
+        budgets = [
+            event for event in runtime.trace.snapshot() if event["event"] == "context_budget"
+        ]
+        self.assertEqual(len(budgets), 2)
+        self.assertTrue(budgets[0]["task_artifact_present"])
+        self.assertTrue(budgets[0]["conversation_summary_complete"])
+        self.assertEqual(budgets[0]["conversation_archive_revision"], 4)
+        self.assertEqual(budgets[0]["conversation_compacted_turns"], 3)
+        self.assertGreater(budgets[0]["estimated_context_chars"], 0)
+        runtime.close()
+
+    def test_runner_advances_context_turn_once_per_outer_turn(self):
+        calls: list[str] = []
+        parts = build_parts("collect 64 logs", calls)
+
+        asyncio.run(parts.runtime.run_turn())
+        asyncio.run(parts.runtime.run_turn())
+
+        self.assertEqual(parts.context._turn, 2)
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(all("GOAL: collect 64 logs" in call for call in calls))
+
+    def test_session_messages_reach_next_model_turn_context(self):
+        calls: list[str] = []
+        session = AgentSession(lambda goal: build_parts(goal, calls))
+
+        session.submit(SessionCommand.start("collect 64 logs"))
+        asyncio.run(session.step())
+        session.submit(SessionCommand.message("actually prefer oak logs"))
+        asyncio.run(session.step())
+
+        self.assertNotIn("SESSION_MESSAGES:", calls[1])
+        self.assertIn("INPUT: actually prefer oak logs", calls[1])
+        self.assertIn(("user", "actually prefer oak logs"), session.parts.context.session_messages())
+        self.assertTrue(all("GOAL: collect 64 logs" in call for call in calls))
+
+    def test_assistant_visible_output_reaches_next_model_turn_context(self):
+        calls: list[str] = []
+        parts = build_speaking_parts("collect 64 logs", calls)
+
+        asyncio.run(parts.runtime.run_turn())
+        asyncio.run(parts.runtime.run_turn())
+
+        self.assertNotIn("I will continue collecting logs.", calls[1])
+        self.assertIn(
+            ("assistant", "I will continue collecting logs."),
+            parts.context.session_messages(),
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()
